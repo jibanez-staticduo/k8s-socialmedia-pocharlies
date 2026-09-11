@@ -92,8 +92,8 @@ CREATE TABLE message_embeddings (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_message_embeddings_vector ON message_embeddings 
-  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- Sin indice ANN: pgvector (ivfflat/hnsw) limita a 2000 dimensiones y
+-- qwen3-embedding-8b emite 4096. Busqueda exacta por escaneo secuencial.
 CREATE INDEX idx_message_embeddings_message ON message_embeddings(message_id);
 
 -- Draft Replies
