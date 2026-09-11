@@ -30,7 +30,7 @@ export class SearchService {
   private openai: OpenAI;
   private dbClient: Pool;
   private logger: pino.Logger;
-  private readonly EMBEDDING_MODEL = 'text-embedding-3-small';
+  private readonly EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
 
   constructor(openaiApiKey: string, dbClient: Pool, _encryptionKey: string, llmBaseUrl?: string) {
     this.openai = new OpenAI({

@@ -86,7 +86,7 @@ CREATE INDEX idx_attachments_storage_key ON attachments(storage_key);
 CREATE TABLE message_embeddings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  embedding vector(1536) NOT NULL,
+  embedding vector(4096) NOT NULL,
   model VARCHAR(100) NOT NULL,
   chunk_index INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT NOW()
