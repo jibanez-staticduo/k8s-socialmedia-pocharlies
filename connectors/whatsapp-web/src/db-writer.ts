@@ -441,7 +441,7 @@ export async function ensureHistoryTables(): Promise<void> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_message_keys (
       wa_message_id text PRIMARY KEY REFERENCES messages(wa_message_id) ON DELETE CASCADE,
-      conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      conversation_id text NOT NULL,
       remote_jid text NOT NULL,
       from_me boolean NOT NULL,
       participant_jid text,
@@ -456,7 +456,7 @@ export async function ensureHistoryTables(): Promise<void> {
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_sync_state (
-      conversation_id text PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+      conversation_id text PRIMARY KEY,
       oldest_message_id text,
       oldest_timestamp timestamptz,
       newest_timestamp timestamptz,
