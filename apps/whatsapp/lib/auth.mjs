@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as oidcDefault from 'openid-client';
 import { fail, authenticate as basicAuthenticate } from './security.mjs';
@@ -122,6 +122,7 @@ export class AppAuth {
     if (!this.oidcEnabled) return;
     const authDir = join(dataDir, 'auth');
     await mkdir(authDir, { recursive: true, mode: 0o700 });
+    await chmod(authDir, 0o700);
     this.sessionStorePath = join(authDir, 'oidc-sessions.json');
     let stored;
     try { stored = JSON.parse(await readFile(this.sessionStorePath, 'utf8')); }
@@ -145,6 +146,7 @@ export class AppAuth {
     this.pendingSave = this.pendingSave.catch(() => {}).then(async () => {
       const temp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
       await writeFile(temp, contents, { mode: 0o600 });
+      await chmod(temp, 0o600);
       await rename(temp, path);
     });
     await this.pendingSave;

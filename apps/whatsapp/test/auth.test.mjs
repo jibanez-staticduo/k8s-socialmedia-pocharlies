@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createSign } from 'node:crypto';
 import http from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { calculatePKCECodeChallenge } from 'openid-client';
@@ -182,6 +182,8 @@ test('30-day OIDC session survives app restart and logout remains durable', asyn
   const original = await fixture(t, { ttl: '2592000' });
   const loginResult = await login(original);
   assert.match(loginResult.callback.headers.get('set-cookie'), /Max-Age=2592000/);
+  assert.equal((await stat(join(original.dir, 'auth'))).mode & 0o777, 0o700);
+  assert.equal((await stat(join(original.dir, 'auth', 'oidc-sessions.json'))).mode & 0o777, 0o600);
   const req = { headers: { cookie: `__Host-wa_session=${loginResult.session}` } };
   const reloaded = new AppAuth({ env: original.env, fetchImpl: original.fetchImpl });
   await reloaded.init(original.dir);
