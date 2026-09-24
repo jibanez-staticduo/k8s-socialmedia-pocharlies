@@ -507,3 +507,46 @@ test('model catalog excludes non-chat metadata and exposes configured default', 
   const response = await request('/api/models');
   assert.deepEqual(await response.json(), { models: [{ id: 'chat-a' }], defaultModel: 'chat-a' });
 });
+
+// Regression: the official Hermes API reports completion/continuity through custom headers on
+// Chat Completions OR through the JSON body on the Responses API (id + status), and a fully
+// completed Chat Completion never sets X-Hermes-Completed. The adapter must not gate on headers
+// alone and must reject truncated turns signalled only in the body.
+test('completes a Hermes turn from a Responses API body with no Hermes header and preserves previous_response_id', async t => {
+  const upstream = [];
+  const { request } = await fixture(t, { env: { HERMES_DEFAULT_MODEL: 'model-a', HERMES_API_URL: 'http://fedora:8642', HERMES_API_KEY: 'agent-secret' }, fetchImpl: async (url, options) => {
+    upstream.push(options);
+    if (upstream.length === 1) return Response.json({ id: 'resp-123', object: 'response', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'External answer' }] }] });
+    return Response.json({ choices: [{ message: { content: 'Follow-up answer' }, finish_reason: 'stop' }] }, { headers: { 'x-hermes-session-id': 'resp-123' } });
+  } });
+  const base = { account: 'personal', chat: 'personal-chat', message: 'Help' };
+  const first = await request('/api/ai/chat', base); assert.equal(first.status, 200);
+  assert.equal((await first.json()).text, 'External answer');
+  const second = await request('/api/ai/chat', { ...base, message: 'Continue' }); assert.equal(second.status, 200);
+  assert.equal((await second.json()).text, 'Follow-up answer');
+  assert.equal(JSON.parse(upstream[1].body).previous_response_id, 'resp-123');
+  const history = await (await request('/api/ai/session?account=personal&chat=personal-chat')).json();
+  assert.deepEqual(history.messages.map(item => item.content), ['Help', 'External answer', 'Continue', 'Follow-up answer']);
+});
+
+test('rejects a truncated Hermes turn signalled only in the body even when the session header is present', async t => {
+  const { request } = await fixture(t, { env: { HERMES_DEFAULT_MODEL: 'model-a', HERMES_API_URL: 'http://fedora:8642', HERMES_API_KEY: 'agent-secret' }, fetchImpl: async () => Response.json({ choices: [{ message: { content: 'Truncated answer' }, finish_reason: 'length' }], hermes: { completed: false, partial: true } }, { headers: { 'x-hermes-session-id': 'hermes-1' } }) });
+  const response = await request('/api/ai/chat', { account: 'personal', chat: 'personal-chat', message: 'Help' });
+  assert.equal(response.status, 502);
+  assert.match((await response.json()).error, /did not complete the session turn/);
+  assert.deepEqual((await (await request('/api/ai/session?account=personal&chat=personal-chat')).json()).messages, []);
+});
+
+test('honors an explicit X-Hermes-Completed false header on a completed-looking body', async t => {
+  const { request } = await fixture(t, { env: { HERMES_DEFAULT_MODEL: 'model-a', HERMES_API_URL: 'http://fedora:8642', HERMES_API_KEY: 'agent-secret' }, fetchImpl: async () => Response.json({ choices: [{ message: { content: 'Answer' }, finish_reason: 'stop' }] }, { headers: { 'x-hermes-session-id': 'hermes-1', 'x-hermes-completed': 'false' } }) });
+  assert.equal((await request('/api/ai/chat', { account: 'personal', chat: 'personal-chat', message: 'Help' })).status, 502);
+});
+
+test('omits provider and previous_response_id when unconfigured so the external Hermes agent uses its own', async t => {
+  let body;
+  const { request } = await fixture(t, { env: { HERMES_DEFAULT_MODEL: 'hermes-agent', HERMES_API_URL: 'http://fedora:8642', HERMES_API_KEY: 'agent-secret' }, fetchImpl: async (_url, options) => { body = JSON.parse(options.body); return Response.json({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] }, { headers: { 'x-hermes-session-id': 'h' } }); } });
+  assert.equal((await request('/api/ai/chat', { account: 'personal', chat: 'personal-chat', message: 'Help' })).status, 200);
+  assert.equal(body.model, 'hermes-agent');
+  assert.equal(body.provider, undefined);
+  assert.equal('previous_response_id' in body, false);
+});
