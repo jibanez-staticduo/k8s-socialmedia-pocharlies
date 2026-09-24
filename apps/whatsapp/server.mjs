@@ -317,6 +317,21 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     );
     return [conversation.id, ...rows.map(row => row.id)];
   }
+  async function hermesSessionFor(account, conversation) {
+    const chat = conversation.id;
+    if (!(await sessions.list(account.accountId, chat, false)).length) {
+      const aliases = (await conversationReadIds(account, conversation)).filter(id => id !== chat);
+      const legacy = (await Promise.all(aliases.map(id => sessions.list(account.accountId, id, false))))
+        .flat().sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))[0];
+      if (legacy) {
+        const session = await sessions.read(legacy.id);
+        session.chat = chat;
+        await sessions.save(session);
+        return session;
+      }
+    }
+    return sessions.canonical(account.accountId, chat, false);
+  }
   async function messageFor(account, chat, messageId) {
     const conversation = await conversationFor(account, chat);
     const readIds = await conversationReadIds(account, conversation);
@@ -1505,17 +1520,18 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (req.method === 'GET' && path === '/api/ai/sessions') {
         if (url.searchParams.get('global') === 'true') throw fail(400, 'A WhatsApp chat is required');
         const a = accountFor(url.searchParams.get('account')); const global = false; const chat = url.searchParams.get('chat');
-        await conversationFor(a, chat);
-        const session = await sessions.canonical(a.accountId, chat, global);
+        const conversation = await conversationFor(a, chat);
+        const session = await hermesSessionFor(a, conversation);
         return json(200, { sessions: [{ id: session.id, title: session.title }] });
       }
       if (req.method === 'GET' && path === '/api/ai/session') {
         if (url.searchParams.get('global') === 'true') throw fail(400, 'A WhatsApp chat is required');
         const a = accountFor(url.searchParams.get('account'));
         const global = false;
-        const chat = url.searchParams.get('chat');
-        await conversationFor(a, chat);
-        const session = await sessions.canonical(a.accountId, chat, global);
+        const requestedChat = url.searchParams.get('chat');
+        const conversation = await conversationFor(a, requestedChat);
+        const chat = conversation.id;
+        const session = await hermesSessionFor(a, conversation);
         const requestedId = url.searchParams.get('id');
         if (requestedId && requestedId !== session.id) {
           const requested = await sessions.read(requestedId);
@@ -1526,8 +1542,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (req.method === 'POST' && ['/api/send', '/api/upload', '/api/ai/chat'].includes(path)) {
         const body = await bodyJSON(req); const a = accountFor(body.account);
         if (path === '/api/ai/chat' && body.global === true) throw fail(400, 'A WhatsApp chat is required');
-        const global = false; const chat = body.chat;
+        const global = false; let chat = body.chat;
         const conversation = await conversationFor(a, chat);
+        if (path === '/api/ai/chat') chat = conversation.id;
         const providerChat = conversation ? providerChatId(conversation) : undefined;
         if (path === '/api/send') return json(200, await connector(a, '/messages/send', { conversationId: providerChat, content: required(body.text, 'text', 20000), sendToken: sendToken(body) }));
         if (path === '/api/upload') {
@@ -1561,7 +1578,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         if (body.allowPropose === true && !env.HERMES_CHAT_TOOL_SECRET) throw fail(503, 'Hermes chat tool is not configured');
         const scopeId = sessions.canonicalId(a.accountId, chat, global);
         const result = await sessions.serial(scopeId, async () => {
-          const session = await sessions.canonical(a.accountId, chat, global);
+          const session = await hermesSessionFor(a, conversation);
           if (body.sessionId && body.sessionId !== session.id) {
             const requested = await sessions.read(body.sessionId);
             if (requested.account !== a.accountId || requested.chat !== chat || requested.global !== global) throw fail(404, 'Session not found');

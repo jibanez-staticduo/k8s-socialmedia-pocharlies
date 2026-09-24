@@ -104,7 +104,7 @@ async function fixture(t, { fetchImpl, env = {}, db } = {}) {
     headers: { authorization: auth, ...(body === undefined ? {} : { origin: runtimeEnv.APP_PUBLIC_URL, 'content-type': 'application/json' }), ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return { request, calls, database };
+  return { app, request, calls, database };
 }
 
 test('feature mutations enforce Origin and account/chat ownership before provider calls', async t => {
@@ -158,6 +158,62 @@ test('linked PN messages remain in the canonical LID chat and around lookup is a
   assert.equal(outbound.at(-1).body.conversationId, '777@lid');
   assert.equal(outbound.at(-1).body.sendToken, token);
   assert.equal(calls.some(call => Array.isArray(call.args[1]) && call.args[1].includes(lid) && call.args[1].includes(pn)), true);
+});
+
+test('Hermes reuses Daniel session and scopes current-chat capability across PN and LID', async t => {
+  const secret = 'test-hermes-tool-secret';
+  const lid = 'personal:777@lid';
+  const pn = 'personal:34600123456@c.us';
+  const lifecycle = [];
+  const turns = [];
+  const db = fixtureDatabase([]);
+  db.conversations[lid] = { id: lid, account: 'personal', name: 'Daniel', wa_chat_id: 'personal:34600123456@s.whatsapp.net', is_group: false };
+  db.conversations[pn] = { id: pn, account: 'personal', name: '+34600123456', wa_chat_id: null, is_group: false };
+  db.conversations['secondary:34600123456@c.us'] = { id: 'secondary:34600123456@c.us', account: 'secondary', name: 'Other account', wa_chat_id: null, is_group: false };
+  const baseQuery = db.query;
+  db.query = async (sql, args) => {
+    if (/SELECT m\.content, m\.direction, m\.wa_timestamp/.test(sql)) {
+      assert.equal(args[0], 'personal');
+      assert.deepEqual(args[1], [lid, pn]);
+      return { rows: [{ content: 'LID history', direction: 'INBOUND' }, { content: 'PN history', direction: 'INBOUND' }] };
+    }
+    return baseQuery(sql, args);
+  };
+  const { app, request } = await fixture(t, { db, env: {
+    HERMES_DEFAULT_MODEL: 'model-a', HERMES_API_URL: 'http://hermes:8642',
+    HERMES_API_KEY: 'agent-secret', HERMES_CHAT_TOOL_SECRET: secret,
+    HERMES_CHAT_TOOL_INTERNAL_URL: 'http://mcp-internal',
+  }, fetchImpl: async (url, options) => {
+    if (url.startsWith('http://mcp-internal/')) {
+      lifecycle.push({ path: new URL(url).pathname, body: JSON.parse(options.body) });
+      return Response.json({ ok: true });
+    }
+    turns.push({ headers: options.headers, body: JSON.parse(options.body) });
+    return Response.json({ choices: [{ message: { content: 'Daniel answer' } }] }, { headers: { 'x-hermes-session-id': 'hermes-daniel' } });
+  } });
+  const legacyId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  await app.sessions.save({ id: legacyId, account: 'personal', chat: pn, global: false, title: 'Earlier Daniel chat', messages: [
+    { role: 'user', content: 'Earlier question' }, { role: 'assistant', content: 'Earlier answer' },
+  ] });
+  const first = await request('/api/ai/chat', { account: 'personal', chat: pn, message: 'First' });
+  assert.equal(first.status, 200);
+  const firstId = (await first.json()).sessionId;
+  assert.equal(firstId, legacyId);
+  const second = await request('/api/ai/chat', { account: 'personal', chat: lid, message: 'Second', sessionId: firstId });
+  assert.equal(second.status, 200);
+  assert.equal((await second.json()).sessionId, firstId);
+  assert.equal((await (await request(`/api/ai/session?account=personal&chat=${encodeURIComponent(pn)}`)).json()).sessionId, firstId);
+  assert.equal((await (await request(`/api/ai/session?account=personal&chat=${encodeURIComponent(lid)}`)).json()).messages.length, 6);
+  assert.equal((await request(`/api/ai/session?account=secondary&chat=${encodeURIComponent('secondary:34600123456@c.us')}&id=${firstId}`)).status, 404);
+  assert.equal(turns[1].headers['x-hermes-session-id'], 'hermes-daniel');
+  for (const turn of turns) {
+    const system = turn.body.messages[0].content;
+    const token = system.match(/Scoped WhatsApp tool capability for this turn: ([\w.-]+)/)?.[1];
+    assert.equal(JSON.parse(Buffer.from(token.split('.')[0], 'base64url')).chat, lid);
+    assert.match(system, /LID history/);
+    assert.match(system, /PN history/);
+  }
+  assert.deepEqual(lifecycle.map(item => item.body.chat), [lid, lid, lid, lid]);
 });
 
 test('sendToken validation rejects malformed values before delivery', async t => {

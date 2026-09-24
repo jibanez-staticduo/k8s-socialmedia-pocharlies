@@ -549,9 +549,11 @@ export class MCPServer {
       case 'readCurrentChat': {
         const scope = verifyCurrentChatCapability(args.capability, 'read');
         await requireCurrentChatTurn(this.redisClient, scope);
+        const chat = await this.resolveCurrentChatReadScope(scope.account, scope.chat);
         return this.handleWhatsAppGetMessages({
           account: scope.account,
-          chatId: scope.chat,
+          chatId: chat.chatId,
+          conversationIds: chat.conversationIds,
           limit: args.limit || 20,
         });
       }
@@ -2256,8 +2258,54 @@ export class MCPServer {
     return { timestamp: result.rows[0].wa_timestamp, id: String(result.rows[0].id) };
   }
 
+  private async resolveCurrentChatReadScope(
+    account: string,
+    chat: string
+  ): Promise<{ chatId: string; conversationIds: string[] }> {
+    const accountId = normalizeAccount(account, 'whatsapp');
+    let chatId = accountKey(accountId, chat);
+    const found = await this.dbClient.query(
+      `SELECT id, wa_chat_id, COALESCE(is_group, false) AS is_group
+       FROM conversations WHERE account=$1 AND id=$2`,
+      [accountId, chatId]
+    );
+    if (!found.rows.length) throw new McpError(ErrorCode.InvalidRequest, 'Current chat not found');
+    let conversation = found.rows[0];
+    if (!conversation.is_group && /(?:^|:)\d+@(c\.us|s\.whatsapp\.net)$/.test(chatId)) {
+      const linked = await this.dbClient.query(
+        `SELECT lid.id, lid.wa_chat_id FROM conversations lid
+         WHERE lid.account=$1 AND COALESCE(lid.is_group, false)=false AND lid.id ~ '@lid$'
+           AND regexp_replace(lid.wa_chat_id, '@c\\.us$', '@s.whatsapp.net') =
+               regexp_replace($2::text, '@c\\.us$', '@s.whatsapp.net')`,
+        [accountId, chatId]
+      );
+      if (linked.rows.length === 1) {
+        conversation = linked.rows[0];
+        chatId = conversation.id;
+      }
+    }
+    if (conversation.is_group || !/@lid$/.test(chatId) || !conversation.wa_chat_id) {
+      return { chatId, conversationIds: [chatId] };
+    }
+    const aliases = await this.dbClient.query(
+      `SELECT pn.id FROM conversations pn
+       WHERE pn.account=$1 AND COALESCE(pn.is_group, false)=false
+         AND pn.id ~ '[0-9]+@(c\\.us|s\\.whatsapp\\.net)$'
+         AND regexp_replace(pn.id, '@c\\.us$', '@s.whatsapp.net') =
+             regexp_replace($2::text, '@c\\.us$', '@s.whatsapp.net')
+         AND (SELECT COUNT(*) FROM conversations lid
+              WHERE lid.account=$1 AND COALESCE(lid.is_group, false)=false
+                AND lid.id ~ '@lid$'
+                AND regexp_replace(lid.wa_chat_id, '@c\\.us$', '@s.whatsapp.net') =
+                    regexp_replace($2::text, '@c\\.us$', '@s.whatsapp.net')) = 1`,
+      [accountId, conversation.wa_chat_id]
+    );
+    return { chatId, conversationIds: [chatId, ...aliases.rows.map(row => row.id)] };
+  }
+
   private async handleWhatsAppGetMessages(args: {
     chatId: string;
+    conversationIds?: string[];
     limit?: number;
     before?: string;
     after?: string;
@@ -2272,8 +2320,15 @@ export class MCPServer {
     const before = await this.resolveWhatsAppCursor(chatId, args.before);
     const after = await this.resolveWhatsAppCursor(chatId, args.after);
 
-    const where = [`conversation_id = $1`, `platform = 'whatsapp'`, `account = $2`];
-    const params: any[] = [chatId, normalizeAccount(args.account, 'whatsapp')];
+    const where = [
+      args.conversationIds ? `conversation_id = ANY($1::text[])` : `conversation_id = $1`,
+      `platform = 'whatsapp'`,
+      `account = $2`,
+    ];
+    const params: any[] = [
+      args.conversationIds || chatId,
+      normalizeAccount(args.account, 'whatsapp'),
+    ];
 
     if (before) {
       params.push(before.timestamp);

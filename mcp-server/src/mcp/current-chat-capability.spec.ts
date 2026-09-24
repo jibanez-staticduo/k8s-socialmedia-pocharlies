@@ -8,14 +8,16 @@ const CHAT = 'personal:123456789@s.whatsapp.net';
 const TURN = '11111111-1111-4111-8111-111111111111';
 
 function capability(overrides: Record<string, unknown> = {}, secret = SECRET): string {
-  const payload = Buffer.from(JSON.stringify({
-    account: 'personal',
-    chat: CHAT,
-    exp: Math.floor(Date.now() / 1000) + 120,
-    ops: ['read', 'propose'],
-    turn: TURN,
-    ...overrides,
-  })).toString('base64url');
+  const payload = Buffer.from(
+    JSON.stringify({
+      account: 'personal',
+      chat: CHAT,
+      exp: Math.floor(Date.now() / 1000) + 120,
+      ops: ['read', 'propose'],
+      turn: TURN,
+      ...overrides,
+    })
+  ).toString('base64url');
   return `${payload}.${createHmac('sha256', secret).update(payload).digest('base64url')}`;
 }
 
@@ -29,8 +31,9 @@ function server(): any {
   const instance: any = Object.create(MCPServer.prototype);
   const entries = new Map<string, string>();
   instance.redisClient = {
-    get: jest.fn(async (key: string) => key.startsWith('social:hermes:active:')
-      ? TURN : entries.get(key) ?? null),
+    get: jest.fn(async (key: string) =>
+      key.startsWith('social:hermes:active:') ? TURN : (entries.get(key) ?? null)
+    ),
     set: jest.fn(async (key: string, value: string, ...options: unknown[]) => {
       if (options.includes('NX') && entries.has(key)) return null;
       entries.set(key, value);
@@ -55,14 +58,27 @@ describe('Hermes current-chat capability', () => {
     process.env.HERMES_CHAT_ALLOW_PROPOSALS = 'true';
     delete process.env.EMERGENCY_DISABLE_SENDING;
   });
-  afterAll(() => { process.env = previous; });
+  afterAll(() => {
+    process.env = previous;
+  });
 
   test('rejects forged, expired, future, wrong-account and read-only send tokens', () => {
     expect(() => verifyCurrentChatCapability(capability({}, 'wrong'), 'read')).toThrow();
-    expect(() => verifyCurrentChatCapability(capability({ exp: Math.floor(Date.now() / 1000) - 1 }), 'read')).toThrow();
-    expect(() => verifyCurrentChatCapability(capability({ exp: Math.floor(Date.now() / 1000) + 301 }), 'read')).toThrow();
-    expect(() => verifyCurrentChatCapability(capability({ account: 'skirmshop' }), 'read')).toThrow();
-    expect(() => verifyCurrentChatCapability(capability({ chat: 'professional:123456789@s.whatsapp.net' }), 'read')).toThrow();
+    expect(() =>
+      verifyCurrentChatCapability(capability({ exp: Math.floor(Date.now() / 1000) - 1 }), 'read')
+    ).toThrow();
+    expect(() =>
+      verifyCurrentChatCapability(capability({ exp: Math.floor(Date.now() / 1000) + 301 }), 'read')
+    ).toThrow();
+    expect(() =>
+      verifyCurrentChatCapability(capability({ account: 'skirmshop' }), 'read')
+    ).toThrow();
+    expect(() =>
+      verifyCurrentChatCapability(
+        capability({ chat: 'professional:123456789@s.whatsapp.net' }),
+        'read'
+      )
+    ).toThrow();
     expect(() => verifyCurrentChatCapability(capability({ ops: ['read'] }), 'propose')).toThrow();
     expect(() => verifyCurrentChatCapability(capability({ ops: undefined }), 'read')).toThrow();
     const signed = capability();
@@ -75,28 +91,149 @@ describe('Hermes current-chat capability', () => {
 
   test('reads and proposes only for the signed chat and rejects model-selected destinations', async () => {
     const instance = server();
+    instance.resolveCurrentChatReadScope = jest.fn(async () => ({
+      chatId: CHAT,
+      conversationIds: [CHAT],
+    }));
     instance.handleWhatsAppGetMessages = jest.fn(async (args: unknown) => ({
       content: [{ type: 'text', text: JSON.stringify({ args }) }],
     }));
     const token = capability();
     const read = await instance.executeCanonicalTool(tool('social_read_current_chat'), {
-      capability: token, limit: 5,
+      capability: token,
+      limit: 5,
     });
     expect(read.structuredContent.ok).toBe(true);
     expect(instance.handleWhatsAppGetMessages).toHaveBeenCalledWith({
-      account: 'personal', chatId: CHAT, limit: 5,
+      account: 'personal',
+      chatId: CHAT,
+      conversationIds: [CHAT],
+      limit: 5,
     });
 
     const send = await instance.executeCanonicalTool(tool('social_send_current_chat'), {
-      capability: token, text: 'Hello', idempotencyKey: 'turn-1',
+      capability: token,
+      text: 'Hello',
+      idempotencyKey: 'turn-1',
     });
     expect(send.structuredContent.ok).toBe(true);
     expect(send.structuredContent.data).toMatchObject({
-      account: 'personal', chat: CHAT, turn: TURN, text: 'Hello', requiresOwnerApproval: true,
+      account: 'personal',
+      chat: CHAT,
+      turn: TURN,
+      text: 'Hello',
+      requiresOwnerApproval: true,
     });
-    expect(() => instance.validateCanonicalArguments(tool('social_send_current_chat'), {
-      capability: token, text: 'Hello', idempotencyKey: 'turn-2', target: 'attacker@s.whatsapp.net',
-    })).toThrow();
+    expect(() =>
+      instance.validateCanonicalArguments(tool('social_send_current_chat'), {
+        capability: token,
+        text: 'Hello',
+        idempotencyKey: 'turn-2',
+        target: 'attacker@s.whatsapp.net',
+      })
+    ).toThrow();
+  });
+
+  test('current-chat read combines only the uniquely linked PN and LID rows', async () => {
+    const instance = server();
+    const lid = 'personal:777@lid';
+    const pn = 'personal:34600123456@c.us';
+    const providerPn = 'personal:34600123456@s.whatsapp.net';
+    const conversations = [
+      { id: lid, account: 'personal', wa_chat_id: providerPn, is_group: false },
+      { id: pn, account: 'personal', wa_chat_id: null, is_group: false },
+      {
+        id: 'personal:888@lid',
+        account: 'personal',
+        wa_chat_id: 'personal:34600999999@s.whatsapp.net',
+        is_group: false,
+      },
+      { id: 'secondary:999@lid', account: 'secondary', wa_chat_id: providerPn, is_group: false },
+    ];
+    const messages = [
+      {
+        id: '11111111-1111-4111-8111-111111111111',
+        conversation_id: lid,
+        account: 'personal',
+        content: 'LID history',
+      },
+      {
+        id: '22222222-2222-4222-8222-222222222222',
+        conversation_id: pn,
+        account: 'personal',
+        content: 'PN history',
+      },
+      {
+        id: '33333333-3333-4333-8333-333333333333',
+        conversation_id: 'secondary:999@lid',
+        account: 'secondary',
+        content: 'Other account',
+      },
+    ];
+    const normalize = (id: string) => id.replace(/@c\.us$/, '@s.whatsapp.net');
+    instance.dbClient = {
+      query: jest.fn(async (sql: string, args: unknown[]) => {
+        if (sql.includes('FROM conversations WHERE'))
+          return {
+            rows: conversations.filter(row => row.account === args[0] && row.id === args[1]),
+          };
+        if (sql.includes('SELECT lid.id, lid.wa_chat_id'))
+          return {
+            rows: conversations.filter(
+              row =>
+                row.account === args[0] &&
+                row.id.endsWith('@lid') &&
+                normalize(row.wa_chat_id || '') === normalize(String(args[1]))
+            ),
+          };
+        if (sql.includes('SELECT pn.id FROM conversations pn'))
+          return {
+            rows: conversations
+              .filter(
+                row =>
+                  row.account === args[0] &&
+                  /\d+@(?:c\.us|s\.whatsapp\.net)$/.test(row.id) &&
+                  normalize(row.id) === normalize(String(args[1]))
+              )
+              .map(row => ({ id: row.id })),
+          };
+        if (sql.includes('FROM messages'))
+          return {
+            rows: messages.filter(
+              row => row.account === args[1] && (args[0] as string[]).includes(row.conversation_id)
+            ),
+          };
+        if (sql.includes('FROM attachments')) return { rows: [] };
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    };
+    const read = await instance.executeCanonicalTool(tool('social_read_current_chat'), {
+      capability: capability({ chat: pn }),
+      limit: 10,
+    });
+    expect(read.structuredContent.ok).toBe(true);
+    expect(read.structuredContent.data).toMatchObject({ chatId: lid, count: 2 });
+    expect(
+      read.structuredContent.data.messages.map((row: { content: string }) => row.content)
+    ).toEqual(['LID history', 'PN history']);
+    const messageQuery = instance.dbClient.query.mock.calls.find(([sql]: [string]) =>
+      sql.includes('FROM messages')
+    );
+    expect(messageQuery[1].slice(0, 2)).toEqual([[lid, pn], 'personal']);
+
+    conversations.push({
+      id: 'personal:999@lid',
+      account: 'personal',
+      wa_chat_id: providerPn,
+      is_group: false,
+    });
+    const ambiguous = await instance.executeCanonicalTool(tool('social_read_current_chat'), {
+      capability: capability({ chat: pn }),
+      limit: 10,
+    });
+    expect(ambiguous.structuredContent.ok).toBe(true);
+    expect(ambiguous.structuredContent.data).toMatchObject({ chatId: pn, count: 1 });
+    expect(ambiguous.structuredContent.data.messages[0].content).toBe('PN history');
   });
 
   test('blocks proposals when disabled or emergency stopped', async () => {
@@ -120,9 +257,9 @@ describe('Hermes current-chat capability', () => {
     expect(first.structuredContent.ok).toBe(true);
     const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 301_000);
     try {
-      await expect(instance.executeCanonicalTool(tool('social_send_current_chat'), args)).rejects.toThrow(
-        'Invalid current-chat capability'
-      );
+      await expect(
+        instance.executeCanonicalTool(tool('social_send_current_chat'), args)
+      ).rejects.toThrow('Invalid current-chat capability');
       expect(instance.redisClient.eval).toHaveBeenCalledTimes(1);
     } finally {
       clock.mockRestore();
@@ -137,11 +274,16 @@ describe('Hermes current-chat capability', () => {
     } as Response);
     try {
       const generic = await instance.executeCanonicalTool(tool('social_send_message'), {
-        channel: 'whatsapp', accountId: 'personal', target: CHAT, message: 'No',
+        channel: 'whatsapp',
+        accountId: 'personal',
+        target: CHAT,
+        message: 'No',
       });
       expect(generic.structuredContent.ok).toBe(false);
       const scoped = await instance.executeCanonicalTool(tool('social_send_current_chat'), {
-        capability: capability(), text: 'Yes', idempotencyKey: 'turn-4',
+        capability: capability(),
+        text: 'Yes',
+        idempotencyKey: 'turn-4',
       });
       expect(scoped.structuredContent.ok).toBe(true);
       expect(connector).not.toHaveBeenCalled();
