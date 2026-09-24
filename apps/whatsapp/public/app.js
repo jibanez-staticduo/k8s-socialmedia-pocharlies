@@ -9,9 +9,12 @@ const accountRailReady = import('./account-rail.mjs').then(module => { accountRa
 let draftTools = null;
 const draftReady = import('./draft-suggest.mjs').then(module => { draftTools = module; return module; });
 let assistant = null;
-const assistantReady = import('./assistant-ui.js').then(({mountAssistant}) => {
+const assistantReady = draftReady.catch(() => null).then(() => import('./assistant-ui.js')).then(({mountAssistant}) => {
+  const agentCopy = draftTools || {DRAFT_INSTRUCTION: '', DRAFT_LABEL: ''};
   assistant = mountAssistant($('ai-root'), {
     request: api,
+    draftPrompt: agentCopy.DRAFT_INSTRUCTION,
+    draftLabel: agentCopy.DRAFT_LABEL,
     useDraft(text, ctx) {
       if (!current(ctx)) return;
       applyDraft(text, ctx);

@@ -40,13 +40,14 @@ by ffmpeg and normalized to Ogg Opus, with a ten minute duration limit.
 AI requires LITELLM_BASE_URL (including /v1) and LITELLM_API_KEY for the model
 catalog, plus HERMES_API_URL and HERMES_API_KEY pointing at an existing
 OpenAI-compatible Hermes gateway: the NAS does not bundle a Hermes. The verified
-target is the shared Fedora gateway, HERMES_API_URL=http://10.71.14.221:8642 with
-HERMES_API_KEY equal to that gateway's API_SERVER_KEY; give Fedora a DHCP
-reservation or an internal DNS name rather than a raw IP for stability. Set
-HERMES_DEFAULT_MODEL to a model the gateway advertises at /v1/models (its
-advertised id is hermes-agent). HERMES_PROVIDER is optional and omitted when
-empty so the shared agent keeps its own provider; a provider name is only
-meaningful to a Hermes deployment that defines that custom provider.
+target is the shared Fedora gateway, HERMES_API_URL=http://10.71.14.220:8642 with
+HERMES_API_KEY equal to that gateway's API_SERVER_KEY (10.71.14.221 is a second
+NIC that also works; prefer a DHCP reservation or internal DNS name over a raw
+IP). The gateway advertises hermes-agent at /v1/models, but its API server is a
+server_agent that routes regardless of the model string, so the deployment sets
+HERMES_DEFAULT_MODEL to the agent's own default (qwen3.8-flash-next) and
+HERMES_PROVIDER to that agent's provider (openclaw-litellm); HERMES_PROVIDER may
+instead be left empty, and the app then omits it so the agent keeps its own.
 
 Each turn continues a stable Hermes conversation and is namespaced so the shared
 agent's other sessions and long-term memory are untouched. The agent/session

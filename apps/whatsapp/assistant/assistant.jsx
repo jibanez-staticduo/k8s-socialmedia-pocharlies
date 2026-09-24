@@ -15,7 +15,7 @@ function Bubble() {
 /* The assistant panel is one ordinary conversation: bubbles, a typing receipt and a
    composer. It stays mounted while hidden so a turn started from the composer keeps
    its place in the thread, and it only reads server state once the owner opens it. */
-function PrivateChat({ctx, request, useDraft, active, api}) {
+function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLabel}) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
@@ -29,6 +29,8 @@ function PrivateChat({ctx, request, useDraft, active, api}) {
   const queueRef = useRef(Promise.resolve());
   const threadRef = useRef(null);
   const inputRef = useRef(null);
+
+  const shownPrompt = useCallback(text => (draftPrompt && text === draftPrompt && draftLabel ? draftLabel : text), [draftLabel, draftPrompt]);
 
   const loadProposals = useCallback(async () => {
     if (!ctx.account || !ctx.chat) return;
@@ -50,7 +52,7 @@ function PrivateChat({ctx, request, useDraft, active, api}) {
       setMessages((result.messages || []).filter(message => ['user', 'assistant'].includes(message.role) && typeof message.content === 'string').map((message, index) => ({
         id: `${sessionIdRef.current}-${index}`,
         role: message.role,
-        content: [{type: 'text', text: message.content}]
+        content: [{type: 'text', text: shownPrompt(message.content)}]
       })));
     }).catch(error => { if (mounted) setProblem(error.message); })
       .finally(() => { if (mounted) setLoading(false); });
@@ -98,12 +100,12 @@ function PrivateChat({ctx, request, useDraft, active, api}) {
     const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose: false});
     const answer = typeof result.text === 'string' ? result.text : '';
     setMessages(previous => [...previous,
-      {id: `user-${crypto.randomUUID()}`, role: 'user', content: [{type: 'text', text: message}]},
+      {id: `user-${crypto.randomUUID()}`, role: 'user', content: [{type: 'text', text: shownPrompt(message)}]},
       {id: `assistant-${crypto.randomUUID()}`, role: 'assistant', content: [{type: 'text', text: answer}]}
     ]);
     void refreshProposals().catch(error => setProblem(`No se pudieron actualizar las propuestas: ${error.message}`));
     return answer;
-  }, [ctx.account, ctx.chat, refreshProposals, request]);
+  }, [ctx.account, ctx.chat, refreshProposals, request, shownPrompt]);
 
   const enqueue = useCallback(task => {
     const run = () => {
@@ -192,12 +194,13 @@ function PrivateChat({ctx, request, useDraft, active, api}) {
   </AssistantRuntimeProvider>;
 }
 
-export function mountAssistant(target, {request, useDraft}) {
+export function mountAssistant(target, {request, useDraft, draftPrompt = '', draftLabel = ''}) {
   const root = createRoot(target);
+  const options = {draftPrompt, draftLabel};
   let ctx = {account: '', chat: '', version: 0};
   let open = false;
   const api = {};
-  const render = () => root.render(<PrivateChat key={`${ctx.account}:${ctx.chat}:${ctx.version}`} ctx={ctx} active={open} request={request} useDraft={useDraft} api={api} />);
+  const render = () => root.render(<PrivateChat key={`${ctx.account}:${ctx.chat}:${ctx.version}`} ctx={ctx} active={open} request={request} useDraft={useDraft} api={api} draftPrompt={options.draftPrompt} draftLabel={options.draftLabel} />);
   render();
   return {
     select(next) { ctx = next; render(); },

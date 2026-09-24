@@ -151,7 +151,8 @@ try {
   assert.equal(await page.locator('#message').inputValue(), 'Reunión a las 9 confirmada', 'a fenced proposal was not unwrapped for an empty draft');
 
   await openPanel();
-  await page.locator('.ai-bubble-out').filter({hasText: 'Propón un mensaje'}).first().waitFor();
+  await page.locator('.ai-bubble-out').filter({hasText: 'Propón un mensaje para responder'}).first().waitFor();
+  assert.equal(await page.locator('.ai-bubble-out').filter({hasText: 'sin explicaciones ni comillas'}).count(), 0, 'the raw draft instruction leaked into the conversation');
   assert.equal(await page.locator('.ai-bubble-in').filter({hasText: 'Reunión a las 9 confirmada'}).count(), 1, 'the drafted answer did not join the conversation');
   await closePanel();
 
@@ -176,6 +177,7 @@ try {
   await page.locator('.chat-item').nth(1).click();
   assert.equal(await page.locator('#message').inputValue(), 'Borrador de Dos', 'the draft of the other chat was lost');
 
+  await page.locator('.chat-item').first().click();
   await openPanel();
   await page.locator('.ai-proposal').filter({hasText: 'Texto exacto para enviar'}).waitFor();
   await page.locator('.ai-proposal').filter({hasText: 'Texto exacto para enviar'}).getByRole('button', {name: 'Aprobar y enviar'}).click();

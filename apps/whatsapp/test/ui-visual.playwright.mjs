@@ -446,23 +446,26 @@ async function assertMessageSafetyAndMedia(page) {
 }
 
 async function assertComposerAndAi(page, requestLog) {
-  const sendCountBeforeAi = requestLog.filter(entry => entry.path === '/api/send').length;
+  const sends = () => requestLog.filter(entry => entry.path === '/api/send').length;
+  const sendCountBeforeAi = sends();
   await page.locator('#message').fill('draft-alpha');
   assert.equal(await page.locator('#message').inputValue(), 'draft-alpha', 'composer did not preserve typed draft');
 
   await page.locator('#ai-toggle').click();
   await page.locator('#ai-panel').waitFor({ state: 'visible' });
   await page.locator('#ai-prompt').waitFor();
-  assert.equal(await page.locator('#ai-allow-propose').isChecked(), false, 'AI proposal permission must default to off');
+  assert.equal((await page.locator('#ai-panel-title').textContent()).trim(), 'Social Media Agent', 'the agent panel is not titled Social Media Agent');
+  assert.equal(await page.locator('#ai-panel input, #ai-panel select').count(), 0, 'the agent panel exposes configuration controls');
+  assert.equal((await page.locator('#ai-panel').innerText()).includes('Asistente privado'), false, 'the agent panel keeps the private assistant label');
   await page.locator('#ai-prompt').fill('Resume este fixture');
   await page.locator('#ai-send').click();
-  await page.locator('.private-turn-assistant').getByText('Respuesta IA fixture').waitFor();
+  await page.locator('.ai-bubble-in').getByText('Respuesta IA fixture').waitFor();
   const aiRequest = requestLog.findLast(entry => entry.path === '/api/ai/chat');
   assert.deepEqual(aiRequest?.body, { account: 'alpha', chat: 'alpha-chat', message: 'Resume este fixture', allowPropose: false });
-  assert.equal(await page.locator('#ai-use-draft').isDisabled(), false, 'AI draft action stayed disabled');
+  assert.equal(await page.locator('#ai-use-draft').isEnabled(), true, 'AI draft action stayed disabled');
   await page.locator('#ai-use-draft').click();
-  assert.equal(await page.locator('#message').inputValue(), 'Respuesta IA fixture para revisar.', 'AI response was not copied into composer');
-  assert.equal(requestLog.filter(entry => entry.path === '/api/send').length, sendCountBeforeAi, 'AI draft unexpectedly sent a WhatsApp message');
+  assert.equal(await page.locator('#message').inputValue(), 'draft-alpha\n\nRespuesta IA fixture para revisar.', 'the draft action did not extend the typed draft');
+  assert.equal(sends(), sendCountBeforeAi, 'AI draft unexpectedly sent a WhatsApp message');
 
   await page.locator('#message').fill('mocked composer send');
   await page.locator('#composer').evaluate(form => form.requestSubmit());
@@ -470,6 +473,15 @@ async function assertComposerAndAi(page, requestLog) {
   const sendEntries = requestLog.filter(entry => entry.path === '/api/send');
   assert.equal(sendEntries.length, sendCountBeforeAi + 1, 'composer did not use the mocked send endpoint');
   assert.equal(sendEntries.at(-1)?.body?.text, 'mocked composer send', 'composer payload changed unexpectedly');
+
+  const sendsBeforeDraft = sends();
+  await page.locator('#suggest').click();
+  await page.waitForFunction(() => document.querySelector('#message')?.value === 'Respuesta IA fixture para revisar.');
+  assert.equal(sends(), sendsBeforeDraft, 'Proponer mensaje sent a WhatsApp message');
+  const draftRequest = requestLog.findLast(entry => entry.path === '/api/ai/chat');
+  assert.equal(draftRequest?.body?.allowPropose, false, 'Proponer mensaje asked for a proposal grant');
+  assert.match(draftRequest?.body?.message || '', /Propón un mensaje/, 'Proponer mensaje did not ask the agent session');
+
   await page.locator('#message').fill('draft-alpha-restored');
   if (await page.locator('#ai-panel').isVisible()) await page.locator('#ai-close').click();
   await page.locator('#ai-panel').waitFor({ state: 'hidden' });

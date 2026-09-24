@@ -719,13 +719,6 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
 
 .message-status { color: var(--bubble-meta); letter-spacing: -2px; }
 
-.message-send-feedback { color: rgba(250, 250, 250, .72); }
-
-body[data-theme="light"] .message-send-feedback {
-  color: #52636c;
-  font-weight: 500;
-}
-
 .message-status.status-read { color: var(--accent-strong); }
 
 .message-empty { color: var(--muted); font-style: italic; }
@@ -750,13 +743,13 @@ body[data-theme="light"] .message-send-feedback {
 
 /* Pending-send receipts live inside the bubble, so they must stay readable on both
    bubble colors of each theme. */
-.message-send-feedback { display: inline-flex; align-items: center; gap: 3px; color: var(--bubble-meta); }
+.message-send-feedback { display: inline-flex; align-items: center; gap: 3px; color: var(--bubble-meta); font-weight: 500; }
 
 .message-send-feedback::before { content: "\25F7"; font-size: 12px; line-height: 1; }
 
-[data-send-state="failed"] .message-send-feedback { color: var(--danger); font-weight: 500; }
+.message[data-send-state="failed"] .message-send-feedback { color: var(--danger); font-weight: 500; }
 
-[data-send-state="failed"] .message-send-feedback::before { content: "\26A0"; }
+.message[data-send-state="failed"] .message-send-feedback::before { content: "\26A0"; }
 
 .message-reply-warning,
 .message-file-warning { color: var(--bubble-meta); }
