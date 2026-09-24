@@ -12,15 +12,15 @@ Authentication is selected explicitly with `APP_AUTH_MODE=oidc` or
 `APP_AUTH_MODE=basic`. OIDC mode requires `OIDC_ISSUER_URL` (the Keycloak apps
 realm issuer), `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and a nonempty,
 comma-separated `OIDC_ALLOWED_SUBJECTS` list containing the owner's stable Keycloak
-`sub`. `OIDC_SESSION_TTL_SECONDS` defaults to 1800 and may be set between 1 and
-604800 seconds. The confidential client must allow only the authorization-code
+`sub`. `OIDC_SESSION_TTL_SECONDS` defaults to 2592000 (30 days) and may be set
+between 1 and 2592000 seconds. The confidential client must allow only the authorization-code
 flow with the exact callback `${APP_PUBLIC_URL}/auth/callback`; PKCE S256 is sent
 for every login. OIDC discovery is lazy, so a temporary identity-provider outage
 does not make the container fail at startup. Discovery and callback failures fail
 closed with an authentication error.
 
-OIDC protects the UI, APIs and media routes with an opaque, bounded in-memory
-session. The session cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and scoped to
+OIDC protects the UI, APIs and media routes with an opaque, bounded session
+persisted in `/data/auth/oidc-sessions.json`. The session cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and scoped to
 the host. `GET /auth/login` and `GET /auth/callback` are the only unauthenticated
 OIDC routes besides `GET /health`; `POST /auth/logout` requires the configured
 Origin and clears the local session. Expired API sessions return a JSON 401 with

@@ -13,7 +13,8 @@ Configure these variables in the private deployment `.env`:
 - `OIDC_ALLOWED_SUBJECTS`: comma-separated Keycloak user IDs permitted to access
   all configured WhatsApp accounts. This is an authorization boundary, not a
   list of email domains.
-- `OIDC_SESSION_TTL_SECONDS=1800`: local session lifetime.
+- `OIDC_SESSION_TTL_SECONDS=2592000`: 30-day local session lifetime. Sessions
+  survive app restarts in the mounted `/data/auth/oidc-sessions.json` store.
 - `WHATSAPP_APP_UID=1000` and `WHATSAPP_APP_GID=10`: non-root identity matching
   the NAS ACLs for the mounted registry, CA certificate and app data directory.
 

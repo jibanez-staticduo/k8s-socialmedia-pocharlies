@@ -262,7 +262,7 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
             url(expand(settings.get('OIDC_ISSUER_URL', ''), settings), 'OIDC_ISSUER_URL', ('https',))
             for key in ('OIDC_ISSUER_URL', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'OIDC_ALLOWED_SUBJECTS'):
                 ui['environment'][key] = variable(key, True)
-            ui['environment']['OIDC_SESSION_TTL_SECONDS'] = configurable('OIDC_SESSION_TTL_SECONDS', '1800')
+            ui['environment']['OIDC_SESSION_TTL_SECONDS'] = configurable('OIDC_SESSION_TTL_SECONDS', '2592000')
         else:
             for key in ('UI_AUTH_USERNAME', 'UI_AUTH_PASSWORD'):
                 ui['environment'][key] = variable(key, True)

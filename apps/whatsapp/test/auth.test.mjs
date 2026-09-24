@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { calculatePKCECodeChallenge } from 'openid-client';
 import { createApp } from '../server.mjs';
+import { AppAuth } from '../lib/auth.mjs';
 
 const issuer = 'https://idp.example/realms/apps';
 const clientId = 'whatsapp-socialmedia';
@@ -61,7 +62,7 @@ async function fixture(t, { subject = 'owner-sub', now = () => Date.now(), ttl =
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${app.server.address().port}`;
   const request = (path, options = {}) => fetch(base + path, { redirect: 'manual', ...options });
-  return { request, idp, port: app.server.address().port };
+  return { request, idp, port: app.server.address().port, env, dir, fetchImpl };
 }
 
 function absoluteRequest(port, path, headers = {}) {
@@ -175,6 +176,20 @@ test('OIDC sessions expire and logout clears the server session', async t => {
   assert.equal((await fresh.request('/api/accounts', { headers: { cookie: `__Host-wa_session=${loggedIn.session}` } })).status, 401);
   const loggedOutApproval = await fresh.request('/api/ai/proposal', { method: 'POST', headers: { cookie: `__Host-wa_session=${loggedIn.session}`, origin: 'https://wa.example', 'content-type': 'application/json' }, body: JSON.stringify(approval) });
   assert.equal(loggedOutApproval.status, 401);
+});
+
+test('30-day OIDC session survives app restart and logout remains durable', async t => {
+  const original = await fixture(t, { ttl: '2592000' });
+  const loginResult = await login(original);
+  assert.match(loginResult.callback.headers.get('set-cookie'), /Max-Age=2592000/);
+  const req = { headers: { cookie: `__Host-wa_session=${loginResult.session}` } };
+  const reloaded = new AppAuth({ env: original.env, fetchImpl: original.fetchImpl });
+  await reloaded.init(original.dir);
+  assert.equal(reloaded.isAuthenticated(req)?.subject, 'owner-sub');
+  await reloaded.logout(req);
+  const afterLogout = new AppAuth({ env: original.env, fetchImpl: original.fetchImpl });
+  await afterLogout.init(original.dir);
+  assert.equal(afterLogout.isAuthenticated(req), null);
 });
 
 test('OIDC callback ignores hostile absolute request authorities', async t => {

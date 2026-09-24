@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import * as oidcDefault from 'openid-client';
 import { fail, authenticate as basicAuthenticate } from './security.mjs';
 
@@ -7,7 +9,7 @@ const TRANSACTION_COOKIE = '__Host-wa_oidc_tx';
 const LOGIN_TRANSACTION_TTL_MS = 10 * 60 * 1000;
 const MAX_SESSIONS = 1024;
 const MAX_TRANSACTIONS = 128;
-const DEFAULT_SESSION_TTL_SECONDS = 1800;
+const DEFAULT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 function nonEmpty(value) {
   return typeof value === 'string' && value.trim() !== '';
@@ -56,7 +58,7 @@ function parseAllowedSubjects(value) {
 function sessionTtlSeconds(value) {
   if (value === undefined || value === '') return DEFAULT_SESSION_TTL_SECONDS;
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 7 * 24 * 60 * 60) throw Error('OIDC_SESSION_TTL_SECONDS must be an integer between 1 and 604800');
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > DEFAULT_SESSION_TTL_SECONDS) throw Error('OIDC_SESSION_TTL_SECONDS must be an integer between 1 and 2592000');
   return parsed;
 }
 
@@ -93,6 +95,8 @@ export class AppAuth {
     this.sessions = new Map();
     this.transactions = new Map();
     this.configPromise = null;
+    this.sessionStorePath = null;
+    this.pendingSave = Promise.resolve();
 
     if (!['basic', 'oidc'].includes(this.mode)) throw Error('APP_AUTH_MODE must be basic or oidc');
     if (!nonEmpty(env.APP_PUBLIC_URL)) throw Error('APP_PUBLIC_URL is required');
@@ -113,6 +117,38 @@ export class AppAuth {
   }
 
   get oidcEnabled() { return this.mode === 'oidc'; }
+
+  async init(dataDir) {
+    if (!this.oidcEnabled) return;
+    const authDir = join(dataDir, 'auth');
+    await mkdir(authDir, { recursive: true, mode: 0o700 });
+    this.sessionStorePath = join(authDir, 'oidc-sessions.json');
+    let stored;
+    try { stored = JSON.parse(await readFile(this.sessionStorePath, 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    if (!Array.isArray(stored?.sessions)) throw Error('Invalid OIDC session store');
+    const now = this.now();
+    for (const entry of stored.sessions) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [id, session] = entry;
+      if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(id) ||
+          !this.allowedSubjects.has(session?.subject) || !Number.isFinite(session?.expiresAt) ||
+          session.expiresAt <= now || session.expiresAt > now + this.sessionTtlSeconds * 1000) continue;
+      boundedInsert(this.sessions, id, session, MAX_SESSIONS);
+    }
+  }
+
+  async saveSessions() {
+    if (!this.sessionStorePath) return;
+    const path = this.sessionStorePath;
+    const contents = JSON.stringify({ sessions: [...this.sessions] });
+    this.pendingSave = this.pendingSave.catch(() => {}).then(async () => {
+      const temp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+      await writeFile(temp, contents, { mode: 0o600 });
+      await rename(temp, path);
+    });
+    await this.pendingSave;
+  }
 
   async configuration() {
     if (!this.oidcEnabled) throw Error('OIDC is not enabled');
@@ -191,16 +227,18 @@ export class AppAuth {
     const now = this.now();
     boundedInsert(this.sessions, id, { subject, createdAt: now, lastSeenAt: now, expiresAt: now + this.sessionTtlSeconds * 1000 }, MAX_SESSIONS);
     trimExpired(this.sessions, now);
+    await this.saveSessions();
     return {
       location: transaction.returnTo,
       setCookie: [cookie(SESSION_COOKIE, id, { maxAge: this.sessionTtlSeconds }), clearCookie(TRANSACTION_COOKIE)],
     };
   }
 
-  logout(req) {
+  async logout(req) {
     if (this.mode === 'oidc') {
       const id = parseCookie(req.headers.cookie, SESSION_COOKIE);
       if (id) this.sessions.delete(id);
+      await this.saveSessions();
       return { setCookie: clearCookie(SESSION_COOKIE) };
     }
     return { setCookie: null };

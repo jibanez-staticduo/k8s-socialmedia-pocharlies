@@ -234,6 +234,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   if (new Set(accounts.map(a => a.accountId)).size !== accounts.length) throw Error('Duplicate account');
   const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 10000 });
   const dataDir = env.DATA_DIR || '/data';
+  await auth.init(dataDir);
   const sessions = new Sessions(dataDir); await sessions.init();
   const appState = new AppState(dataDir); await appState.init();
   const avatarCacheConfig = {
@@ -825,7 +826,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       }
       if (req.method === 'POST') checkOrigin(req, env);
       if (path === '/auth/logout' && req.method === 'POST') {
-        const result = auth.logout(req); res.setHeader('set-cookie', result.setCookie ? [result.setCookie] : []); res.writeHead(204); return res.end();
+        const result = await auth.logout(req); res.setHeader('set-cookie', result.setCookie ? [result.setCookie] : []); res.writeHead(204); return res.end();
       }
       if (path === '/auth/logout' && req.method === 'GET') {
         res.setHeader('allow', 'POST'); return json(405, { error: 'Use POST to log out' });
