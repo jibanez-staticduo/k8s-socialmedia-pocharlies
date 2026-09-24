@@ -27,7 +27,7 @@ export async function ensureDurableTables(): Promise<void> {
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [20260923, 1]);
-  await client.query(`
+    await client.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_message_payloads (
       wa_message_id text PRIMARY KEY,
       account text NOT NULL,
@@ -40,11 +40,11 @@ export async function ensureDurableTables(): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now()
     )
   `);
-  await client.query(`
+    await client.query(`
     CREATE INDEX IF NOT EXISTS idx_whatsapp_message_payloads_chat
       ON whatsapp_message_payloads (account, conversation_id, message_timestamp_ms DESC)
   `);
-  await client.query(`
+    await client.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_chat_state (
       account text NOT NULL,
       chat_id text NOT NULL,
@@ -57,7 +57,7 @@ export async function ensureDurableTables(): Promise<void> {
       PRIMARY KEY (account, chat_id)
     )
   `);
-  await client.query(`
+    await client.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_contacts (
       account text NOT NULL,
       jid text NOT NULL,
@@ -69,7 +69,7 @@ export async function ensureDurableTables(): Promise<void> {
       PRIMARY KEY (account, jid)
     )
   `);
-  await client.query(`
+    await client.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_message_reactions (
       account text NOT NULL,
       target_wa_message_id text NOT NULL,
@@ -91,7 +91,10 @@ export async function ensureDurableTables(): Promise<void> {
   }
 }
 
-export async function storeRawWAMessage(message: WAMessage, conversationId?: string): Promise<void> {
+export async function storeRawWAMessage(
+  message: WAMessage,
+  conversationId?: string
+): Promise<void> {
   const id = message.key?.id;
   const remoteJid = message.key?.remoteJid;
   if (!id || !remoteJid || !message.message) return;
@@ -112,7 +115,9 @@ export async function storeRawWAMessage(message: WAMessage, conversationId?: str
     [
       accountKey(id),
       account,
-      accountKey(conversationId || await canonicalConversationId(storageConversationId(remoteJid))),
+      accountKey(
+        conversationId || (await canonicalConversationId(storageConversationId(remoteJid)))
+      ),
       serializeDurableValue(message.key),
       serializeDurableValue(message.message),
       message.messageTimestamp ? Number(message.messageTimestamp) * 1000 : null,
@@ -121,7 +126,10 @@ export async function storeRawWAMessage(message: WAMessage, conversationId?: str
   );
 }
 
-export async function getRawWAMessage(messageId: string, chatId?: string): Promise<WAMessage | undefined> {
+export async function getRawWAMessage(
+  messageId: string,
+  chatId?: string
+): Promise<WAMessage | undefined> {
   if (!messageId) return undefined;
   const params: unknown[] = [accountKey(messageId), connectorAccount()];
   let where = 'wa_message_id = $1 AND account = $2';
@@ -136,12 +144,14 @@ export async function getRawWAMessage(messageId: string, chatId?: string): Promi
       LIMIT 1`,
     params
   );
-  const row = result.rows[0] as {
-    message_key?: string | unknown;
-    message_payload?: string | unknown;
-    message_timestamp_ms?: string | number | null;
-    push_name?: string | null;
-  } | undefined;
+  const row = result.rows[0] as
+    | {
+        message_key?: unknown;
+        message_payload?: unknown;
+        message_timestamp_ms?: string | number | null;
+        push_name?: string | null;
+      }
+    | undefined;
   if (!row?.message_key || !row.message_payload) return undefined;
   const key = deserializeDurableValue(row.message_key) as WAMessageKey;
   const message = deserializeDurableValue(row.message_payload) as WAMessage['message'];
@@ -149,7 +159,9 @@ export async function getRawWAMessage(messageId: string, chatId?: string): Promi
     key,
     message,
     messageTimestamp:
-      row.message_timestamp_ms == null ? undefined : Math.floor(Number(row.message_timestamp_ms) / 1000),
+      row.message_timestamp_ms == null
+        ? undefined
+        : Math.floor(Number(row.message_timestamp_ms) / 1000),
     pushName: row.push_name || undefined,
   } as WAMessage;
 }
@@ -188,7 +200,9 @@ export async function getMessageKeysForChat(
       participant: row.participant_jid || undefined,
     },
     messageTimestamp:
-      row.message_timestamp_ms == null ? undefined : Math.floor(Number(row.message_timestamp_ms) / 1000),
+      row.message_timestamp_ms == null
+        ? undefined
+        : Math.floor(Number(row.message_timestamp_ms) / 1000),
   }));
 }
 
@@ -229,7 +243,11 @@ export async function markMessageDeletedForMe(messageId: string, chatId: string)
     `UPDATE messages
         SET is_deleted = TRUE, deleted_at = now(), updated_at = now()
       WHERE wa_message_id = $1 AND account = $2 AND conversation_id = $3`,
-    [accountKey(messageId), connectorAccount(), accountKey(await canonicalConversationId(storageConversationId(chatId)))]
+    [
+      accountKey(messageId),
+      connectorAccount(),
+      accountKey(await canonicalConversationId(storageConversationId(chatId))),
+    ]
   );
 }
 
@@ -286,7 +304,14 @@ export async function storeContact(contact: StoredContact): Promise<void> {
        push_name = COALESCE(EXCLUDED.push_name, whatsapp_contacts.push_name),
        avatar_url = COALESCE(EXCLUDED.avatar_url, whatsapp_contacts.avatar_url),
        updated_at = now()`,
-    [connectorAccount(), contact.jid, contact.phone || null, contact.name || null, contact.pushName || null, contact.avatarUrl || null]
+    [
+      connectorAccount(),
+      contact.jid,
+      contact.phone || null,
+      contact.name || null,
+      contact.pushName || null,
+      contact.avatarUrl || null,
+    ]
   );
 }
 
@@ -334,7 +359,9 @@ export async function storeMessageReaction(input: {
   );
 }
 
-export async function listMessageReactions(messageId: string): Promise<Array<{ reactorJid: string; emoji: string }>> {
+export async function listMessageReactions(
+  messageId: string
+): Promise<Array<{ reactorJid: string; emoji: string }>> {
   const result = await pool().query(
     `SELECT reactor_jid, emoji
        FROM whatsapp_message_reactions
@@ -342,5 +369,8 @@ export async function listMessageReactions(messageId: string): Promise<Array<{ r
       ORDER BY updated_at ASC`,
     [connectorAccount(), accountKey(messageId)]
   );
-  return result.rows.map(row => ({ reactorJid: stripAccountKey(row.reactor_jid), emoji: row.emoji }));
+  return result.rows.map(row => ({
+    reactorJid: stripAccountKey(row.reactor_jid),
+    emoji: row.emoji,
+  }));
 }

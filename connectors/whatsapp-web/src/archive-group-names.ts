@@ -16,8 +16,9 @@ export async function enrichArchiveGroupNames<T extends NamedArchiveChat>(
   options: { spacingMs?: number; concurrency?: number; isCurrent?: () => boolean } = {}
 ): Promise<void> {
   const { spacingMs = 300, concurrency = 2, isCurrent = () => true } = options;
-  const pending = chats.filter(chat => chat.archived && chat.jid.endsWith('@g.us') &&
-    !hasUsefulArchiveName(chat.name));
+  const pending = chats.filter(
+    chat => chat.archived && chat.jid.endsWith('@g.us') && !hasUsefulArchiveName(chat.name)
+  );
   let cursor = 0;
   let nextStart = 0;
   let pace = Promise.resolve();
@@ -34,17 +35,19 @@ export async function enrichArchiveGroupNames<T extends NamedArchiveChat>(
     await turn;
     return selected;
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
-    for (;;) {
-      const chat = await takeNext();
-      if (!chat) return;
-      if (!isCurrent()) return;
-      try {
-        const name = await lookup(chat.jid);
-        if (isCurrent() && hasUsefulArchiveName(name)) chat.name = name!.trim();
-      } catch {
-        // A group can be unavailable without invalidating its archive state.
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
+      for (;;) {
+        const chat = await takeNext();
+        if (!chat) return;
+        if (!isCurrent()) return;
+        try {
+          const name = await lookup(chat.jid);
+          if (isCurrent() && hasUsefulArchiveName(name)) chat.name = name!.trim();
+        } catch {
+          // A group can be unavailable without invalidating its archive state.
+        }
       }
-    }
-  }));
+    })
+  );
 }

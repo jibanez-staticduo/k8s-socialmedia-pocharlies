@@ -20,13 +20,19 @@ export function connectorAccount(): string {
   const account = process.env.CONNECTOR_ACCOUNT || 'personal';
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(account)) throw new Error('Invalid CONNECTOR_ACCOUNT');
   const file = process.env.SOCIAL_ACCOUNTS_FILE;
-  const accounts = file ? JSON.parse(readFileSync(file, 'utf8')) : [
-    { channel: 'whatsapp', accountId: 'personal', enabled: true },
-    { channel: 'whatsapp', accountId: 'professional', enabled: true },
-  ];
-  if (!Array.isArray(accounts) || !accounts.some(entry =>
-    entry.channel === 'whatsapp' && entry.accountId === account && entry.enabled === true
-  )) throw new Error(`WhatsApp account is unknown or disabled: ${account}`);
+  const accounts = file
+    ? JSON.parse(readFileSync(file, 'utf8'))
+    : [
+        { channel: 'whatsapp', accountId: 'personal', enabled: true },
+        { channel: 'whatsapp', accountId: 'professional', enabled: true },
+      ];
+  if (
+    !Array.isArray(accounts) ||
+    !accounts.some(
+      entry => entry.channel === 'whatsapp' && entry.accountId === account && entry.enabled === true
+    )
+  )
+    throw new Error(`WhatsApp account is unknown or disabled: ${account}`);
   return account;
 }
 
@@ -723,7 +729,10 @@ export async function setConversationWaChatId(id: string, waChatId: string): Pro
         [pnId]
       );
       const owner = occupied.rows[0];
-      if (!owner || (owner.account === account && owner.is_group !== true && aliasIds.includes(owner.id))) {
+      if (
+        !owner ||
+        (owner.account === account && owner.is_group !== true && aliasIds.includes(owner.id))
+      ) {
         if (owner) {
           await client.query(
             `UPDATE conversations SET wa_chat_id = NULL, updated_at = now()
@@ -849,11 +858,16 @@ export async function applyArchiveSnapshot(
 ): Promise<{ archived: number; created: number }> {
   if (!Number.isFinite(startedAt.getTime())) throw new Error('Invalid archive snapshot time');
   const account = connectorAccount();
-  const archivedIds = Array.from(new Set(chats.filter(chat => chat.archived)
-    .flatMap(chat => [chat.jid, ...(chat.aliases || [])])
-    .filter(jid => /@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(jid))
-    .flatMap(jid => jidAliases(stripAccountKey(jid)))
-    .flatMap(jid => [jid, accountKey(jid)])));
+  const archivedIds = Array.from(
+    new Set(
+      chats
+        .filter(chat => chat.archived)
+        .flatMap(chat => [chat.jid, ...(chat.aliases || [])])
+        .filter(jid => /@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(jid))
+        .flatMap(jid => jidAliases(stripAccountKey(jid)))
+        .flatMap(jid => [jid, accountKey(jid)])
+    )
+  );
   const db = await getPool().connect();
   let created = 0;
   try {
@@ -872,9 +886,13 @@ export async function applyArchiveSnapshot(
       if (!/@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(chat.jid)) {
         throw new Error('Invalid archive snapshot chat');
       }
-      const bareIds = Array.from(new Set([chat.jid, ...(chat.aliases || [])]
-        .filter(jid => /@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(jid))
-        .flatMap(jid => jidAliases(stripAccountKey(jid)))));
+      const bareIds = Array.from(
+        new Set(
+          [chat.jid, ...(chat.aliases || [])]
+            .filter(jid => /@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(jid))
+            .flatMap(jid => jidAliases(stripAccountKey(jid)))
+        )
+      );
       const ids = Array.from(new Set([...bareIds.map(accountKey), ...bareIds]));
       const hint = chat.name?.trim();
       const usefulHint = hint && !/@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(hint) ? hint : null;

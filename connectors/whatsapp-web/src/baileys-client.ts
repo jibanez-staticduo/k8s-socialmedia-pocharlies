@@ -374,7 +374,11 @@ function actionableForFailure(failureClass: WhatsAppSendFailureClass, isGroup: b
 
 function numericProviderValue(value: unknown): number | undefined {
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (value && typeof value === 'object' && typeof (value as { toNumber?: unknown }).toNumber === 'function') {
+  if (
+    value &&
+    typeof value === 'object' &&
+    typeof (value as { toNumber?: unknown }).toNumber === 'function'
+  ) {
     const numberValue = Number((value as { toNumber: () => number }).toNumber());
     return Number.isFinite(numberValue) ? numberValue : undefined;
   }
@@ -382,10 +386,17 @@ function numericProviderValue(value: unknown): number | undefined {
 }
 
 function unescapeVCardValue(value: string): string {
-  return value.replace(/\\n/gi, '\n').replace(/\\([\\;,])/g, '$1').trim();
+  return value
+    .replace(/\\n/gi, '\n')
+    .replace(/\\([\\;,])/g, '$1')
+    .trim();
 }
 
-function parseVCardFields(vcard: unknown): { phone?: string; organization?: string; email?: string } {
+function parseVCardFields(vcard: unknown): {
+  phone?: string;
+  organization?: string;
+  email?: string;
+} {
   if (typeof vcard !== 'string') return {};
   const fields: { phone?: string; organization?: string; email?: string } = {};
   for (const line of vcard.replace(/\\n/gi, '\n').split(/\r?\n/)) {
@@ -509,7 +520,8 @@ export function whatsappContactIdentity(contact: unknown): WhatsAppContactIdenti
   const value = (contact && typeof contact === 'object' ? contact : {}) as Record<string, unknown>;
   const ids = Array.from(
     new Set(
-      ['id', 'jid', 'lid', 'phoneNumber'].filter(key => typeof value[key] === 'string')
+      ['id', 'jid', 'lid', 'phoneNumber']
+        .filter(key => typeof value[key] === 'string')
         .map(key => String(value[key]).trim())
         .filter(Boolean)
     )
@@ -552,9 +564,7 @@ export function chooseWhatsAppConversationName(options: {
   const candidates = options.isGroup
     ? [options.groupSubject, options.existingName, options.id]
     : [options.existingName, options.contactName, options.pushName, options.id];
-  return (
-    candidates.find(value => !isWhatsAppJidLikeName(value, options.id))?.trim() || options.id
-  );
+  return candidates.find(value => !isWhatsAppJidLikeName(value, options.id))?.trim() || options.id;
 }
 
 /**
@@ -629,12 +639,17 @@ async function boundedProfilePictureUrl(
     return await Promise.race([
       lookup(PROFILE_PICTURE_LOOKUP_TIMEOUT_MS),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new ProfilePictureTimeoutError()), PROFILE_PICTURE_LOOKUP_TIMEOUT_MS);
+        timer = setTimeout(
+          () => reject(new ProfilePictureTimeoutError()),
+          PROFILE_PICTURE_LOOKUP_TIMEOUT_MS
+        );
       }),
     ]);
   } catch (error) {
-    if (error instanceof ProfilePictureTimeoutError ||
-        (error instanceof Boom && error.output.statusCode === 408)) {
+    if (
+      error instanceof ProfilePictureTimeoutError ||
+      (error instanceof Boom && error.output.statusCode === 408)
+    ) {
       throw new ProfilePictureTimeoutError();
     }
     throw error;
@@ -651,7 +666,13 @@ export class BaileysClient extends EventEmitter {
   private sock: WASocket | null = null;
   private archiveSnapshotSync: {
     socket: WASocket;
-    promise: Promise<{ version: number; records: number; chats: number; archived: number; created: number }>;
+    promise: Promise<{
+      version: number;
+      records: number;
+      chats: number;
+      archived: number;
+      created: number;
+    }>;
   } | null = null;
   private sessionPath: string;
   // kept for backward compat with the old constructor signature; unused.
@@ -798,9 +819,10 @@ export class BaileysClient extends EventEmitter {
           keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
         },
         printQRInTerminal: false,
-        browser: this.historySyncOnLogin && !state.creds.me
-          ? Browsers.macOS('Desktop')
-          : ['mcp-socialmedia', 'Chrome', '1.0.0'],
+        browser:
+          this.historySyncOnLogin && !state.creds.me
+            ? Browsers.macOS('Desktop')
+            : ['mcp-socialmedia', 'Chrome', '1.0.0'],
         // Use a dedicated pino logger silencing inner noise; bumping to info
         // is too chatty.
         logger: baileysLogger,
@@ -889,11 +911,13 @@ export class BaileysClient extends EventEmitter {
         // emits chats.update events whose handler persists unread_count +
         // archived to the DB, so the dashboard shows the real badges without
         // waiting for new traffic. Fire-and-forget; safe if it fails.
-        void this.resyncChatState('connection-open').then(() =>
-          this.syncArchiveSnapshot()
-        ).catch(error => {
-          this.logger.warn(`Archive snapshot sync failed: ${error instanceof Error ? error.message : String(error)}`);
-        });
+        void this.resyncChatState('connection-open')
+          .then(() => this.syncArchiveSnapshot())
+          .catch(error => {
+            this.logger.warn(
+              `Archive snapshot sync failed: ${error instanceof Error ? error.message : String(error)}`
+            );
+          });
         // Subscribe to presence for the most-recently-active chats so we
         // receive "composing"/"recording" updates and can forward typing
         // indicators to the dashboard. baileys auto-renews subscriptions
@@ -1108,16 +1132,11 @@ export class BaileysClient extends EventEmitter {
             participantId,
             observedAt: Date.now(),
           });
-          this.emit(
-            'presence-update',
-            buildPresenceSnapshot(convId, p, participantId)
-          );
+          this.emit('presence-update', buildPresenceSnapshot(convId, p, participantId));
           if (status !== 'composing' && status !== 'recording') continue;
           // Lookup display name from the participants we've seen
-          const name = this.contactNameFor(
-            participantJid,
-            this.normalizeJid(participantJid)
-          ) || null;
+          const name =
+            this.contactNameFor(participantJid, this.normalizeJid(participantJid)) || null;
           void dashboardNotify('/_connector/typing', {
             conversation_id: convId,
             sender_id: participantJid,
@@ -1143,7 +1162,10 @@ export class BaileysClient extends EventEmitter {
           stub === proto.WebMessageInfo.StubType.REVOKE || u.update?.message === null;
         if (isDeleted) {
           this.emit('message-update', { waMessageId, updateType: 'DELETED' });
-          void Promise.all([markMessageDeleted(waMessageId), setMessageStatus(waMessageId, 'deleted')]).catch(() => {});
+          void Promise.all([
+            markMessageDeleted(waMessageId),
+            setMessageStatus(waMessageId, 'deleted'),
+          ]).catch(() => {});
         }
 
         // Baileys unwraps MESSAGE_EDIT protocol messages into this update
@@ -1170,7 +1192,9 @@ export class BaileysClient extends EventEmitter {
               messageType: edited?.messageType,
             });
           })().catch(error =>
-            this.logger.warn(`edited WhatsApp message persistence failed for ${waMessageId}: ${error?.message || error}`)
+            this.logger.warn(
+              `edited WhatsApp message persistence failed for ${waMessageId}: ${error?.message || error}`
+            )
           );
         }
         // Track delivery state from WhatsApp servers (the green ticks).
@@ -1254,9 +1278,10 @@ export class BaileysClient extends EventEmitter {
     const incoming = { name: cleanName, source } satisfies WhatsAppContactNameRecord;
     let effective = incoming;
     if (source === 'push') {
-      effective = Array.from(aliases)
-        .map(alias => this.contactNames.get(alias))
-        .find(record => record?.source === 'saved') || incoming;
+      effective =
+        Array.from(aliases)
+          .map(alias => this.contactNames.get(alias))
+          .find(record => record?.source === 'saved') || incoming;
     }
     for (const alias of aliases) {
       const current = this.contactNames.get(alias);
@@ -1346,9 +1371,7 @@ export class BaileysClient extends EventEmitter {
     this.lastQrAt = new Date();
     qrcodeTerminal.generate(qr, { small: true });
     QRCode.toFile(join(this.sessionPath, 'qr.png'), qr, { width: 400 }).catch(() => {});
-    this.logger.warn(
-      `WhatsApp requires QR scan at ${qrPageUrl()}`
-    );
+    this.logger.warn(`WhatsApp requires QR scan at ${qrPageUrl()}`);
     this.emit('qr', qr);
   }
 
@@ -1398,9 +1421,7 @@ export class BaileysClient extends EventEmitter {
     ) {
       if (now - this.lastQrReminderAt > 10 * 60 * 1000) {
         this.lastQrReminderAt = now;
-        this.logger.warn(
-          `WhatsApp is waiting for manual QR scan: ${qrPageUrl()}`
-        );
+        this.logger.warn(`WhatsApp is waiting for manual QR scan: ${qrPageUrl()}`);
       }
       return;
     }
@@ -1456,9 +1477,14 @@ export class BaileysClient extends EventEmitter {
       let lid = lidFromPnMessage(msg);
       if (!lid) {
         try {
-          const mapped = await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(msg.key.remoteJid || '');
-          if (typeof mapped === 'string' && /^\d+(?::\d+)?@lid$/.test(mapped)) lid = jidNormalizedUser(mapped);
-        } catch { /* An unavailable Baileys mapping leaves the PN unchanged. */ }
+          const mapped = await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(
+            msg.key.remoteJid || ''
+          );
+          if (typeof mapped === 'string' && /^\d+(?::\d+)?@lid$/.test(mapped))
+            lid = jidNormalizedUser(mapped);
+        } catch {
+          /* An unavailable Baileys mapping leaves the PN unchanged. */
+        }
       }
       if (lid) waMessage.conversationId = lid;
     }
@@ -1527,7 +1553,9 @@ export class BaileysClient extends EventEmitter {
     }
     if (!isGroup && pnJidToE164(rawChatJid) && waMessage.conversationId.endsWith('@lid')) {
       await setConversationWaChatId(waMessage.conversationId, rawChatJid).catch(e =>
-        this.logger.warn(`wa_chat_id backfill failed for conversation=${waMessage.conversationId}: ${e?.message || e}`)
+        this.logger.warn(
+          `wa_chat_id backfill failed for conversation=${waMessage.conversationId}: ${e?.message || e}`
+        )
       );
     }
 
@@ -1535,7 +1563,9 @@ export class BaileysClient extends EventEmitter {
     // under the same canonical conversation used by messages.
     if (msg.key?.id && msg.message) {
       await storeRawWAMessage(msg, waMessage.conversationId).catch(e =>
-        this.logger.warn(`durable WhatsApp message store failed for ${msg.key.id}: ${e?.message || e}`)
+        this.logger.warn(
+          `durable WhatsApp message store failed for ${msg.key.id}: ${e?.message || e}`
+        )
       );
     }
 
@@ -1615,7 +1645,9 @@ export class BaileysClient extends EventEmitter {
         reactionMessageId: waMessage.waMessageId,
         emoji: String(waMessage.metadata?.emoji || waMessage.content || ''),
       }).catch(error =>
-        this.logger.warn(`reaction persistence failed for ${waMessage.waMessageId}: ${error?.message || error}`)
+        this.logger.warn(
+          `reaction persistence failed for ${waMessage.waMessageId}: ${error?.message || error}`
+        )
       );
     }
 
@@ -1740,8 +1772,7 @@ export class BaileysClient extends EventEmitter {
       messageType = 'POLL_VOTE';
       metadata = {
         kind: 'poll_vote',
-        pollMessageId:
-          content.pollUpdateMessage.pollCreationMessageKey?.id || null,
+        pollMessageId: content.pollUpdateMessage.pollCreationMessageKey?.id || null,
       };
     } else if ((content as any).pollResultSnapshotMessage) {
       messageType = 'POLL_RESULT';
@@ -1752,19 +1783,20 @@ export class BaileysClient extends EventEmitter {
       body = event?.name || null;
       const startTime = numericProviderValue(event?.startTime);
       const endTime = numericProviderValue(event?.endTime);
-      const location = event?.location && typeof event.location === 'object'
-        ? {
-            ...(numericProviderValue(event.location.degreesLatitude) === undefined
-              ? {}
-              : { degreesLatitude: numericProviderValue(event.location.degreesLatitude) }),
-            ...(numericProviderValue(event.location.degreesLongitude) === undefined
-              ? {}
-              : { degreesLongitude: numericProviderValue(event.location.degreesLongitude) }),
-            ...(typeof event.location.name === 'string' && event.location.name.trim()
-              ? { name: event.location.name.trim() }
-              : {}),
-          }
-        : undefined;
+      const location =
+        event?.location && typeof event.location === 'object'
+          ? {
+              ...(numericProviderValue(event.location.degreesLatitude) === undefined
+                ? {}
+                : { degreesLatitude: numericProviderValue(event.location.degreesLatitude) }),
+              ...(numericProviderValue(event.location.degreesLongitude) === undefined
+                ? {}
+                : { degreesLongitude: numericProviderValue(event.location.degreesLongitude) }),
+              ...(typeof event.location.name === 'string' && event.location.name.trim()
+                ? { name: event.location.name.trim() }
+                : {}),
+            }
+          : undefined;
       metadata = {
         kind: 'event',
         description: event?.description || null,
@@ -1782,10 +1814,12 @@ export class BaileysClient extends EventEmitter {
       body = content.contactMessage.displayName || null;
       metadata = {
         kind: 'contact',
-        contacts: [{
-          displayName: content.contactMessage.displayName || null,
-          ...parseVCardFields(content.contactMessage.vcard),
-        }],
+        contacts: [
+          {
+            displayName: content.contactMessage.displayName || null,
+            ...parseVCardFields(content.contactMessage.vcard),
+          },
+        ],
       };
     } else if (content.contactsArrayMessage) {
       messageType = 'CONTACT';
@@ -1801,18 +1835,28 @@ export class BaileysClient extends EventEmitter {
       // ignore key updates etc.
       return null;
     } else {
-      const k = Object.keys(content).find(k =>
-        k !== 'messageContextInfo' && k !== 'senderKeyDistributionMessage' && !!(content as any)[k]
+      const k = Object.keys(content).find(
+        k =>
+          k !== 'messageContextInfo' &&
+          k !== 'senderKeyDistributionMessage' &&
+          !!(content as any)[k]
       );
       if (!k) return null;
       messageType = k.toUpperCase();
     }
 
     const context = [
-      ext, content.imageMessage, content.videoMessage, content.audioMessage,
-      content.documentMessage, content.stickerMessage, content.locationMessage,
+      ext,
+      content.imageMessage,
+      content.videoMessage,
+      content.audioMessage,
+      content.documentMessage,
+      content.stickerMessage,
+      content.locationMessage,
       content.contactMessage,
-    ].map(item => item?.contextInfo).find(Boolean);
+    ]
+      .map(item => item?.contextInfo)
+      .find(Boolean);
     if (context) {
       isForwarded = !!context.isForwarded || (context.forwardingScore || 0) > 0;
       if (!replyToWaId && context.stanzaId) replyToWaId = context.stanzaId;
@@ -1848,19 +1892,26 @@ export class BaileysClient extends EventEmitter {
     this.mediaPersistenceLocks ??= new Map();
     const previous = this.mediaPersistenceLocks.get(key);
     let release!: () => void;
-    const current = new Promise<void>(resolve => { release = resolve; });
+    const current = new Promise<void>(resolve => {
+      release = resolve;
+    });
     this.mediaPersistenceLocks.set(key, current);
     if (previous) await previous;
-    try { return await task(); }
-    finally {
+    try {
+      return await task();
+    } finally {
       release();
       if (this.mediaPersistenceLocks.get(key) === current) this.mediaPersistenceLocks.delete(key);
     }
   }
 
   private async storeMediaBytesOnce(
-    messageId: string, bytes: Buffer, fileType: string,
-    mimeType?: string, fileName?: string, caption?: string
+    messageId: string,
+    bytes: Buffer,
+    fileType: string,
+    mimeType?: string,
+    fileName?: string,
+    caption?: string
   ): Promise<StoredMediaInfo> {
     const db = await getPool().connect();
     try {
@@ -1895,7 +1946,9 @@ export class BaileysClient extends EventEmitter {
     } catch (error) {
       await db.query('ROLLBACK');
       throw error;
-    } finally { db.release(); }
+    } finally {
+      db.release();
+    }
   }
 
   private async downloadAndStoreMedia(
@@ -1910,12 +1963,13 @@ export class BaileysClient extends EventEmitter {
           WHERE message_id=$1 ORDER BY id DESC LIMIT 1`,
         [messageId]
       );
-      if (existing.rows[0]?.file_url) return {
-        storageKey: existing.rows[0].file_url,
-        fileSize: Number(existing.rows[0].file_size || 0),
-        mimeType: existing.rows[0].mime_type,
-        fileName: existing.rows[0].file_name,
-      };
+      if (existing.rows[0]?.file_url)
+        return {
+          storageKey: existing.rows[0].file_url,
+          fileSize: Number(existing.rows[0].file_size || 0),
+          mimeType: existing.rows[0].mime_type,
+          fileName: existing.rows[0].file_name,
+        };
       return this.downloadAndStoreMediaUnlocked(msg, messageId, messageType, caption);
     });
   }
@@ -1952,8 +2006,17 @@ export class BaileysClient extends EventEmitter {
 
     const { mimeType, fileName } = this.mediaMetaFromMessage(msg);
 
-    const stored = await this.storeMediaBytesOnce(messageId, buffer, messageType, mimeType, fileName, caption);
-    this.logger.info(`Stored media ${stored.storageKey} (${stored.fileSize} bytes) for msg ${messageId}`);
+    const stored = await this.storeMediaBytesOnce(
+      messageId,
+      buffer,
+      messageType,
+      mimeType,
+      fileName,
+      caption
+    );
+    this.logger.info(
+      `Stored media ${stored.storageKey} (${stored.fileSize} bytes) for msg ${messageId}`
+    );
     return stored;
   }
 
@@ -2089,7 +2152,9 @@ export class BaileysClient extends EventEmitter {
         this.rememberKey(messageId || '', sent.key, raw);
         this.rememberMessageForRetry(sent.key, sent.message);
         await storeRawWAMessage(sent).catch(error =>
-          this.logger.warn(`durable sent-message store failed for ${messageId}: ${error?.message || error}`)
+          this.logger.warn(
+            `durable sent-message store failed for ${messageId}: ${error?.message || error}`
+          )
         );
       }
       return messageId || undefined;
@@ -2126,7 +2191,9 @@ export class BaileysClient extends EventEmitter {
             this.rememberKey(messageId || '', retried.key, raw);
             this.rememberMessageForRetry(retried.key, retried.message);
             await storeRawWAMessage(retried).catch(error =>
-              this.logger.warn(`durable retried-message store failed for ${messageId}: ${error?.message || error}`)
+              this.logger.warn(
+                `durable retried-message store failed for ${messageId}: ${error?.message || error}`
+              )
             );
           }
           return messageId || undefined;
@@ -2243,7 +2310,14 @@ export class BaileysClient extends EventEmitter {
     chatId: string,
     fileUrl: string,
     caption?: string,
-    options?: { asSticker?: boolean; asGif?: boolean; replyToMessageId?: string; fileName?: string; messageId?: string; beforeSend?: () => Promise<void> }
+    options?: {
+      asSticker?: boolean;
+      asGif?: boolean;
+      replyToMessageId?: string;
+      fileName?: string;
+      messageId?: string;
+      beforeSend?: () => Promise<void>;
+    }
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
     const raw = this.toRawJid(chatId);
@@ -2257,8 +2331,18 @@ export class BaileysClient extends EventEmitter {
     } catch (e: any) {
       throw new Error(`Failed to fetch file from ${fileUrl}: ${e?.message || e}`);
     }
-    const fileName = (options?.fileName || (fileUrl.startsWith('data:') ? 'attachment' : fileUrl.split('/').pop()) || 'attachment')
-      .split(/[\\/]/).pop()!.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 240) || 'attachment';
+    const fileName =
+      (
+        options?.fileName ||
+        (fileUrl.startsWith('data:') ? 'attachment' : fileUrl.split('/').pop()) ||
+        'attachment'
+      )
+        .split(/[\\/]/)
+        .pop()!
+        // Control characters must not reach the attachment filename.
+        // eslint-disable-next-line no-control-regex
+        .replace(/[\x00-\x1f\x7f]/g, '')
+        .slice(0, 240) || 'attachment';
 
     let payload: AnyMessageContent;
     // Stickers: WhatsApp expects webp; baileys handles conversion when the
@@ -2299,31 +2383,53 @@ export class BaileysClient extends EventEmitter {
         this.logger.warn(`sent media cache failed for ${sent.key.id}: ${error?.code || 'unknown'}`);
       }
       await storeRawWAMessage(sent).catch(error =>
-        this.logger.warn(`durable media-message store failed for ${sent.key?.id}: ${error?.message || error}`)
+        this.logger.warn(
+          `durable media-message store failed for ${sent.key?.id}: ${error?.message || error}`
+        )
       );
-      const fileType = 'image' in payload ? 'IMAGE' : 'video' in payload ? 'VIDEO'
-        : 'audio' in payload ? 'AUDIO' : 'sticker' in payload ? 'STICKER' : 'DOCUMENT';
+      const fileType =
+        'image' in payload
+          ? 'IMAGE'
+          : 'video' in payload
+            ? 'VIDEO'
+            : 'audio' in payload
+              ? 'AUDIO'
+              : 'sticker' in payload
+                ? 'STICKER'
+                : 'DOCUMENT';
       if (sent.message) {
         try {
           await this.persistSentMedia(sent, buf, contentType, fileName, fileType, caption);
         } catch (error: any) {
           // WhatsApp already accepted the message. Keep its receipt so a UI retry cannot send it twice.
-          this.logger.error(`MEDIA_PERSIST_PENDING provider_message_id=${sent.key.id} error=${error?.code || error?.name || 'unknown'}`);
+          this.logger.error(
+            `MEDIA_PERSIST_PENDING provider_message_id=${sent.key.id} error=${error?.code || error?.name || 'unknown'}`
+          );
         }
       } else {
-        this.logger.error(`MEDIA_PERSIST_PENDING provider_message_id=${sent.key.id} error=missing_payload`);
+        this.logger.error(
+          `MEDIA_PERSIST_PENDING provider_message_id=${sent.key.id} error=missing_payload`
+        );
       }
     }
     return sent?.key?.id || undefined;
   }
 
   private async persistSentMedia(
-    sent: WAMessage, bytes: Buffer, mimeType: string, fileName: string,
-    fileType: string, caption?: string
+    sent: WAMessage,
+    bytes: Buffer,
+    mimeType: string,
+    fileName: string,
+    fileType: string,
+    caption?: string
   ): Promise<void> {
     const providerId = sent.key?.id;
     if (!providerId) return;
-    await this.ingestMessage(sent, { source: 'live', publishEvent: false, skipMediaDownload: true });
+    await this.ingestMessage(sent, {
+      source: 'live',
+      publishEvent: false,
+      skipMediaDownload: true,
+    });
     await this.withMediaPersistenceLock(providerId, async () => {
       const result = await getPool().query(
         `SELECT m.id
@@ -2350,13 +2456,19 @@ export class BaileysClient extends EventEmitter {
     const raw = this.toRawJid(chatId);
     const payload: AnyMessageContent = { audio, mimetype, ptt: true };
     await beforeSend?.();
-    const sent = await this.sock.sendMessage(raw, payload, requestedMessageId ? { messageId: requestedMessageId } : undefined);
+    const sent = await this.sock.sendMessage(
+      raw,
+      payload,
+      requestedMessageId ? { messageId: requestedMessageId } : undefined
+    );
     const messageId = sent?.key?.id;
     if (sent?.key) {
       this.rememberKey(messageId || '', sent.key, raw);
       this.rememberMessageForRetry(sent.key, sent.message);
       await storeRawWAMessage(sent).catch(error =>
-        this.logger.warn(`durable voice-message store failed for ${messageId}: ${error?.message || error}`)
+        this.logger.warn(
+          `durable voice-message store failed for ${messageId}: ${error?.message || error}`
+        )
       );
     }
     return messageId || undefined;
@@ -2370,11 +2482,17 @@ export class BaileysClient extends EventEmitter {
       // Reconstruct from BD: we need fromMe / participant. Best effort.
       const fallback = await this.reconstructKeyFromDb(messageId, chatId).catch(() => null);
       if (!fallback) {
-        throw new CapabilityError('CAPABILITY_UNSUPPORTED', `reactToMessage: message ${messageId} is unavailable`, { messageId });
+        throw new CapabilityError(
+          'CAPABILITY_UNSUPPORTED',
+          `reactToMessage: message ${messageId} is unavailable`,
+          { messageId }
+        );
       }
       key = fallback;
     }
-    const sent = await this.sock.sendMessage(this.toRawJid(chatId), { react: { text: emoji, key } });
+    const sent = await this.sock.sendMessage(this.toRawJid(chatId), {
+      react: { text: emoji, key },
+    });
     await this.persistSentMessage(sent, this.toRawJid(chatId));
     await storeMessageReaction({
       targetMessageId: messageId,
@@ -2382,17 +2500,24 @@ export class BaileysClient extends EventEmitter {
       reactionMessageId: sent?.key?.id || undefined,
       emoji,
     }).catch(error =>
-      this.logger.warn(`outgoing reaction persistence failed for ${messageId}: ${error?.message || error}`)
+      this.logger.warn(
+        `outgoing reaction persistence failed for ${messageId}: ${error?.message || error}`
+      )
     );
     this.logger.info(`Reacted with ${emoji} to ${messageId}`);
   }
 
-  async forwardMessage(chatId: string, messageId: string, toChatId: string): Promise<string | undefined> {
+  async forwardMessage(
+    chatId: string,
+    messageId: string,
+    toChatId: string
+  ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
     const cached = this.keyCache.get(messageId);
     const original =
-      (await getRawWAMessage(messageId, cached?.chatJid || this.toRawJid(chatId)).catch(() => undefined)) ||
-      (await getRawWAMessage(messageId).catch(() => undefined));
+      (await getRawWAMessage(messageId, cached?.chatJid || this.toRawJid(chatId)).catch(
+        () => undefined
+      )) || (await getRawWAMessage(messageId).catch(() => undefined));
     if (!original?.message) {
       throw new CapabilityError(
         'CAPABILITY_UNSUPPORTED',
@@ -2407,18 +2532,39 @@ export class BaileysClient extends EventEmitter {
     return sent?.key?.id || undefined;
   }
 
-  async editMessage(chatId: string, messageId: string, content: string): Promise<string | undefined> {
+  async editMessage(
+    chatId: string,
+    messageId: string,
+    content: string
+  ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
-    if (!content?.trim()) throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Edited message content is required');
+    if (!content?.trim())
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Edited message content is required');
     const cached = this.keyCache.get(messageId);
-    const original = await getRawWAMessage(messageId, cached?.chatJid || this.toRawJid(chatId)).catch(() => undefined);
-    const key = original?.key || cached?.key || (await this.reconstructKeyFromDb(messageId, chatId).catch(() => null));
-    if (!key) throw new CapabilityError('CAPABILITY_UNSUPPORTED', `editMessage: message ${messageId} is unavailable`, { messageId });
+    const original = await getRawWAMessage(
+      messageId,
+      cached?.chatJid || this.toRawJid(chatId)
+    ).catch(() => undefined);
+    const key =
+      original?.key ||
+      cached?.key ||
+      (await this.reconstructKeyFromDb(messageId, chatId).catch(() => null));
+    if (!key)
+      throw new CapabilityError(
+        'CAPABILITY_UNSUPPORTED',
+        `editMessage: message ${messageId} is unavailable`,
+        { messageId }
+      );
     const raw = this.toRawJid(chatId);
     const sent = await this.sock.sendMessage(raw, { text: content, edit: key });
     await markMessageEdited(messageId, content, 'TEXT');
     await this.persistSentMessage(sent, raw);
-    this.emit('message-update', { waMessageId: messageId, updateType: 'EDITED', content, messageType: 'TEXT' });
+    this.emit('message-update', {
+      waMessageId: messageId,
+      updateType: 'EDITED',
+      content,
+      messageType: 'TEXT',
+    });
     return sent?.key?.id || messageId;
   }
 
@@ -2441,11 +2587,17 @@ export class BaileysClient extends EventEmitter {
     const entries = await getMessageKeysForChat(chatId);
     const entry = entries.find(item => item.key.id === messageId);
     if (!entry?.messageTimestamp) {
-      throw new CapabilityError('CAPABILITY_UNSUPPORTED', `deleteMessageForMe: message ${messageId} has no durable key and timestamp`);
+      throw new CapabilityError(
+        'CAPABILITY_UNSUPPORTED',
+        `deleteMessageForMe: message ${messageId} has no durable key and timestamp`
+      );
     }
-    await this.sock.chatModify({
-      deleteForMe: { deleteMedia: true, key: entry.key, timestamp: entry.messageTimestamp },
-    }, this.toRawJid(chatId));
+    await this.sock.chatModify(
+      {
+        deleteForMe: { deleteMedia: true, key: entry.key, timestamp: entry.messageTimestamp },
+      },
+      this.toRawJid(chatId)
+    );
     await markMessageDeletedForMe(messageId, chatId);
     this.emit('message-update', { waMessageId: messageId, updateType: 'DELETED_FOR_ME' });
   }
@@ -2496,10 +2648,12 @@ export class BaileysClient extends EventEmitter {
   async startChat(phone: string): Promise<{ id: string; name: string; phone: string }> {
     if (!this.sock || !this.isConnected()) throw new Error('Client not connected');
     const normalized = normalizePhoneForWhatsApp(phone);
-    if (!normalized) throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'A valid phone number is required');
+    if (!normalized)
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'A valid phone number is required');
     const results = await this.sock.onWhatsApp(normalized.rawJid);
     const found = results?.find(item => item.exists && item.jid);
-    if (!found) throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Recipient is not on WhatsApp');
+    if (!found)
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Recipient is not on WhatsApp');
     const id = this.normalizeJid(found.jid);
     const name = this.contactNameFor(found.jid, id) || normalized.phoneE164;
     await ensureEmptyConversation(id, name);
@@ -2510,9 +2664,12 @@ export class BaileysClient extends EventEmitter {
     const raw = this.toRawJid(groupId);
     const meta = await this.fetchGroupMetadata(raw);
     const ownPn = this.sock?.user?.id ? jidNormalizedUser(this.sock.user.id) : null;
-    const ownLid = (this.sock?.user as { lid?: string } | undefined)?.lid ||
+    const ownLid =
+      (this.sock?.user as { lid?: string } | undefined)?.lid ||
       (ownPn ? await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(ownPn) : null);
-    const ownIds = new Set([ownPn, ownLid].filter((id): id is string => !!id).map(jidNormalizedUser));
+    const ownIds = new Set(
+      [ownPn, ownLid].filter((id): id is string => !!id).map(jidNormalizedUser)
+    );
     const self = meta.participants.find(p =>
       [p.id, p.phoneNumber].some(id => !!id && ownIds.has(jidNormalizedUser(id)))
     );
@@ -2527,7 +2684,14 @@ export class BaileysClient extends EventEmitter {
     }
     const participants = meta.participants.map(p => ({
       id: this.normalizeJid(p.id),
-      name: this.contactNameFor(p.id, p.phoneNumber || '') || names.get(p.id) || names.get(p.phoneNumber || '') || p.name || p.notify || p.verifiedName || this.normalizeJid(p.id),
+      name:
+        this.contactNameFor(p.id, p.phoneNumber || '') ||
+        names.get(p.id) ||
+        names.get(p.phoneNumber || '') ||
+        p.name ||
+        p.notify ||
+        p.verifiedName ||
+        this.normalizeJid(p.id),
       pushName: p.notify || null,
       isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
       isSuperAdmin: p.admin === 'superadmin',
@@ -2576,11 +2740,17 @@ export class BaileysClient extends EventEmitter {
 
   async createGroup(subject: string, participants: string[]): Promise<any> {
     if (!this.sock) throw new Error('Client not initialized');
-    if (!this.isConnected()) throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
+    if (!this.isConnected())
+      throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
     const cleanSubject = subject.trim();
-    const members = Array.from(new Set(participants.map(p => this.toParticipantJid(p)).filter(Boolean)));
+    const members = Array.from(
+      new Set(participants.map(p => this.toParticipantJid(p)).filter(Boolean))
+    );
     if (!cleanSubject || !members.length) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Group subject and at least one participant are required');
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'Group subject and at least one participant are required'
+      );
     }
     const meta = await this.sock.groupCreate(cleanSubject, members);
     this.cacheGroupMetadata(meta);
@@ -2589,7 +2759,11 @@ export class BaileysClient extends EventEmitter {
 
   async updateGroup(
     groupId: string,
-    updates: { subject?: string; description?: string; setting?: 'announcement' | 'not_announcement' | 'locked' | 'unlocked' }
+    updates: {
+      subject?: string;
+      description?: string;
+      setting?: 'announcement' | 'not_announcement' | 'locked' | 'unlocked';
+    }
   ): Promise<any> {
     if (!this.sock) throw new Error('Client not initialized');
     const raw = this.toRawJid(groupId);
@@ -2606,7 +2780,8 @@ export class BaileysClient extends EventEmitter {
       await this.sock.groupSettingUpdate(raw, updates.setting);
       changed = true;
     }
-    if (!changed) throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'No group update was provided');
+    if (!changed)
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'No group update was provided');
     this.groupMetaCache.delete(raw);
     return this.getGroupInfo(raw);
   }
@@ -2618,29 +2793,50 @@ export class BaileysClient extends EventEmitter {
   ): Promise<unknown> {
     if (!this.sock) throw new Error('Client not initialized');
     if (!['add', 'remove', 'promote', 'demote'].includes(action)) {
-      throw new CapabilityError('CAPABILITY_UNSUPPORTED', `Unsupported group participant action: ${action}`, { action });
+      throw new CapabilityError(
+        'CAPABILITY_UNSUPPORTED',
+        `Unsupported group participant action: ${action}`,
+        { action }
+      );
     }
     const raw = this.toRawJid(groupId);
-    const members = Array.from(new Set(participants.map(p => this.toParticipantJid(p)).filter(Boolean)));
-    if (!members.length) throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'At least one participant is required');
+    const members = Array.from(
+      new Set(participants.map(p => this.toParticipantJid(p)).filter(Boolean))
+    );
+    if (!members.length)
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'At least one participant is required');
     const result = await this.sock.groupParticipantsUpdate(raw, members, action);
     this.groupMetaCache.delete(raw);
-    return result.map(entry => ({ ...entry, jid: entry.jid ? this.normalizeJid(entry.jid) : entry.jid }));
+    return result.map(entry => ({
+      ...entry,
+      jid: entry.jid ? this.normalizeJid(entry.jid) : entry.jid,
+    }));
   }
 
   async listContacts(limit = 500): Promise<unknown[]> {
     return listStoredContacts(limit);
   }
 
-  async createContact(input: { jid?: string; phone?: string; name: string; organization?: string; email?: string }): Promise<unknown> {
+  async createContact(input: {
+    jid?: string;
+    phone?: string;
+    name: string;
+    organization?: string;
+    email?: string;
+  }): Promise<unknown> {
     if (!this.sock) throw new Error('Client not initialized');
     const jid = this.toParticipantJid(input.jid || input.phone || '');
     if (!jid || !input.name?.trim()) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Contact name and jid/phone are required');
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'Contact name and jid/phone are required'
+      );
     }
     const existing = await (this.sock as any).onWhatsApp(jid).catch(() => []);
     if (Array.isArray(existing) && existing[0]?.exists === false) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Contact is not on WhatsApp', { jid: this.normalizeJid(jid) });
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Contact is not on WhatsApp', {
+        jid: this.normalizeJid(jid),
+      });
     }
     await this.sock.addOrEditContact(jid, {
       fullName: input.name.trim(),
@@ -2705,17 +2901,18 @@ export class BaileysClient extends EventEmitter {
     })) as any;
     const modification = buildChatModification(action, value, lastMessages, messageIds);
     await this.sock.chatModify(modification, this.toRawJid(chatId));
-    const patch = normalized === 'archive' || normalized === 'unarchive'
-      ? { archived: normalized === 'archive' }
-      : normalized === 'pin' || normalized === 'unpin'
-        ? { pinned: normalized === 'pin' }
-        : normalized === 'mute'
-          ? { muteUntil: Number(value) }
-          : normalized === 'unmute'
-            ? { muteUntil: null }
-            : normalized === 'star' || normalized === 'unstar'
-              ? { starred: normalized === 'star' }
-              : {};
+    const patch =
+      normalized === 'archive' || normalized === 'unarchive'
+        ? { archived: normalized === 'archive' }
+        : normalized === 'pin' || normalized === 'unpin'
+          ? { pinned: normalized === 'pin' }
+          : normalized === 'mute'
+            ? { muteUntil: Number(value) }
+            : normalized === 'unmute'
+              ? { muteUntil: null }
+              : normalized === 'star' || normalized === 'unstar'
+                ? { starred: normalized === 'star' }
+                : {};
     await upsertChatState(chatId, patch);
     const chat = this.chatStore.get(this.normalizeJid(this.toRawJid(chatId)));
     if (chat) Object.assign(chat, patch);
@@ -2730,17 +2927,26 @@ export class BaileysClient extends EventEmitter {
     return { subscribed: true, chatId: this.normalizeJid(raw) };
   }
 
-  async updatePresence(chatId: string | undefined, status: 'available' | 'unavailable' | 'composing' | 'recording' | 'paused'): Promise<{ status: string; chatId?: string }> {
+  async updatePresence(
+    chatId: string | undefined,
+    status: 'available' | 'unavailable' | 'composing' | 'recording' | 'paused'
+  ): Promise<{ status: string; chatId?: string }> {
     if (!this.sock) throw new Error('Client not initialized');
     if (!['available', 'unavailable', 'composing', 'recording', 'paused'].includes(status)) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', `Unsupported presence state: ${status}`);
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        `Unsupported presence state: ${status}`
+      );
     }
     const raw = chatId ? this.toRawJid(chatId) : undefined;
     await this.sock.sendPresenceUpdate(status, raw);
     return { status, ...(raw ? { chatId: this.normalizeJid(raw) } : {}) };
   }
 
-  async getPresence(chatId: string, participantId?: string): Promise<ReturnType<typeof buildPresenceSnapshot>> {
+  async getPresence(
+    chatId: string,
+    participantId?: string
+  ): Promise<ReturnType<typeof buildPresenceSnapshot>> {
     const normalizedChat = this.normalizeJid(this.toRawJid(chatId));
     const normalizedParticipant = participantId
       ? this.normalizeJid(this.toRawJid(participantId))
@@ -2764,7 +2970,12 @@ export class BaileysClient extends EventEmitter {
     }
     return buildPresenceSnapshot(
       normalizedChat,
-      state ? { lastKnownPresence: state.status as any, ...(state.lastSeen === undefined ? {} : { lastSeen: state.lastSeen }) } : undefined,
+      state
+        ? {
+            lastKnownPresence: state.status as any,
+            ...(state.lastSeen === undefined ? {} : { lastSeen: state.lastSeen }),
+          }
+        : undefined,
       normalizedParticipant || state?.participantId
     );
   }
@@ -2784,24 +2995,36 @@ export class BaileysClient extends EventEmitter {
   async setDefaultDisappearing(expiration: number): Promise<{ field: string; value: number }> {
     if (!this.sock) throw new Error('Client not initialized');
     if (!Number.isInteger(expiration) || expiration < 0) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Default disappearing expiration must be a non-negative integer');
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'Default disappearing expiration must be a non-negative integer'
+      );
     }
     await this.sock.updateDefaultDisappearingMode(expiration);
     return { field: 'defaultDisappearing', value: expiration };
   }
 
-  async setDisappearing(chatId: string, expiration: number | boolean): Promise<{ chatId: string; expiration: number | boolean }> {
+  async setDisappearing(
+    chatId: string,
+    expiration: number | boolean
+  ): Promise<{ chatId: string; expiration: number | boolean }> {
     if (!this.sock) throw new Error('Client not initialized');
     if (typeof expiration !== 'boolean' && (!Number.isInteger(expiration) || expiration < 0)) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Disappearing expiration must be a non-negative integer or false');
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'Disappearing expiration must be a non-negative integer or false'
+      );
     }
     const raw = this.toRawJid(chatId);
-    if (this.isGroupJid(raw)) await this.sock.groupToggleEphemeral(raw, expiration === false ? 0 : Number(expiration));
+    if (this.isGroupJid(raw))
+      await this.sock.groupToggleEphemeral(raw, expiration === false ? 0 : Number(expiration));
     else await this.sock.sendMessage(raw, { disappearingMessagesInChat: expiration });
     return { chatId: this.normalizeJid(raw), expiration };
   }
 
-  async getDisappearing(chatId: string): Promise<{ chatId: string; expiration?: number; known: boolean }> {
+  async getDisappearing(
+    chatId: string
+  ): Promise<{ chatId: string; expiration?: number; known: boolean }> {
     if (!this.sock) throw new Error('Client not initialized');
     const raw = this.toRawJid(chatId);
     const results = await this.sock.fetchDisappearingDuration(raw).catch(() => undefined);
@@ -2898,7 +3121,9 @@ export class BaileysClient extends EventEmitter {
     const raw = this.toRawJid(jid);
     let url: string | undefined;
     try {
-      url = await boundedProfilePictureUrl(timeoutMs => this.sock!.profilePictureUrl(raw, 'image', timeoutMs));
+      url = await boundedProfilePictureUrl(timeoutMs =>
+        this.sock!.profilePictureUrl(raw, 'image', timeoutMs)
+      );
     } catch (e) {
       if (isUnavailableProfilePicture(e)) return null;
       throw e;
@@ -2911,19 +3136,24 @@ export class BaileysClient extends EventEmitter {
       }
       const signal = AbortSignal.timeout(10_000);
       const r = await fetch(url, { redirect: 'manual', signal });
-      if (!r.ok || !r.body) throw new ProfilePictureDownloadError(`WhatsApp profile picture download failed (${r.status})`);
+      if (!r.ok || !r.body)
+        throw new ProfilePictureDownloadError(
+          `WhatsApp profile picture download failed (${r.status})`
+        );
       const length = Number(r.headers.get('content-length') || 0);
       const maxBytes = 10 * 1024 * 1024;
-      if (length > maxBytes) throw new ProfilePictureDownloadError('WhatsApp profile picture exceeds 10 MB');
+      if (length > maxBytes)
+        throw new ProfilePictureDownloadError('WhatsApp profile picture exceeds 10 MB');
       const reader = r.body.getReader();
       const chunks: Buffer[] = [];
       let size = 0;
       try {
-        while (true) {
+        for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           size += value.byteLength;
-          if (size > maxBytes) throw new ProfilePictureDownloadError('WhatsApp profile picture exceeds 10 MB');
+          if (size > maxBytes)
+            throw new ProfilePictureDownloadError('WhatsApp profile picture exceeds 10 MB');
           chunks.push(Buffer.from(value));
         }
       } finally {
@@ -2943,7 +3173,9 @@ export class BaileysClient extends EventEmitter {
   private async profilePictureUrlIfAvailable(rawJid: string): Promise<string | undefined> {
     if (!this.sock) return undefined;
     try {
-      return await boundedProfilePictureUrl(timeoutMs => this.sock!.profilePictureUrl(rawJid, 'preview', timeoutMs));
+      return await boundedProfilePictureUrl(timeoutMs =>
+        this.sock!.profilePictureUrl(rawJid, 'preview', timeoutMs)
+      );
     } catch (error) {
       if (isUnavailableProfilePicture(error)) return undefined;
       throw error;
@@ -2952,7 +3184,12 @@ export class BaileysClient extends EventEmitter {
 
   private isAllowedWhatsAppMediaHost(hostname: string): boolean {
     const host = hostname.toLowerCase().replace(/\.$/, '');
-    return host === 'whatsapp.net' || host.endsWith('.whatsapp.net') || host === 'fbcdn.net' || host.endsWith('.fbcdn.net');
+    return (
+      host === 'whatsapp.net' ||
+      host.endsWith('.whatsapp.net') ||
+      host === 'fbcdn.net' ||
+      host.endsWith('.fbcdn.net')
+    );
   }
 
   private async persistSentMessage(sent: WAMessage | undefined, rawJid: string): Promise<void> {
@@ -2960,7 +3197,9 @@ export class BaileysClient extends EventEmitter {
     this.rememberKey(sent.key.id, sent.key, rawJid);
     this.rememberMessageForRetry(sent.key, sent.message);
     await storeRawWAMessage(sent).catch(error =>
-      this.logger.warn(`durable sent-message store failed for ${sent.key?.id}: ${error?.message || error}`)
+      this.logger.warn(
+        `durable sent-message store failed for ${sent.key?.id}: ${error?.message || error}`
+      )
     );
   }
 
@@ -3134,7 +3373,12 @@ export class BaileysClient extends EventEmitter {
     }
   }
 
-  async previewArchiveSnapshot(): Promise<{ version: number; records: number; chats: number; archived: number }> {
+  async previewArchiveSnapshot(): Promise<{
+    version: number;
+    records: number;
+    chats: number;
+    archived: number;
+  }> {
     if (!this.sock || !this.isConnected()) throw new Error('Client not connected');
     const snapshot = await readArchiveSnapshot(this.sock);
     return {
@@ -3145,23 +3389,41 @@ export class BaileysClient extends EventEmitter {
     };
   }
 
-  syncArchiveSnapshot(): Promise<{ version: number; records: number; chats: number; archived: number; created: number }> {
+  syncArchiveSnapshot(): Promise<{
+    version: number;
+    records: number;
+    chats: number;
+    archived: number;
+    created: number;
+  }> {
     const socket = this.sock;
     if (!socket || !this.isConnected()) return Promise.reject(new Error('Client not connected'));
     if (this.archiveSnapshotSync?.socket === socket) return this.archiveSnapshotSync.promise;
     if (this.archiveSnapshotSync) {
-      return this.archiveSnapshotSync.promise.catch(() => undefined).then(() => this.syncArchiveSnapshot());
+      return this.archiveSnapshotSync.promise
+        .catch(() => undefined)
+        .then(() => this.syncArchiveSnapshot());
     }
     const run = this.performArchiveSnapshotSync();
     this.archiveSnapshotSync = { socket, promise: run };
     void run.then(
-      () => { if (this.archiveSnapshotSync?.promise === run) this.archiveSnapshotSync = null; },
-      () => { if (this.archiveSnapshotSync?.promise === run) this.archiveSnapshotSync = null; }
+      () => {
+        if (this.archiveSnapshotSync?.promise === run) this.archiveSnapshotSync = null;
+      },
+      () => {
+        if (this.archiveSnapshotSync?.promise === run) this.archiveSnapshotSync = null;
+      }
     );
     return run;
   }
 
-  private async performArchiveSnapshotSync(): Promise<{ version: number; records: number; chats: number; archived: number; created: number }> {
+  private async performArchiveSnapshotSync(): Promise<{
+    version: number;
+    records: number;
+    chats: number;
+    archived: number;
+    created: number;
+  }> {
     const socket = this.sock;
     if (!socket || !this.isConnected()) throw new Error('Client not connected');
     const startedAt = new Date();
@@ -3169,18 +3431,24 @@ export class BaileysClient extends EventEmitter {
     if (!this.isConnected()) throw new Error('Client disconnected during archive snapshot');
     const chats = [...snapshot.states].map(([jid, archived]) => {
       const normalized = this.normalizeJid(jid);
-      const aliases = [...(this.contactAliasGroups.get(jid) || this.contactAliasGroups.get(normalized) || [])];
+      const aliases = [
+        ...(this.contactAliasGroups.get(jid) || this.contactAliasGroups.get(normalized) || []),
+      ];
       const cached = this.chatStore.get(normalized);
       const name = this.contactNameFor(jid, normalized) || cached?.name;
       return { jid: normalized, aliases, name, archived };
     });
-    await enrichArchiveGroupNames(chats, async jid => {
-      const cached = this.groupMetaCache.get(jid);
-      if (cached?.subject) return cached.subject;
-      const meta = await socket.groupMetadata(jid);
-      if (this.sock === socket) this.cacheGroupMetadata(meta);
-      return meta.subject;
-    }, { isCurrent: () => this.sock === socket && this.isConnected() });
+    await enrichArchiveGroupNames(
+      chats,
+      async jid => {
+        const cached = this.groupMetaCache.get(jid);
+        if (cached?.subject) return cached.subject;
+        const meta = await socket.groupMetadata(jid);
+        if (this.sock === socket) this.cacheGroupMetadata(meta);
+        return meta.subject;
+      },
+      { isCurrent: () => this.sock === socket && this.isConnected() }
+    );
     if (this.sock !== socket || !this.isConnected()) {
       throw new Error('WhatsApp socket changed during archive name lookup');
     }
@@ -3189,8 +3457,13 @@ export class BaileysClient extends EventEmitter {
       const cached = this.chatStore.get(chat.jid);
       if (cached) cached.archived = chat.archived;
     }
-    return { version: snapshot.version, records: snapshot.records, chats: chats.length,
-      archived: applied.archived, created: applied.created };
+    return {
+      version: snapshot.version,
+      records: snapshot.records,
+      chats: chats.length,
+      archived: applied.archived,
+      created: applied.created,
+    };
   }
 
   private async fetchGroupMetadata(rawJid: string, force = false): Promise<GroupMetadata> {
@@ -3593,10 +3866,15 @@ export class BaileysClient extends EventEmitter {
 
     const durable = await getRawWAMessage(messageId, remoteJid || undefined).catch(() => undefined);
     if (durable?.message) {
-      this.logger.debug(`WhatsApp durable retry message hit remoteJid=${remoteJid || 'unknown'} messageId=${messageId}`);
+      this.logger.debug(
+        `WhatsApp durable retry message hit remoteJid=${remoteJid || 'unknown'} messageId=${messageId}`
+      );
       this.retryMessageCache.set(messageId, durable.message);
       if (remoteJid) {
-        this.retryMessageCache.set(this.retryMessageCacheKey(remoteJid, messageId), durable.message);
+        this.retryMessageCache.set(
+          this.retryMessageCacheKey(remoteJid, messageId),
+          durable.message
+        );
       }
       return durable.message;
     }

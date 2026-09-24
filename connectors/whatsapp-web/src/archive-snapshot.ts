@@ -33,43 +33,76 @@ export async function readArchiveSnapshot(
   let more = true;
   let sawSnapshot = false;
   let decodeWarnings = 0;
-  const strictLogger = { warn: () => { decodeWarnings++; } };
+  const strictLogger = {
+    warn: () => {
+      decodeWarnings++;
+    },
+  };
   for (let page = 0; page < 16 && more; page++) {
-    const response = await socket.query({
-      tag: 'iq',
-      attrs: { to: 's.whatsapp.net', xmlns: 'w:sync:app:state', type: 'set' },
-      content: [{
-        tag: 'sync', attrs: {}, content: [{
-          tag: 'collection', attrs: {
-            name: 'regular_low', version: String(state.version),
-            return_snapshot: page === 0 ? 'true' : 'false',
+    const response = await socket.query(
+      {
+        tag: 'iq',
+        attrs: { to: 's.whatsapp.net', xmlns: 'w:sync:app:state', type: 'set' },
+        content: [
+          {
+            tag: 'sync',
+            attrs: {},
+            content: [
+              {
+                tag: 'collection',
+                attrs: {
+                  name: 'regular_low',
+                  version: String(state.version),
+                  return_snapshot: page === 0 ? 'true' : 'false',
+                },
+              },
+            ],
           },
-        }],
-      }],
-    }, 60_000);
+        ],
+      },
+      60_000
+    );
     const collection = (await deps.extract(response, {})).regular_low;
     if (!collection) throw new Error('Complete WhatsApp archive snapshot is unavailable');
     const mutations = [];
     if (collection.snapshot) {
       if (sawSnapshot) throw new Error('Complete WhatsApp archive snapshot is unavailable');
-      const decoded = await deps.decode('regular_low', collection.snapshot, getKey, undefined, true, strictLogger as any);
+      const decoded = await deps.decode(
+        'regular_low',
+        collection.snapshot,
+        getKey,
+        undefined,
+        true,
+        strictLogger as any
+      );
       state = decoded.state;
       mutations.push(...Object.values(decoded.mutationMap));
       sawSnapshot = true;
-      if (collection.snapshot.records &&
-          Object.keys(decoded.state.indexValueMap || {}).length !== collection.snapshot.records.length) {
+      if (
+        collection.snapshot.records &&
+        Object.keys(decoded.state.indexValueMap || {}).length !== collection.snapshot.records.length
+      ) {
         throw new Error('Complete WhatsApp archive snapshot is unavailable');
       }
     }
     if (collection.patches.length) {
       const decoded = await deps.decodePatches(
-        'regular_low', collection.patches, state, getKey, {}, undefined, strictLogger as any, true
+        'regular_low',
+        collection.patches,
+        state,
+        getKey,
+        {},
+        undefined,
+        strictLogger as any,
+        true
       );
       state = decoded.state;
       mutations.push(...Object.values(decoded.mutationMap));
       const finalPatch = collection.patches.at(-1);
-      if (finalPatch?.version?.version != null &&
-          Number(finalPatch.version.version) !== state.version) {
+      if (
+        finalPatch?.version?.version != null &&
+        Number(finalPatch.version.version) !== state.version
+      ) {
         throw new Error('Complete WhatsApp archive snapshot is unavailable');
       }
     }
@@ -84,7 +117,8 @@ export async function readArchiveSnapshot(
     records += mutations.length;
     more = collection.hasMorePatches;
   }
-  if (!sawSnapshot || more || decodeWarnings) throw new Error('Complete WhatsApp archive snapshot is unavailable');
+  if (!sawSnapshot || more || decodeWarnings)
+    throw new Error('Complete WhatsApp archive snapshot is unavailable');
   return { version: state.version, records, states };
 }
 
@@ -94,6 +128,7 @@ export async function readCurrentArchiveSnapshot(
   deps: SnapshotDeps = defaultDeps
 ): ReturnType<typeof readArchiveSnapshot> {
   const snapshot = await readArchiveSnapshot(socket, deps);
-  if (currentSocket() !== socket) throw new Error('WhatsApp socket changed during archive snapshot');
+  if (currentSocket() !== socket)
+    throw new Error('WhatsApp socket changed during archive snapshot');
   return snapshot;
 }

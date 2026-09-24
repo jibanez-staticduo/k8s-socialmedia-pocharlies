@@ -5,7 +5,9 @@ let tableReady: Promise<void> | undefined;
 
 function ensureTable(): Promise<void> {
   if (!tableReady) {
-    tableReady = getPool().query(`
+    tableReady = getPool()
+      .query(
+        `
       CREATE TABLE IF NOT EXISTS whatsapp_send_attempts (
         account TEXT NOT NULL,
         token_hash TEXT NOT NULL,
@@ -16,10 +18,13 @@ function ensureTable(): Promise<void> {
         sent_at TIMESTAMPTZ,
         PRIMARY KEY (account, token_hash)
       )
-    `).then(() => undefined).catch(error => {
-      tableReady = undefined;
-      throw error;
-    });
+    `
+      )
+      .then(() => undefined)
+      .catch(error => {
+        tableReady = undefined;
+        throw error;
+      });
   }
   return tableReady;
 }
@@ -37,7 +42,9 @@ export async function reserveTextSend(input: {
   replyToMessageId?: string;
 }): Promise<SendReservation> {
   const requestHash = createHash('sha256')
-    .update(JSON.stringify(['text', input.conversationId, input.content, input.replyToMessageId || null]))
+    .update(
+      JSON.stringify(['text', input.conversationId, input.content, input.replyToMessageId || null])
+    )
     .digest('hex');
   return reserveSend(input.token, requestHash);
 }
@@ -54,16 +61,36 @@ export async function reserveMediaSend(input: {
   sourceDigest?: string;
   sourceMimeType?: string;
 }): Promise<SendReservation> {
-  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest)) throw new Error('Invalid sourceDigest');
-  if (input.sourceMimeType !== undefined && (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())) throw new Error('Invalid sourceMimeType');
-  if (input.sourceDigest && !input.sourceMimeType) throw new Error('sourceMimeType is required with sourceDigest');
+  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
+    throw new Error('Invalid sourceDigest');
+  if (
+    input.sourceMimeType !== undefined &&
+    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
+  )
+    throw new Error('Invalid sourceMimeType');
+  if (input.sourceDigest && !input.sourceMimeType)
+    throw new Error('sourceMimeType is required with sourceDigest');
   const dataHeader = input.fileUrl.match(/^data:([^,]*),/i)?.[1];
-  const outputMimeType = dataHeader?.replace(/;base64$/i, '').trim().toLowerCase() || null;
+  const outputMimeType =
+    dataHeader
+      ?.replace(/;base64$/i, '')
+      .trim()
+      .toLowerCase() || null;
   const sourceMimeType = input.sourceMimeType?.trim().toLowerCase() || outputMimeType;
   const requestHash = createHash('sha256')
-    .update(JSON.stringify(['media', input.conversationId, input.fileName || null,
-      input.caption || null, input.asSticker, input.asGif, input.replyToMessageId || null,
-      outputMimeType, sourceMimeType]))
+    .update(
+      JSON.stringify([
+        'media',
+        input.conversationId,
+        input.fileName || null,
+        input.caption || null,
+        input.asSticker,
+        input.asGif,
+        input.replyToMessageId || null,
+        outputMimeType,
+        sourceMimeType,
+      ])
+    )
     .update('\0')
     .update(input.sourceDigest || input.fileUrl)
     .digest('hex');
@@ -78,12 +105,24 @@ export async function reserveVoiceSend(input: {
   sourceDigest?: string;
   sourceMimeType?: string;
 }): Promise<SendReservation> {
-  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest)) throw new Error('Invalid sourceDigest');
-  if (input.sourceMimeType !== undefined && (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())) throw new Error('Invalid sourceMimeType');
-  if (input.sourceDigest && !input.sourceMimeType) throw new Error('sourceMimeType is required with sourceDigest');
+  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
+    throw new Error('Invalid sourceDigest');
+  if (
+    input.sourceMimeType !== undefined &&
+    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
+  )
+    throw new Error('Invalid sourceMimeType');
+  if (input.sourceDigest && !input.sourceMimeType)
+    throw new Error('sourceMimeType is required with sourceDigest');
   const requestHash = createHash('sha256')
-    .update(JSON.stringify(['voice', input.conversationId, input.mimeType.toLowerCase(),
-      input.sourceMimeType?.trim().toLowerCase() || input.mimeType.toLowerCase()]))
+    .update(
+      JSON.stringify([
+        'voice',
+        input.conversationId,
+        input.mimeType.toLowerCase(),
+        input.sourceMimeType?.trim().toLowerCase() || input.mimeType.toLowerCase(),
+      ])
+    )
     .update('\0')
     .update(input.sourceDigest || input.audioBase64)
     .digest('hex');
@@ -97,7 +136,9 @@ async function reserveSend(sendToken: string, requestHash: string): Promise<Send
   const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
   const tokenHash = digest(token);
   // Baileys accepts a caller-supplied ID; this stable ID also identifies a timed-out attempt.
-  const messageId = `3EB0${digest(JSON.stringify([account, token])).slice(0, 18).toUpperCase()}`;
+  const messageId = `3EB0${digest(JSON.stringify([account, token]))
+    .slice(0, 18)
+    .toUpperCase()}`;
   await ensureTable();
   const inserted = await getPool().query(
     `INSERT INTO whatsapp_send_attempts (account, token_hash, request_hash, message_id, status)
@@ -121,7 +162,9 @@ async function reserveSend(sendToken: string, requestHash: string): Promise<Send
 }
 
 export class SendAlreadyClaimedError extends Error {
-  constructor() { super('Send attempt already claimed or completed'); }
+  constructor() {
+    super('Send attempt already claimed or completed');
+  }
 }
 
 export async function claimSendAttempt(token: string, messageId: string): Promise<void> {
