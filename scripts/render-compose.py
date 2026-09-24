@@ -184,6 +184,9 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
         s['networks']['llm'] = {}
         if name == 'mcp-sse':
             s['networks']['npm'] = {'aliases': ['socialmedia-mcp-sse']}
+            s['environment']['HERMES_CHAT_TOOL_SECRET'] = configurable('HERMES_CHAT_TOOL_SECRET')
+            s['environment']['HERMES_CHAT_ALLOW_PROPOSALS'] = configurable('HERMES_CHAT_ALLOW_PROPOSALS', 'false')
+            s['environment']['HERMES_CHAT_ALLOW_DIRECT_SEND'] = configurable('HERMES_CHAT_ALLOW_DIRECT_SEND', 'false')
         s['environment'].update(minio)
         s['environment'].update(PUBLIC_BASE_URL=public, WHATSAPP_PUBLIC_BASE_URL=wa_public, WHATSAPP_LINK_BASE_URL=variable('WHATSAPP_LINK_BASE_URL'), S3_PREFIX=variable('S3_PREFIX'))
         s['environment'].update({'REDIS_URL': configurable('REDIS_URL', 'rediss://socialmedia-redis:6379'), 'REDIS_TLS_CA': '${REDIS_TLS_CA-/certs/ca.crt}', 'ENCRYPTION_KEY': variable('ENCRYPTION_KEY', True), 'ENABLE_SENDING': '${ENABLE_SENDING:-false}', 'EMERGENCY_DISABLE_SENDING': '${EMERGENCY_DISABLE_SENDING:-false}', 'PORT': str(port), 'MCP_SSE_PORT': str(port), 'MCP_SSE_AUTH_TOKEN': variable('MCP_SSE_AUTH_TOKEN', True)})
@@ -267,6 +270,10 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
         ui['environment']['APP_AI_DEFAULT_MODEL'] = '${APP_AI_DEFAULT_MODEL:-${LLM_CHAT_MODEL}}'
         ui['environment']['APP_AI_MODELS'] = variable('APP_AI_MODELS')
         ui['environment']['MEDIA_ALLOWED_ORIGINS'] = variable('MEDIA_ALLOWED_ORIGINS')
+        ui['environment']['HERMES_CHAT_TOOL_SECRET'] = configurable('HERMES_CHAT_TOOL_SECRET')
+        ui['environment']['HERMES_CHAT_ALLOW_PROPOSALS'] = configurable('HERMES_CHAT_ALLOW_PROPOSALS', 'false')
+        ui['environment']['HERMES_CHAT_ALLOW_DIRECT_SEND'] = configurable('HERMES_CHAT_ALLOW_DIRECT_SEND', 'false')
+        ui['environment']['HERMES_CHAT_TOOL_INTERNAL_URL'] = 'http://mcp-sse:3010'
         for key, default in (
             ('APP_AVATAR_CACHE_TTL_MS', '30000'),
             ('APP_AVATAR_NEGATIVE_CACHE_TTL_MS', '5000'),

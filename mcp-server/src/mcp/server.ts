@@ -394,10 +394,10 @@ export class MCPServer {
     args: Record<string, any>
   ): Promise<any> {
     this.validateCanonicalArguments(definition, args);
-    if (definition.handler === 'readCurrentChat' || definition.handler === 'sendCurrentChat') {
+    if (['readCurrentChat', 'sendCurrentChat', 'deliverCurrentChat'].includes(definition.handler)) {
       const scope = verifyCurrentChatCapability(
         args.capability,
-        definition.handler === 'readCurrentChat' ? 'read' : 'propose'
+        definition.handler === 'readCurrentChat' ? 'read' : definition.handler === 'sendCurrentChat' ? 'propose' : 'send'
       );
       await requireCurrentChatTurn(this.redisClient, scope);
     }
@@ -407,6 +407,13 @@ export class MCPServer {
         process.env.EMERGENCY_DISABLE_SENDING === 'true'
       ) {
         return this.errorResponse('unsupported_capability', 'Current-chat proposals are disabled');
+      }
+    } else if (definition.handler === 'deliverCurrentChat') {
+      if (
+        process.env.HERMES_CHAT_ALLOW_DIRECT_SEND !== 'true' ||
+        process.env.EMERGENCY_DISABLE_SENDING === 'true'
+      ) {
+        return this.errorResponse('unsupported_capability', 'Hermes direct sending is disabled');
       }
     } else if (
       (definition.effect === 'externalWrite' || definition.effect === 'destructive') &&
@@ -435,17 +442,23 @@ export class MCPServer {
       }
     };
 
-    const idempotencyKey =
-      typeof args.idempotencyKey === 'string' ? args.idempotencyKey.trim() : '';
+    const directScope = definition.handler === 'deliverCurrentChat'
+      ? verifyCurrentChatCapability(args.capability, 'send')
+      : null;
+    const idempotencyKey = directScope?.requestId ||
+      (typeof args.idempotencyKey === 'string' ? args.idempotencyKey.trim() : '');
     const mutates = definition.effect !== 'read' && definition.effect !== 'compute';
     if (definition.handler === 'sendCurrentChat') return execute();
     if (!idempotencyKey || !mutates) return execute();
 
     const payload = { ...args };
     delete payload.idempotencyKey;
-    const payloadHash = createHash('sha256').update(this.stableJson(payload)).digest('hex');
+    const payloadHash = createHash('sha256').update(directScope ? args.text : this.stableJson(payload)).digest('hex');
+    const idempotencyScope = directScope
+      ? `${directScope.account}\0${directScope.chat}`
+      : `${args.channel}\0${args.accountId}`;
     const storageKey = `social:v2:idempotency:${createHash('sha256')
-      .update(`${definition.name}\0${args.channel}\0${args.accountId}\0${idempotencyKey}`)
+      .update(`${definition.name}\0${idempotencyScope}\0${idempotencyKey}`)
       .digest('hex')}`;
     const pending = JSON.stringify({
       payloadHash,
@@ -518,7 +531,7 @@ export class MCPServer {
       );
     }
     const mutates = definition.effect !== 'read' && definition.effect !== 'compute';
-    if (mutates && definition.handler !== 'sendCurrentChat') {
+    if (mutates && definition.handler !== 'sendCurrentChat' && definition.handler !== 'deliverCurrentChat') {
       if (typeof args.channel !== 'string' || !args.channel.trim()) {
         throw this.canonicalError('invalid_request', 'channel is required for every write');
       }
@@ -575,6 +588,23 @@ export class MCPServer {
           replayed: result.replayed,
           requiresOwnerApproval: true,
         });
+      }
+      case 'deliverCurrentChat': {
+        const scope = verifyCurrentChatCapability(args.capability, 'send');
+        await requireCurrentChatTurn(this.redisClient, scope);
+        const chat = await this.resolveCurrentChatReadScope(scope.account, scope.chat);
+        const digest = createHash('sha256').update(`${scope.account}\0${scope.chat}\0${scope.requestId}`).digest('hex');
+        const token = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
+        const result = await this.handleSendMessage({
+          account: scope.account,
+          chatId: bareWhatsAppJid(chat.chatId),
+          text: args.text,
+          scopedSendToken: token,
+        });
+        if (!pickString(asObject(this.legacyResultData(result)), ['messageId'])) {
+          throw this.canonicalError('outcome_unknown', 'Connector did not confirm a message ID; do not retry automatically');
+        }
+        return result;
       }
       case 'listAccounts':
         return this.canonicalListAccounts(args);
@@ -2858,8 +2888,9 @@ export class MCPServer {
     phone?: string;
     phoneE164?: string;
     manualOpenUrl?: string;
+    scopedSendToken?: string;
   }) {
-    if (process.env.ENABLE_SENDING !== 'true') {
+    if (!args.scopedSendToken && process.env.ENABLE_SENDING !== 'true') {
       throw new McpError(ErrorCode.InvalidRequest, 'Sending is disabled (ENABLE_SENDING != true)');
     }
     if (process.env.EMERGENCY_DISABLE_SENDING === 'true') {
@@ -2890,7 +2921,7 @@ export class MCPServer {
     const sharedSecret = connectorSecretFor(requireAccount('whatsapp', account));
     const timestamp = Math.floor(Date.now() / 1000);
     const body = {
-      sendToken: `direct-${Date.now()}`,
+      sendToken: args.scopedSendToken || `direct-${Date.now()}`,
       conversationId,
       content: args.text,
       ...(args.replyTo ? { replyToMessageId: args.replyTo } : {}),

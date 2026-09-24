@@ -65,7 +65,8 @@ await page.route('**/api/**', async route => {
   }
   if (url.pathname === '/api/ai/chat') {
     assert.equal(typeof body.allowPropose, 'boolean', 'the web UI omitted the proposal grant state');
-    turns.push({key, message: body.message, allowPropose: body.allowPropose});
+    assert.equal(typeof body.allowSend, 'boolean', 'the web UI omitted the direct-send grant state');
+    turns.push({key, message: body.message, allowPropose: body.allowPropose, allowSend: body.allowSend, requestId: body.requestId});
     if (failNext) { failNext = false; return route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'Hermes no disponible'})}); }
     const stored = sessions.get(key) || {sessionId: `session-${key}`, messages: []};
     stored.messages.push({role: 'user', content: body.message}, {role: 'assistant', content: reply});
@@ -118,8 +119,18 @@ try {
   await settleTurn();
   await page.locator('.ai-bubble-in').filter({hasText: reply}).waitFor();
   assert.equal(turns.at(-1).allowPropose, true, 'the authenticated owner turn lacks proposal access');
+  assert.equal(turns.at(-1).allowSend, true, 'the authenticated owner turn lacks direct-send access');
   assert.equal(await page.locator('#ai-prompt').inputValue(), '', 'the panel composer kept the sent text');
   assert.equal(await page.locator('.ai-typing').count(), 0, 'the typing receipt stayed after the answer');
+
+  failNext = true;
+  await page.locator('#ai-prompt').fill('Envía este mensaje');
+  await page.locator('#ai-prompt').press('Enter');
+  await page.getByText('Hermes no disponible').waitFor();
+  assert.equal(turns.at(-1).requestId, undefined, 'the browser assigned a direct-send request ID');
+  await page.locator('#ai-prompt').press('Enter');
+  await page.locator('.ai-bubble-out').filter({hasText: 'Envía este mensaje'}).waitFor();
+  assert.equal(turns.at(-1).requestId, undefined, 'the browser must not assign direct-send request IDs');
 
   await page.locator('#ai-prompt').fill(DRAFT_INSTRUCTION);
   await page.locator('#ai-prompt').press('Enter');
@@ -142,7 +153,7 @@ try {
   assert.equal(await page.locator('#message').inputValue(), '', 'the draft arrived before the answer');
   await settleTurn();
   assert.equal(draftTurns(), draftTurnsBeforeClick + 1, 'Proponer mensaje did not ask the session once');
-  assert.deepEqual(turns.at(-1), {key: 'personal:two', message: DRAFT_INSTRUCTION, allowPropose: true}, 'Proponer mensaje asked another chat');
+  assert.deepEqual(turns.at(-1), {key: 'personal:two', message: DRAFT_INSTRUCTION, allowPropose: true, allowSend: false, requestId: undefined}, 'Proponer mensaje asked another chat or requested direct sending');
   assert.equal(await page.locator('#message').inputValue(), reply, 'the proposal was not written as a draft');
   assert.equal(directSends, 0, 'Proponer mensaje sent a WhatsApp message');
   assert.equal(await page.locator('#ai-panel').isVisible(), false, 'Proponer mensaje opened the panel');

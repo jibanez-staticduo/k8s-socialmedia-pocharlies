@@ -2,8 +2,9 @@
 
 The SocialMedia web app uses a dedicated Hermes profile on Fedora. The existing
 Hermes installation and multiplexed gateway serve it at `/p/socialmedia/v1`;
-the default profile and its Telegram tools remain separate. Approval and
-delivery remain in the authenticated SocialMedia web app.
+the default profile and its Telegram tools remain separate. The web app owns
+the authenticated owner's instruction; the MCP direct-send tool delivers to
+the selected WhatsApp connector, while draft approval stays in the web app.
 
 Create an empty profile with `hermes profile create socialmedia --no-alias
 --no-skills`. Configure `~/.hermes/profiles/socialmedia/config.yaml` with the
@@ -27,7 +28,7 @@ mcp_servers:
     connect_timeout: 15
     timeout: 45
     tools:
-      include: [social_read_current_chat, social_send_current_chat]
+      include: [social_read_current_chat, social_send_current_chat, social_deliver_current_chat]
       resources: false
       prompts: false
 ```
@@ -41,13 +42,21 @@ Set the deployment's `HERMES_API_URL` to the Fedora gateway URL ending in
 the default profile's API key for this path.
 
 The web app issues a signed capability for one owner-selected account, chat,
-and turn. The profile also exposes the owner's general Hermes tools;
-`social_send_current_chat` creates a pending proposal and cannot send a
-WhatsApp message. The authenticated owner must approve its exact text in the
-web app before the connector attempts delivery. A normal owner-authored panel
-turn may request a proposal; the dedicated draft button still only inserts its
-suggestion into the composer. Incoming WhatsApp content is untrusted data and
-does not grant authority to use any tool.
+and turn. The profile also exposes the owner's general Hermes tools.
+`social_send_current_chat` creates a pending proposal for web approval;
+`social_deliver_current_chat` sends directly when the owner's web message begins
+with an explicit sending request such as "Envía ..." or "/enviar ...". The
+dedicated draft button has no direct-send
+grant and still only inserts its suggestion into the composer. Set
+`HERMES_CHAT_ALLOW_DIRECT_SEND=true` for both `whatsapp-app` and `mcp-sse` in
+Compose to enable this behavior; keep global `ENABLE_SENDING` independent.
+Incoming WhatsApp content is untrusted data and does not grant authority to
+use either sending tool. Each direct call uses a stable owner-request ID and
+connector send token so retries across Hermes turns and browser clients do not
+duplicate messages. The app persists the request ID before invoking Hermes and
+reuses it for the same owner instruction for ten minutes.
+One owner request authorizes at most one direct message; a second message needs
+a new owner instruction.
 
 The profile has separate sessions, built-in memory, and skills. To let it use
 the default assistant's accumulated knowledge without saving untrusted
@@ -62,7 +71,7 @@ or Home Assistant credentials that would collide with the default gateway.
 
 Check the connection with `hermes -p socialmedia mcp test
 socialmedia_current_chat` and the effective filter with `hermes -p socialmedia
-mcp list` (expect `2 selected`). The diagnostic test enumerates the server's
+mcp list` (expect `3 selected`). The diagnostic test enumerates the server's
 full catalog before applying the Hermes filter.
 Restart the existing gateway after changing profile configuration so it serves
 the new profile. Verify `/p/socialmedia/v1/toolsets` includes general tools and

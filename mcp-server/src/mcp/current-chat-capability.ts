@@ -2,12 +2,13 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { requireAccount } from '../domain/account-registry';
 import { stripAccount } from '../domain/account';
 
-export type CurrentChatOperation = 'read' | 'propose';
+export type CurrentChatOperation = 'read' | 'propose' | 'send';
 export interface CurrentChatCapability {
   account: string;
   chat: string;
   exp: number;
   ops: CurrentChatOperation[];
+  requestId?: string;
   turn: string;
 }
 
@@ -49,7 +50,7 @@ export function verifyCurrentChatCapability(
   }
   const value = payload as Record<string, unknown>;
   if (
-    Object.keys(value).sort().join(',') !== 'account,chat,exp,ops,turn' ||
+    !['account,chat,exp,ops,turn', 'account,chat,exp,ops,requestId,turn'].includes(Object.keys(value).sort().join(',')) ||
     typeof value.account !== 'string' ||
     !value.account ||
     typeof value.chat !== 'string' ||
@@ -62,7 +63,9 @@ export function verifyCurrentChatCapability(
     (value.exp as number) > nowSeconds + MAX_TTL_SECONDS ||
     !Array.isArray(value.ops) ||
     value.ops.length === 0 ||
-    value.ops.some(op => op !== 'read' && op !== 'propose') ||
+    value.ops.some(op => op !== 'read' && op !== 'propose' && op !== 'send') ||
+    (value.requestId !== undefined && (typeof value.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.requestId))) ||
+    (operation === 'send' && !value.requestId) ||
     !value.ops.includes(operation)
   ) {
     throw new Error('Invalid current-chat capability');

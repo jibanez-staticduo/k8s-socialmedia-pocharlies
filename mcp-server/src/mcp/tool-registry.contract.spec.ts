@@ -15,6 +15,7 @@ const EXPECTED_TOOL_NAMES = [
   'social_continue_digest',
   'social_create_draft',
   'social_delete_message',
+  'social_deliver_current_chat',
   'social_discover_business',
   'social_forward_message',
   'social_get_conversation',
@@ -54,6 +55,7 @@ const EXPECTED_EFFECTS: Record<(typeof EXPECTED_TOOL_NAMES)[number], SocialEffec
   social_continue_digest: 'internalWrite',
   social_create_draft: 'internalWrite',
   social_delete_message: 'destructive',
+  social_deliver_current_chat: 'externalWrite',
   social_discover_business: 'read',
   social_forward_message: 'externalWrite',
   social_get_conversation: 'read',
@@ -297,6 +299,12 @@ const EXPECTED_ANNOTATIONS: Record<
     idempotentHint: true,
     openWorldHint: false,
   },
+  social_deliver_current_chat: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
   social_send_message: {
     readOnlyHint: false,
     destructiveHint: false,
@@ -416,11 +424,11 @@ describe('Socialmedia v2 tool contract', () => {
     readFileSync(manifestPath, 'utf8')
   ) as ContractManifest;
 
-  it('contains exactly the 36 canonical tools in deterministic order', () => {
+  it('contains exactly the 37 canonical tools in deterministic order', () => {
     const names = SOCIAL_TOOL_REGISTRY.map(tool => tool.name);
 
     expect(names).toEqual(EXPECTED_TOOL_NAMES);
-    expect(new Set(names).size).toBe(36);
+    expect(new Set(names).size).toBe(37);
     expect(manifest.tools.map(tool => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
   });
 
@@ -446,8 +454,12 @@ describe('Socialmedia v2 tool contract', () => {
       tool => tool.effect !== 'read' && tool.effect !== 'compute'
     );
 
-    expect(writes).toHaveLength(16);
+    expect(writes).toHaveLength(17);
     for (const tool of writes) {
+      if (tool.name === 'social_deliver_current_chat') {
+        expect(requiredFields(tool)).toEqual(['capability', 'text']);
+        continue;
+      }
       if (tool.name === 'social_send_current_chat') {
         expect(requiredFields(tool)).toEqual(['capability', 'text', 'idempotencyKey']);
         continue;

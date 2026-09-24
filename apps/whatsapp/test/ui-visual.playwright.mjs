@@ -461,7 +461,7 @@ async function assertComposerAndAi(page, requestLog) {
   await page.locator('#ai-send').click();
   await page.locator('.ai-bubble-in').getByText('Respuesta IA fixture').waitFor();
   const aiRequest = requestLog.findLast(entry => entry.path === '/api/ai/chat');
-  assert.deepEqual(aiRequest?.body, { account: 'alpha', chat: 'alpha-chat', message: 'Resume este fixture', allowPropose: true });
+  assert.deepEqual(aiRequest?.body, { account: 'alpha', chat: 'alpha-chat', message: 'Resume este fixture', allowPropose: true, allowSend: true });
   assert.equal(await page.locator('#ai-use-draft').isEnabled(), true, 'AI draft action stayed disabled');
   await page.locator('#ai-use-draft').click();
   assert.equal(await page.locator('#message').inputValue(), 'draft-alpha\n\nRespuesta IA fixture para revisar.', 'the draft action did not extend the typed draft');
@@ -480,6 +480,7 @@ async function assertComposerAndAi(page, requestLog) {
   assert.equal(sends(), sendsBeforeDraft, 'Proponer mensaje sent a WhatsApp message');
   const draftRequest = requestLog.findLast(entry => entry.path === '/api/ai/chat');
   assert.equal(draftRequest?.body?.allowPropose, true, 'Proponer mensaje did not request a scoped proposal grant');
+  assert.equal(draftRequest?.body?.allowSend, false, 'Proponer mensaje requested direct sending');
   assert.match(draftRequest?.body?.message || '', /Propón un mensaje/, 'Proponer mensaje did not ask the agent session');
 
   await page.locator('#message').fill('draft-alpha-restored');

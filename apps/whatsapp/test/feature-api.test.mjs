@@ -210,8 +210,9 @@ test('Hermes reuses Daniel session and scopes current-chat capability across PN 
     const system = turn.body.messages[0].content;
     const token = system.match(/Scoped WhatsApp tool capability for this turn: ([\w.-]+)/)?.[1];
     assert.equal(JSON.parse(Buffer.from(token.split('.')[0], 'base64url')).chat, lid);
-    assert.match(system, /LID history/);
-    assert.match(system, /PN history/);
+    assert.doesNotMatch(system, /LID history|PN history/);
+    assert.match(turn.body.messages.at(-2).content, /LID history/);
+    assert.match(turn.body.messages.at(-2).content, /PN history/);
   }
   assert.deepEqual(lifecycle.map(item => item.body.chat), [lid, lid, lid, lid]);
 });

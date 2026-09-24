@@ -93,11 +93,11 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     if (pane) pane.scrollTop = pane.scrollHeight;
   }, []);
 
-  const runTurn = useCallback(async (text, {allowPropose = true} = {}) => {
+  const runTurn = useCallback(async (text, {allowPropose = true, allowSend = true} = {}) => {
     const message = String(text || '').trim();
     if (!message) return '';
     if (!ctx.account || !ctx.chat) throw new Error('Selecciona una conversación para consultar.');
-    const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose});
+    const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose, allowSend});
     const answer = typeof result.text === 'string' ? result.text : '';
     setMessages(previous => [...previous,
       {id: `user-${crypto.randomUUID()}`, role: 'user', content: [{type: 'text', text: shownPrompt(message)}]},
@@ -213,8 +213,8 @@ export function mountAssistant(target, {request, useDraft, draftPrompt = '', dra
       const message = String(text || '').trim();
       if (!message) throw new Error('No se pudo preparar la propuesta.');
       if (!ctx.account || !ctx.chat) throw new Error('Selecciona una conversación para pedir una propuesta.');
-      if (api.ask) return api.ask(message, {allowPropose: true});
-      const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose: true});
+      if (api.ask) return api.ask(message, {allowPropose: true, allowSend: false});
+      const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose: true, allowSend: false});
       ctx = {...ctx, version: ctx.version + 1};
       return typeof result.text === 'string' ? result.text : '';
     }

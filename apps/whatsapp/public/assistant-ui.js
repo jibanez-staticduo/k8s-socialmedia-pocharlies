@@ -18859,16 +18859,17 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 	}, ie = (0, D.useCallback)(() => {
 		let e = T.current?.querySelector(".ai-history");
 		e && (e.scrollTop = e.scrollHeight);
-	}, []), ae = (0, D.useCallback)(async (n, { allowPropose: r = !0 } = {}) => {
-		let i = String(n || "").trim();
-		if (!i) return "";
+	}, []), ae = (0, D.useCallback)(async (n, { allowPropose: r = !0, allowSend: i = !0 } = {}) => {
+		let a = String(n || "").trim();
+		if (!a) return "";
 		if (!e.account || !e.chat) throw Error("Selecciona una conversación para consultar.");
-		let a = await t("/api/ai/chat", {
+		let o = await t("/api/ai/chat", {
 			account: e.account,
 			chat: e.chat,
-			message: i,
-			allowPropose: r
-		}), o = typeof a.text == "string" ? a.text : "";
+			message: a,
+			allowPropose: r,
+			allowSend: i
+		}), s = typeof o.text == "string" ? o.text : "";
 		return c((e) => [
 			...e,
 			{
@@ -18876,7 +18877,7 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 				role: "user",
 				content: [{
 					type: "text",
-					text: E(i)
+					text: E(a)
 				}]
 			},
 			{
@@ -18884,10 +18885,10 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 				role: "assistant",
 				content: [{
 					type: "text",
-					text: o
+					text: s
 				}]
 			}
-		]), ne().catch((e) => g(`No se pudieron actualizar las propuestas: ${e.message}`)), o;
+		]), ne().catch((e) => g(`No se pudieron actualizar las propuestas: ${e.message}`)), s;
 	}, [
 		e.account,
 		e.chat,
@@ -19083,12 +19084,16 @@ function Yp(e, { request: t, useDraft: n, draftPrompt: r = "", draftLabel: i = "
 			let n = String(e || "").trim();
 			if (!n) throw Error("No se pudo preparar la propuesta.");
 			if (!s.account || !s.chat) throw Error("Selecciona una conversación para pedir una propuesta.");
-			if (l.ask) return l.ask(n, { allowPropose: !0 });
+			if (l.ask) return l.ask(n, {
+				allowPropose: !0,
+				allowSend: !1
+			});
 			let r = await t("/api/ai/chat", {
 				account: s.account,
 				chat: s.chat,
 				message: n,
-				allowPropose: !0
+				allowPropose: !0,
+				allowSend: !1
 			});
 			return s = {
 				...s,
