@@ -117,14 +117,14 @@ try {
   assert.equal(await page.locator('#ai-send').isDisabled(), true, 'the panel stayed enabled while the agent was answering');
   await settleTurn();
   await page.locator('.ai-bubble-in').filter({hasText: reply}).waitFor();
-  assert.equal(turns.at(-1).allowPropose, false, 'an ordinary chat turn requested a proposal grant');
+  assert.equal(turns.at(-1).allowPropose, true, 'the authenticated owner turn lacks proposal access');
   assert.equal(await page.locator('#ai-prompt').inputValue(), '', 'the panel composer kept the sent text');
   assert.equal(await page.locator('.ai-typing').count(), 0, 'the typing receipt stayed after the answer');
 
   await page.locator('#ai-prompt').fill(DRAFT_INSTRUCTION);
   await page.locator('#ai-prompt').press('Enter');
   await page.locator('.ai-bubble-out').filter({hasText: DRAFT_LABEL}).last().waitFor();
-  assert.equal(turns.at(-1).allowPropose, false, 'typing the draft instruction granted proposal access');
+  assert.equal(turns.at(-1).allowPropose, true, 'the authenticated owner instruction lacks proposal access');
   assert.equal(directSends, 0, 'an ordinary chat turn sent a WhatsApp message');
 
   await page.locator('#ai-use-draft').click();
@@ -134,13 +134,14 @@ try {
 
   await page.locator('#message').fill('');
   heldRoute = true;
+  const draftTurnsBeforeClick = draftTurns();
   await page.locator('#suggest').click();
   await page.locator('#suggest.is-busy').waitFor({state: 'visible'});
   assert.equal(await page.locator('#suggest').getAttribute('aria-busy'), 'true', 'Proponer mensaje did not report progress');
   assert.equal(await page.locator('#suggest').isDisabled(), true, 'Proponer mensaje could be clicked twice');
   assert.equal(await page.locator('#message').inputValue(), '', 'the draft arrived before the answer');
   await settleTurn();
-  assert.equal(draftTurns(), 1, 'Proponer mensaje did not ask the session once');
+  assert.equal(draftTurns(), draftTurnsBeforeClick + 1, 'Proponer mensaje did not ask the session once');
   assert.deepEqual(turns.at(-1), {key: 'personal:two', message: DRAFT_INSTRUCTION, allowPropose: true}, 'Proponer mensaje asked another chat');
   assert.equal(await page.locator('#message').inputValue(), reply, 'the proposal was not written as a draft');
   assert.equal(directSends, 0, 'Proponer mensaje sent a WhatsApp message');

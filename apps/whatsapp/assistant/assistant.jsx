@@ -93,7 +93,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     if (pane) pane.scrollTop = pane.scrollHeight;
   }, []);
 
-  const runTurn = useCallback(async (text, {allowPropose = false} = {}) => {
+  const runTurn = useCallback(async (text, {allowPropose = true} = {}) => {
     const message = String(text || '').trim();
     if (!message) return '';
     if (!ctx.account || !ctx.chat) throw new Error('Selecciona una conversación para consultar.');

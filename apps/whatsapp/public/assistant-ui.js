@@ -18859,7 +18859,7 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 	}, ie = (0, D.useCallback)(() => {
 		let e = T.current?.querySelector(".ai-history");
 		e && (e.scrollTop = e.scrollHeight);
-	}, []), ae = (0, D.useCallback)(async (n, { allowPropose: r = !1 } = {}) => {
+	}, []), ae = (0, D.useCallback)(async (n, { allowPropose: r = !0 } = {}) => {
 		let i = String(n || "").trim();
 		if (!i) return "";
 		if (!e.account || !e.chat) throw Error("Selecciona una conversación para consultar.");
