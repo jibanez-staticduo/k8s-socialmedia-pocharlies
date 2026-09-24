@@ -11,7 +11,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || '/app/node_modules/playwright/index.mjs');
-const {DRAFT_INSTRUCTION} = await import(new URL('../public/draft-suggest.mjs', import.meta.url).href);
+const {DRAFT_INSTRUCTION, DRAFT_LABEL} = await import(new URL('../public/draft-suggest.mjs', import.meta.url).href);
 const publicDir = path.resolve(process.env.UI_SOURCE_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public'));
 const server = createServer(async (request, response) => {
   const pathname = new URL(request.url, 'http://localhost').pathname;
@@ -64,8 +64,8 @@ await page.route('**/api/**', async route => {
     return json(body.action === 'approve' ? {confirmed: true, messageId: 'wa-confirmed'} : {rejected: true});
   }
   if (url.pathname === '/api/ai/chat') {
-    assert.equal(body.allowPropose, false, 'the web UI asked for a proposal grant it did not earn');
-    turns.push({key, message: body.message});
+    assert.equal(typeof body.allowPropose, 'boolean', 'the web UI omitted the proposal grant state');
+    turns.push({key, message: body.message, allowPropose: body.allowPropose});
     if (failNext) { failNext = false; return route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'Hermes no disponible'})}); }
     const stored = sessions.get(key) || {sessionId: `session-${key}`, messages: []};
     stored.messages.push({role: 'user', content: body.message}, {role: 'assistant', content: reply});
@@ -81,7 +81,7 @@ const settleTurn = async () => {
   if (heldRoute) { const {route, sessionId, text} = heldRoute; heldRoute = null; await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({sessionId, text})}); }
   await page.waitForFunction(() => document.querySelector('#suggest')?.classList.contains('is-busy') === false && document.querySelector('#suggest')?.getAttribute('aria-busy') === 'false');
 };
-const draftTurns = () => turns.filter(turn => turn.message === DRAFT_INSTRUCTION).length;
+const draftTurns = () => turns.filter(turn => turn.message === DRAFT_INSTRUCTION && turn.allowPropose).length;
 
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
@@ -117,8 +117,15 @@ try {
   assert.equal(await page.locator('#ai-send').isDisabled(), true, 'the panel stayed enabled while the agent was answering');
   await settleTurn();
   await page.locator('.ai-bubble-in').filter({hasText: reply}).waitFor();
+  assert.equal(turns.at(-1).allowPropose, false, 'an ordinary chat turn requested a proposal grant');
   assert.equal(await page.locator('#ai-prompt').inputValue(), '', 'the panel composer kept the sent text');
   assert.equal(await page.locator('.ai-typing').count(), 0, 'the typing receipt stayed after the answer');
+
+  await page.locator('#ai-prompt').fill(DRAFT_INSTRUCTION);
+  await page.locator('#ai-prompt').press('Enter');
+  await page.locator('.ai-bubble-out').filter({hasText: DRAFT_LABEL}).last().waitFor();
+  assert.equal(turns.at(-1).allowPropose, false, 'typing the draft instruction granted proposal access');
+  assert.equal(directSends, 0, 'an ordinary chat turn sent a WhatsApp message');
 
   await page.locator('#ai-use-draft').click();
   assert.equal(await page.locator('#message').inputValue(), reply, 'the draft action did not fill the composer');
@@ -134,7 +141,7 @@ try {
   assert.equal(await page.locator('#message').inputValue(), '', 'the draft arrived before the answer');
   await settleTurn();
   assert.equal(draftTurns(), 1, 'Proponer mensaje did not ask the session once');
-  assert.deepEqual(turns.at(-1), {key: 'personal:two', message: DRAFT_INSTRUCTION}, 'Proponer mensaje asked another chat');
+  assert.deepEqual(turns.at(-1), {key: 'personal:two', message: DRAFT_INSTRUCTION, allowPropose: true}, 'Proponer mensaje asked another chat');
   assert.equal(await page.locator('#message').inputValue(), reply, 'the proposal was not written as a draft');
   assert.equal(directSends, 0, 'Proponer mensaje sent a WhatsApp message');
   assert.equal(await page.locator('#ai-panel').isVisible(), false, 'Proponer mensaje opened the panel');

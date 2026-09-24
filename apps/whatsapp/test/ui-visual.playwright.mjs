@@ -479,7 +479,7 @@ async function assertComposerAndAi(page, requestLog) {
   await page.waitForFunction(() => document.querySelector('#message')?.value === 'Respuesta IA fixture para revisar.');
   assert.equal(sends(), sendsBeforeDraft, 'Proponer mensaje sent a WhatsApp message');
   const draftRequest = requestLog.findLast(entry => entry.path === '/api/ai/chat');
-  assert.equal(draftRequest?.body?.allowPropose, false, 'Proponer mensaje asked for a proposal grant');
+  assert.equal(draftRequest?.body?.allowPropose, true, 'Proponer mensaje did not request a scoped proposal grant');
   assert.match(draftRequest?.body?.message || '', /Propón un mensaje/, 'Proponer mensaje did not ask the agent session');
 
   await page.locator('#message').fill('draft-alpha-restored');

@@ -18859,16 +18859,16 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 	}, ie = (0, D.useCallback)(() => {
 		let e = T.current?.querySelector(".ai-history");
 		e && (e.scrollTop = e.scrollHeight);
-	}, []), ae = (0, D.useCallback)(async (n) => {
-		let r = String(n || "").trim();
-		if (!r) return "";
+	}, []), ae = (0, D.useCallback)(async (n, { allowPropose: r = !1 } = {}) => {
+		let i = String(n || "").trim();
+		if (!i) return "";
 		if (!e.account || !e.chat) throw Error("Selecciona una conversación para consultar.");
-		let i = await t("/api/ai/chat", {
+		let a = await t("/api/ai/chat", {
 			account: e.account,
 			chat: e.chat,
-			message: r,
-			allowPropose: !1
-		}), a = typeof i.text == "string" ? i.text : "";
+			message: i,
+			allowPropose: r
+		}), o = typeof a.text == "string" ? a.text : "";
 		return c((e) => [
 			...e,
 			{
@@ -18876,7 +18876,7 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 				role: "user",
 				content: [{
 					type: "text",
-					text: E(r)
+					text: E(i)
 				}]
 			},
 			{
@@ -18884,10 +18884,10 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 				role: "assistant",
 				content: [{
 					type: "text",
-					text: a
+					text: o
 				}]
 			}
-		]), ne().catch((e) => g(`No se pudieron actualizar las propuestas: ${e.message}`)), a;
+		]), ne().catch((e) => g(`No se pudieron actualizar las propuestas: ${e.message}`)), o;
 	}, [
 		e.account,
 		e.chat,
@@ -18897,7 +18897,7 @@ function Jp({ ctx: e, request: t, useDraft: n, active: r, api: i, draftPrompt: a
 	]), oe = (0, D.useCallback)((e) => {
 		let t = () => (f(!0), g(""), Promise.resolve().then(e).finally(() => f(!1))), n = w.current.then(t, t);
 		return w.current = n.then(() => {}, () => {}), n;
-	}, []), O = (0, D.useCallback)((e) => oe(() => ae(e)), [oe, ae]);
+	}, []), O = (0, D.useCallback)((e, t) => oe(() => ae(e, t)), [oe, ae]);
 	(0, D.useEffect)(() => (i.ask = O, () => {
 		i.ask === O && (i.ask = null);
 	}), [i, O]);
@@ -19083,12 +19083,12 @@ function Yp(e, { request: t, useDraft: n, draftPrompt: r = "", draftLabel: i = "
 			let n = String(e || "").trim();
 			if (!n) throw Error("No se pudo preparar la propuesta.");
 			if (!s.account || !s.chat) throw Error("Selecciona una conversación para pedir una propuesta.");
-			if (l.ask) return l.ask(n);
+			if (l.ask) return l.ask(n, { allowPropose: !0 });
 			let r = await t("/api/ai/chat", {
 				account: s.account,
 				chat: s.chat,
 				message: n,
-				allowPropose: !1
+				allowPropose: !0
 			});
 			return s = {
 				...s,

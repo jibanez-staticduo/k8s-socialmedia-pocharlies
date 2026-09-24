@@ -93,11 +93,11 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     if (pane) pane.scrollTop = pane.scrollHeight;
   }, []);
 
-  const runTurn = useCallback(async text => {
+  const runTurn = useCallback(async (text, {allowPropose = false} = {}) => {
     const message = String(text || '').trim();
     if (!message) return '';
     if (!ctx.account || !ctx.chat) throw new Error('Selecciona una conversación para consultar.');
-    const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose: false});
+    const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose});
     const answer = typeof result.text === 'string' ? result.text : '';
     setMessages(previous => [...previous,
       {id: `user-${crypto.randomUUID()}`, role: 'user', content: [{type: 'text', text: shownPrompt(message)}]},
@@ -118,7 +118,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     return result;
   }, []);
 
-  const ask = useCallback(text => enqueue(() => runTurn(text)), [enqueue, runTurn]);
+  const ask = useCallback((text, options) => enqueue(() => runTurn(text, options)), [enqueue, runTurn]);
 
   useEffect(() => {
     api.ask = ask;
@@ -213,8 +213,8 @@ export function mountAssistant(target, {request, useDraft, draftPrompt = '', dra
       const message = String(text || '').trim();
       if (!message) throw new Error('No se pudo preparar la propuesta.');
       if (!ctx.account || !ctx.chat) throw new Error('Selecciona una conversación para pedir una propuesta.');
-      if (api.ask) return api.ask(message);
-      const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose: false});
+      if (api.ask) return api.ask(message, {allowPropose: true});
+      const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, allowPropose: true});
       ctx = {...ctx, version: ctx.version + 1};
       return typeof result.text === 'string' ? result.text : '';
     }
