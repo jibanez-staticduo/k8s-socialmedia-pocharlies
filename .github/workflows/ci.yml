@@ -18,7 +18,7 @@ permissions:
 jobs:
   s3-tests:
     if: ${{ !contains(github.event.head_commit.message || '', '[skip ci]') }}
-    runs-on: arc-k8s
+    runs-on: ${{ github.repository_owner == 'pocharlies-org' && 'arc-k8s' || 'ubuntu-latest' }}
     env:
       RUN_S3_INTEGRATION: "1"
       S3_ENDPOINT: http://127.0.0.1:9000
@@ -59,9 +59,11 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message || '', '[skip ci]') }}
     uses: pocharlies-org/k8s-gitops-pocharlies/.github/workflows/reusable-ci.yml@main
     with:
-      runner: arc-k8s
+      runner: ${{ github.repository_owner == 'pocharlies-org' && 'arc-k8s' || 'ubuntu-latest' }}
       node_version: "22"
       pnpm_version: "11.17.0"
+      # The fork has no ARC runner or access to the private Harbor registry.
+      run_docker_build: ${{ github.repository_owner == 'pocharlies-org' }}
       docker_build_timeout: 12m
       kustomize_paths: k8s/overlays/stg k8s/overlays/prod
       images: |
