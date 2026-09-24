@@ -22,8 +22,7 @@ const logger = pino({ transport: { target: 'pino-pretty', options: { colorize: t
 
 const DATABASE_URL =
   process.env.DATABASE_URL || 'postgresql://whatsappmcp:whatsappmcp_dev@localhost:5438/whatsappmcp';
-const BRAIN_URL =
-  process.env.BRAIN_URL || '';
+const BRAIN_URL = process.env.BRAIN_URL || '';
 const BRAIN_API_KEY = process.env.BRAIN_API_KEY || '';
 const BATCH = parseInt(process.env.BRAIN_INGEST_BATCH || '500', 10);
 const MAX_ROWS = parseInt(process.env.BRAIN_INGEST_MAX_ROWS || '0', 10);
@@ -93,7 +92,8 @@ async function ingestAccount(pool: Pool, account: Account): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  if (process.env.BRAIN_ENABLED !== 'true' || !process.env.BRAIN_URL) throw new Error('Brain job requires BRAIN_ENABLED=true and BRAIN_URL');
+  if (process.env.BRAIN_ENABLED !== 'true' || !process.env.BRAIN_URL)
+    throw new Error('Brain job requires BRAIN_ENABLED=true and BRAIN_URL');
   if (!BRAIN_API_KEY && !DRY_RUN) {
     logger.warn('BRAIN_API_KEY not set — pushes will be unauthenticated (brain may reject)');
   }

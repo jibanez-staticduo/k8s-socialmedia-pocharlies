@@ -252,7 +252,11 @@ async function main() {
     }
 
     if (url.pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
       res.end(req.method === 'HEAD' ? undefined : LANDING_PAGE);
       return;
     }
@@ -270,36 +274,54 @@ async function main() {
       };
       try {
         if (req.method === 'POST' && url.pathname === '/internal/hermes/turns/activate') {
-          const body = await readJsonBody(req) as Record<string, unknown>;
-          await activateCurrentChatTurn(redisClient, body?.account as string,
-            body?.chat as string, body?.turn as string, body?.ttl as number);
+          const body = (await readJsonBody(req)) as Record<string, unknown>;
+          await activateCurrentChatTurn(
+            redisClient,
+            body?.account as string,
+            body?.chat as string,
+            body?.turn as string,
+            body?.ttl as number
+          );
           reply(200, { ok: true });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/internal/hermes/turns/revoke') {
-          const body = await readJsonBody(req) as Record<string, unknown>;
-          await revokeCurrentChatTurn(redisClient, body?.account as string,
-            body?.chat as string, body?.turn as string);
+          const body = (await readJsonBody(req)) as Record<string, unknown>;
+          await revokeCurrentChatTurn(
+            redisClient,
+            body?.account as string,
+            body?.chat as string,
+            body?.turn as string
+          );
           reply(200, { ok: true });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/internal/hermes/proposals') {
-          const proposals = await listCurrentChatProposals(redisClient,
-            url.searchParams.get('account') || '', url.searchParams.get('chat') || '');
+          const proposals = await listCurrentChatProposals(
+            redisClient,
+            url.searchParams.get('account') || '',
+            url.searchParams.get('chat') || ''
+          );
           reply(200, { proposals });
           return;
         }
-        const match = /^\/internal\/hermes\/proposals\/([0-9a-f-]{36})\/consume$/.exec(url.pathname);
+        const match = /^\/internal\/hermes\/proposals\/([0-9a-f-]{36})\/consume$/.exec(
+          url.pathname
+        );
         const rejected = /^\/internal\/hermes\/proposals\/([0-9a-f-]{36})$/.exec(url.pathname);
         if ((req.method === 'POST' && match) || (req.method === 'DELETE' && rejected)) {
           if (match && process.env.EMERGENCY_DISABLE_SENDING === 'true') {
             reply(503, { error: 'Sending is emergency disabled' });
             return;
           }
-          const body = await readJsonBody(req) as Record<string, unknown>;
-          const proposal = await consumeCurrentChatProposal(redisClient,
-            (match || rejected)![1], body?.account as string,
-            body?.chat as string, body?.turn as string);
+          const body = (await readJsonBody(req)) as Record<string, unknown>;
+          const proposal = await consumeCurrentChatProposal(
+            redisClient,
+            (match || rejected)![1],
+            body?.account as string,
+            body?.chat as string,
+            body?.turn as string
+          );
           reply(proposal ? 200 : 404, proposal ? { proposal } : { error: 'Not found' });
           return;
         }

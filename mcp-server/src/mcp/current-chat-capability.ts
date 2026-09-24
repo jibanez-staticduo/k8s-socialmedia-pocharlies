@@ -28,9 +28,11 @@ export function verifyCurrentChatCapability(
   const [, encodedPayload, encodedSignature] = match;
   const expected = createHmac('sha256', secret).update(encodedPayload).digest();
   const supplied = Buffer.from(encodedSignature, 'base64url');
-  if (supplied.length !== expected.length ||
-      supplied.toString('base64url') !== encodedSignature ||
-      !timingSafeEqual(supplied, expected)) {
+  if (
+    supplied.length !== expected.length ||
+    supplied.toString('base64url') !== encodedSignature ||
+    !timingSafeEqual(supplied, expected)
+  ) {
     throw new Error('Invalid current-chat capability');
   }
 
@@ -46,16 +48,23 @@ export function verifyCurrentChatCapability(
     throw new Error('Invalid current-chat capability');
   }
   const value = payload as Record<string, unknown>;
-  if (Object.keys(value).sort().join(',') !== 'account,chat,exp,ops,turn' ||
-      typeof value.account !== 'string' || !value.account ||
-      typeof value.chat !== 'string' || !value.chat || value.chat.length > 256 ||
-      typeof value.turn !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.turn) ||
-      !Number.isSafeInteger(value.exp) ||
-      (value.exp as number) <= nowSeconds ||
-      (value.exp as number) > nowSeconds + MAX_TTL_SECONDS ||
-      !Array.isArray(value.ops) || value.ops.length === 0 ||
-      value.ops.some(op => op !== 'read' && op !== 'propose') ||
-      !value.ops.includes(operation)) {
+  if (
+    Object.keys(value).sort().join(',') !== 'account,chat,exp,ops,turn' ||
+    typeof value.account !== 'string' ||
+    !value.account ||
+    typeof value.chat !== 'string' ||
+    !value.chat ||
+    value.chat.length > 256 ||
+    typeof value.turn !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.turn) ||
+    !Number.isSafeInteger(value.exp) ||
+    (value.exp as number) <= nowSeconds ||
+    (value.exp as number) > nowSeconds + MAX_TTL_SECONDS ||
+    !Array.isArray(value.ops) ||
+    value.ops.length === 0 ||
+    value.ops.some(op => op !== 'read' && op !== 'propose') ||
+    !value.ops.includes(operation)
+  ) {
     throw new Error('Invalid current-chat capability');
   }
 

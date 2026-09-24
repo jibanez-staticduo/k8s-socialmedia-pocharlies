@@ -9,8 +9,18 @@ export function dashboardUrl(): string | undefined {
   const value = process.env.DASHBOARD_URL?.trim();
   if (!value) return undefined;
   let url: URL;
-  try { url = new URL(value); } catch { throw new Error('DASHBOARD_URL must be an absolute HTTP(S) URL'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('DASHBOARD_URL must be an absolute HTTP(S) URL');
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
     throw new Error('DASHBOARD_URL must use HTTP(S) without credentials, query or fragment');
   }
   return url.toString().replace(/\/$/, '');

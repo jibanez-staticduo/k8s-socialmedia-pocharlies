@@ -1,18 +1,32 @@
 export function httpBase(value: string, name: string): string {
   const url = new URL(value);
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
     throw new Error(`${name} must be an HTTP(S) URL without credentials, query or fragment`);
   }
   return url.toString().replace(/\/$/, '');
 }
 
 function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
+  return value.replace(
+    /[&<>"']/g,
+    char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!
+  );
 }
 
 export function publicPage(env: NodeJS.ProcessEnv = process.env): string {
-  const base = httpBase(env.PUBLIC_BASE_URL || `http://localhost:${env.MCP_SSE_PORT || '3010'}`, 'PUBLIC_BASE_URL');
-  const whatsapp = env.WHATSAPP_PUBLIC_BASE_URL ? httpBase(env.WHATSAPP_PUBLIC_BASE_URL, 'WHATSAPP_PUBLIC_BASE_URL') : '';
+  const base = httpBase(
+    env.PUBLIC_BASE_URL || `http://localhost:${env.MCP_SSE_PORT || '3010'}`,
+    'PUBLIC_BASE_URL'
+  );
+  const whatsapp = env.WHATSAPP_PUBLIC_BASE_URL
+    ? httpBase(env.WHATSAPP_PUBLIC_BASE_URL, 'WHATSAPP_PUBLIC_BASE_URL')
+    : '';
   return `<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Socialmedia</title><style>
 :root{color-scheme:light;--ink:#173831;--paper:#f2efdf;--accent:#cf532d}*{box-sizing:border-box}

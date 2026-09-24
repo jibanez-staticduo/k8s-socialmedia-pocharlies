@@ -36,7 +36,9 @@ export class SearchService {
   constructor(openaiApiKey: string, dbClient: Pool, _encryptionKey: string, llmBaseUrl?: string) {
     this.openai = new OpenAI({
       apiKey: openaiApiKey || 'sk-placeholder',
-      ...((process.env.EMBEDDING_BASE_URL || llmBaseUrl) && { baseURL: process.env.EMBEDDING_BASE_URL || llmBaseUrl }),
+      ...((process.env.EMBEDDING_BASE_URL || llmBaseUrl) && {
+        baseURL: process.env.EMBEDDING_BASE_URL || llmBaseUrl,
+      }),
     });
     this.dbClient = dbClient;
     this.logger = pino({
@@ -48,17 +50,21 @@ export class SearchService {
   }
 
   private indexKeys(scopes: ReturnType<typeof getAccounts>, id: string, kind: string): string[] {
-    return [...new Set(scopes.flatMap(scope => {
-      if (scope.channel === 'instagram') {
-        const prefix = `instagram:${scope.accountId}:`;
-        if (id.startsWith('instagram:')) return id.startsWith(prefix) ? [id] : [];
-        if (stripAccount(id).id !== id) return [];
-        return [`${prefix}${kind}${id}`];
-      }
-      const parsed = stripAccount(id);
-      if (parsed.id !== id && parsed.account !== scope.accountId) return [];
-      return [accountKey(scope.accountId, id)];
-    }))];
+    return [
+      ...new Set(
+        scopes.flatMap(scope => {
+          if (scope.channel === 'instagram') {
+            const prefix = `instagram:${scope.accountId}:`;
+            if (id.startsWith('instagram:')) return id.startsWith(prefix) ? [id] : [];
+            if (stripAccount(id).id !== id) return [];
+            return [`${prefix}${kind}${id}`];
+          }
+          const parsed = stripAccount(id);
+          if (parsed.id !== id && parsed.account !== scope.accountId) return [];
+          return [accountKey(scope.accountId, id)];
+        })
+      ),
+    ];
   }
 
   /**
@@ -85,7 +91,9 @@ export class SearchService {
     const params: unknown[] = [query];
     let paramIndex = 2;
 
-    const scopes = getAccounts(options.platform).filter(a => !options.account || a.accountId === normalizeAccount(options.account, options.platform));
+    const scopes = getAccounts(options.platform).filter(
+      a => !options.account || a.accountId === normalizeAccount(options.account, options.platform)
+    );
     sql += ` AND (m.platform || ':' || m.account) = ANY($${paramIndex++}::text[])`;
     params.push(scopes.map(a => `${a.channel}:${a.accountId}`));
 
@@ -174,7 +182,9 @@ export class SearchService {
     const params: unknown[] = [embeddingVector];
     let paramIndex = 2;
 
-    const scopes = getAccounts(options.platform).filter(a => !options.account || a.accountId === normalizeAccount(options.account, options.platform));
+    const scopes = getAccounts(options.platform).filter(
+      a => !options.account || a.accountId === normalizeAccount(options.account, options.platform)
+    );
     sql += ` AND (m.platform || ':' || m.account) = ANY($${paramIndex++}::text[])`;
     params.push(scopes.map(a => `${a.channel}:${a.accountId}`));
 

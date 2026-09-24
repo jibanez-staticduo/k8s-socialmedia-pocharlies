@@ -79,12 +79,11 @@ function intEnv(name: string, fallback: number): number {
 }
 
 function configFromEnv(): BackfillConfig {
-  if (!process.env.INSTAGRAM_BACKFILL_ACCOUNT) throw new Error('INSTAGRAM_BACKFILL_ACCOUNT is required');
+  if (!process.env.INSTAGRAM_BACKFILL_ACCOUNT)
+    throw new Error('INSTAGRAM_BACKFILL_ACCOUNT is required');
   const registered = requireAccount('instagram', process.env.INSTAGRAM_BACKFILL_ACCOUNT);
   return {
-    connectorUrl: (
-      registered.connectorUrl
-    ).replace(/\/+$/, ''),
+    connectorUrl: registered.connectorUrl.replace(/\/+$/, ''),
     databaseUrl:
       process.env.DATABASE_URL ||
       'postgresql://whatsappmcp:whatsappmcp_dev@localhost:5432/whatsappmcp',
@@ -105,7 +104,9 @@ function configFromEnv(): BackfillConfig {
 
 async function fetchJson<T>(url: string): Promise<T> {
   const account = requireAccount('instagram', process.env.INSTAGRAM_BACKFILL_ACCOUNT || '');
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${connectorSecretFor(account)}` } });
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${connectorSecretFor(account)}` },
+  });
   const text = await response.text();
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${url}: ${text.slice(0, 400)}`);

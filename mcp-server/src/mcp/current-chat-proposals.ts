@@ -23,13 +23,17 @@ export function validateCurrentChatScope(account: unknown, chat: unknown, turn?:
   }
   requireAccount('whatsapp', account);
   const parsed = stripAccount(chat);
-  if ((parsed.id !== chat && parsed.account !== account) ||
-      !/^[^\s@]+@(?:s\.whatsapp\.net|c\.us|g\.us|lid|hosted\.lid)$/.test(parsed.id)) {
+  if (
+    (parsed.id !== chat && parsed.account !== account) ||
+    !/^[^\s@]+@(?:s\.whatsapp\.net|c\.us|g\.us|lid|hosted\.lid)$/.test(parsed.id)
+  ) {
     throw new Error('Invalid current-chat scope');
   }
-  if (turn !== undefined &&
-      (typeof turn !== 'string' ||
-       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(turn))) {
+  if (
+    turn !== undefined &&
+    (typeof turn !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(turn))
+  ) {
     throw new Error('Invalid current-chat turn');
   }
 }
@@ -81,7 +85,11 @@ redis.call('ZREM', KEYS[2], item.id)
 return raw`;
 
 export async function activateCurrentChatTurn(
-  redis: Redis, account: string, chat: string, turn: string, ttl: number
+  redis: Redis,
+  account: string,
+  chat: string,
+  turn: string,
+  ttl: number
 ): Promise<void> {
   validateCurrentChatScope(account, chat, turn);
   if (!Number.isInteger(ttl) || ttl < 1 || ttl > TURN_TTL_SECONDS) {
@@ -91,25 +99,38 @@ export async function activateCurrentChatTurn(
 }
 
 export async function revokeCurrentChatTurn(
-  redis: Redis, account: string, chat: string, turn: string
+  redis: Redis,
+  account: string,
+  chat: string,
+  turn: string
 ): Promise<void> {
   validateCurrentChatScope(account, chat, turn);
   await redis.eval(REVOKE_TURN, 1, keys(account, chat).active, turn);
 }
 
-export async function requireCurrentChatTurn(redis: Redis, scope: CurrentChatCapability): Promise<void> {
-  if (await redis.get(keys(scope.account, scope.chat).active) !== scope.turn) {
+export async function requireCurrentChatTurn(
+  redis: Redis,
+  scope: CurrentChatCapability
+): Promise<void> {
+  if ((await redis.get(keys(scope.account, scope.chat).active)) !== scope.turn) {
     throw new Error('Current-chat turn is no longer active');
   }
 }
 
 export async function createCurrentChatProposal(
-  redis: Redis, scope: CurrentChatCapability, text: string, idempotencyKey: string
+  redis: Redis,
+  scope: CurrentChatCapability,
+  text: string,
+  idempotencyKey: string
 ): Promise<{ proposal: CurrentChatProposal; replayed: boolean }> {
   const id = randomUUID();
   const now = Date.now();
   const proposal: CurrentChatProposal = {
-    id, account: scope.account, chat: scope.chat, turn: scope.turn, text,
+    id,
+    account: scope.account,
+    chat: scope.chat,
+    turn: scope.turn,
+    text,
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + PROPOSAL_TTL_SECONDS * 1000).toISOString(),
   };
@@ -118,11 +139,21 @@ export async function createCurrentChatProposal(
   const idemHash = createHash('sha256')
     .update(`${scope.account}\0${scope.chat}\0${scope.turn}\0${idempotencyKey}`)
     .digest('hex');
-  const result = await redis.eval(CREATE_PROPOSAL, 4,
-    scopeKeys.active, scopeKeys.index, `social:hermes:proposal:${id}`,
+  const result = await redis.eval(
+    CREATE_PROPOSAL,
+    4,
+    scopeKeys.active,
+    scopeKeys.index,
+    `social:hermes:proposal:${id}`,
     `social:hermes:proposal-idem:${idemHash}`,
-    scope.turn, contentHash, JSON.stringify(proposal), PROPOSAL_TTL_SECONDS, id,
-    now, now + PROPOSAL_TTL_SECONDS * 1000);
+    scope.turn,
+    contentHash,
+    JSON.stringify(proposal),
+    PROPOSAL_TTL_SECONDS,
+    id,
+    now,
+    now + PROPOSAL_TTL_SECONDS * 1000
+  );
   const [status, actualId] = result as [string, string];
   if (status === 'replayed') {
     const stored = await redis.get(`social:hermes:proposal:${actualId}`);
@@ -134,24 +165,37 @@ export async function createCurrentChatProposal(
 }
 
 export async function listCurrentChatProposals(
-  redis: Redis, account: string, chat: string
+  redis: Redis,
+  account: string,
+  chat: string
 ): Promise<CurrentChatProposal[]> {
   validateCurrentChatScope(account, chat);
   const ids = await redis.zrevrange(keys(account, chat).index, 0, 99);
   if (!ids.length) return [];
   const values = await redis.mget(ids.map(id => `social:hermes:proposal:${id}`));
-  return values.filter((value): value is string => value !== null)
+  return values
+    .filter((value): value is string => value !== null)
     .map(value => JSON.parse(value) as CurrentChatProposal)
     .filter(item => item.account === account && item.chat === chat);
 }
 
 export async function consumeCurrentChatProposal(
-  redis: Redis, id: string, account: string, chat: string, turn: string
+  redis: Redis,
+  id: string,
+  account: string,
+  chat: string,
+  turn: string
 ): Promise<CurrentChatProposal | null> {
   validateCurrentChatScope(account, chat, turn);
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('Invalid proposal id');
-  const raw = await redis.eval(CONSUME_PROPOSAL, 2,
-    `social:hermes:proposal:${id}`, keys(account, chat).index,
-    account, chat, turn);
-  return raw ? JSON.parse(String(raw)) as CurrentChatProposal : null;
+  const raw = await redis.eval(
+    CONSUME_PROPOSAL,
+    2,
+    `social:hermes:proposal:${id}`,
+    keys(account, chat).index,
+    account,
+    chat,
+    turn
+  );
+  return raw ? (JSON.parse(String(raw)) as CurrentChatProposal) : null;
 }
