@@ -142,7 +142,6 @@ try {
   reply = '  "Voy para allí en 10 minutos."  ';
   await page.locator('#suggest').click();
   await settleTurn();
-  assert.equal(await page.locator('#message').inputValue(), `${reply}\n\nVoy para allí en 10 minutos.`.split('\n\n').join('\n\n').replace(`${reply}\n\n`, `${reply}\n\n`), 'draft check placeholder');
   assert.equal(await page.locator('#message').inputValue(), 'Le piden confirmar la reunión del jueves\n\nVoy para allí en 10 minutos.', 'the proposal was not cleaned or replaced the draft in progress');
 
   reply = '```text\nReunión a las 9 confirmada\n```';
