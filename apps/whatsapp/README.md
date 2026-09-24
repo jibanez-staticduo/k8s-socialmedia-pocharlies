@@ -1,7 +1,7 @@
 # WhatsApp browser app
 
 Node 22 HTTP server with PostgreSQL reads, signed manual connector sends and an
-isolated Hermes AI adapter. Build this directory as its own Docker context.
+external Hermes AI adapter. Build this directory as its own Docker context.
 
 Required: APP_AUTH_MODE, APP_PUBLIC_URL (browser HTTPS origin), DATABASE_URL,
 SOCIAL_ACCOUNTS_FILE and DATA_DIR (writable by UID 1000). The registry
@@ -37,13 +37,48 @@ message ID and timeouts return an explicit unconfirmed error; do not retry blind
 Uploads accept up to 10 MiB of image/video/audio/PDF. Voice recordings are decoded
 by ffmpeg and normalized to Ogg Opus, with a ten minute duration limit.
 
-AI requires LITELLM_BASE_URL (including /v1), LITELLM_API_KEY, HERMES_API_URL,
-HERMES_API_KEY and HERMES_PROVIDER (default custom; isolated bundled Hermes uses
-socialmedia-litellm). Only point Hermes at the isolated read-only instance. The
-request contains scoped recent conversation context; tool tenant isolation must
-be enforced by the Hermes/MCP deployment, not by prompt instructions. AI sessions
-are atomic private JSON files scoped to account, chat and explicit global mode.
-Run one app replica per DATA_DIR; locking is within one process.
+AI requires LITELLM_BASE_URL (including /v1) and LITELLM_API_KEY for the model
+catalog, plus HERMES_API_URL and HERMES_API_KEY pointing at an existing
+OpenAI-compatible Hermes gateway: the NAS does not bundle a Hermes. The verified
+target is the shared Fedora gateway, HERMES_API_URL=http://10.71.14.221:8642 with
+HERMES_API_KEY equal to that gateway's API_SERVER_KEY; give Fedora a DHCP
+reservation or an internal DNS name rather than a raw IP for stability. Set
+HERMES_DEFAULT_MODEL to a model the gateway advertises at /v1/models (its
+advertised id is hermes-agent). HERMES_PROVIDER is optional and omitted when
+empty so the shared agent keeps its own provider; a provider name is only
+meaningful to a Hermes deployment that defines that custom provider.
+
+Each turn continues a stable Hermes conversation and is namespaced so the shared
+agent's other sessions and long-term memory are untouched. The agent/session
+model is one canonical session per (account, chat, global):
+
+- x-hermes-session-key: whatsapp-app:<canonicalSessionId> scopes Hermes long-term
+  memory to this app conversation; the whatsapp-app: prefix keeps it separate
+  from every other caller, so using it never overwrites Fedora memory.
+- x-hermes-session-id carries continuity: the canonical UUID on the first turn,
+  then the id Hermes echoes back, so Hermes loads history from its own state.
+- A Responses API object (object: response) is also accepted: its id is stored as
+  previous_response_id and any conversation is replayed, when the gateway uses
+  that API.
+
+Completion is judged from the official response, not headers alone: a turn is
+accepted when the body or headers affirm it (Chat Completion finish_reason stop,
+or Responses status completed, with hermes.completed not false and
+X-Hermes-Completed not false) and it carries an answer plus a continuation
+handle; a truncated or failed turn returns 502 and is never stored locally.
+
+The shared Fedora agent runs its own toolsets (web, browser, lazymcp) and does
+not register the socialmedia MCP, so it reads WhatsApp context from the request
+but cannot call social_read_current_chat or social_send_current_chat. The scoped
+draft/proposal flow reaches the send tools only once that external Hermes
+registers the socialmedia MCP against the NAS mcp-sse endpoint; until then the
+assistant answers and the owner sends manually.
+
+The app request contains scoped recent conversation context; tool tenant
+isolation must be enforced by the Hermes/MCP deployment, not by prompt
+instructions. AI sessions are atomic private JSON files scoped to account, chat
+and explicit global mode. Run one app replica per DATA_DIR; locking is within one
+process.
 
 Media references are resolved only after an account/chat-scoped DB lookup.
 HTTP references require exact MEDIA_ALLOWED_ORIGINS (comma separated, no redirects).
@@ -68,11 +103,11 @@ switches, draft isolation, themes, assistant navigation, attachment confirmation
 and microphone capture/preview with a simulated device. No real messages were
 sent by verification. Eleven backend tests and thirteen generator tests pass.
 
-The bundled agent can search all accounts owned by this app user; the selected
+The external shared agent runs under its own configured toolsets; the selected
 chat and global checkbox determine starting context, not a separate authorization
-boundary. Its 18 MCP read tools exclude sends and other mutations. A successful
-LiteLLM/Hermes request was verified with an actual social_list_accounts receipt.
-Use the assistant answer as a composer draft to review and send manually.
+boundary. Because it does not register the socialmedia MCP, it does not send on
+its own; use the assistant answer as a composer draft to review and send manually
+via /api/send.
 
 Current limits: the latest 200 stored messages per chat are displayed; history
 availability depends on provider synchronization. Uploads are limited to 10 MiB.
