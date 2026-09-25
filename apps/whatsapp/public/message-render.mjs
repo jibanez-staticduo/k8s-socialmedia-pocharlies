@@ -645,9 +645,30 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     for (const contact of metadata.contacts) card.append(makeElement(documentRef, 'span', '', [contact.displayName, contact.phone, contact.email].filter(Boolean).join(' · ')));
     bubble.append(card);
   } else if (metadata.kind === 'poll') {
-    const card = makeElement(documentRef, 'div', 'message-structured-card');
-    card.append(makeElement(documentRef, 'strong', '', 'Encuesta'));
-    for (const answer of Array.isArray(metadata.options) ? metadata.options : []) card.append(makeElement(documentRef, 'span', '', answer));
+    const card = makeElement(documentRef, 'div', 'message-poll-card');
+    card.append(makeElement(documentRef, 'span', 'message-poll-label', 'Encuesta'));
+    const question = textValue(message?.text ?? message?.content).trim();
+    if (question) card.append(makeElement(documentRef, 'strong', 'message-poll-question', question));
+    const results = metadata.results?.available === true ? metadata.results : null;
+    const options = Array.isArray(metadata.options) ? metadata.options : [];
+    for (const [index, answer] of options.entries()) {
+      const option = makeElement(documentRef, results ? 'button' : 'span', 'message-poll-option');
+      if (results) {
+        option.type = 'button';
+        option.dataset.pollOptionIndex = String(index);
+        option.setAttribute('aria-pressed', 'false');
+      }
+      option.append(makeElement(documentRef, 'span', '', answer));
+      const count = (Array.isArray(results?.options) ? results.options : []).find(item => item.name === answer)?.count;
+      if (Number.isFinite(count)) option.append(makeElement(documentRef, 'span', 'message-poll-count', String(count)));
+      card.append(option);
+    }
+    if (results) {
+      const submit = makeElement(documentRef, 'button', 'message-poll-submit', 'Votar');
+      submit.type = 'button';
+      card.append(submit);
+      card.append(makeElement(documentRef, 'small', 'message-poll-note', `${results.totalVoters || 0} votos registrados en esta copia`));
+    } else card.append(makeElement(documentRef, 'small', 'message-poll-note', 'Votación no disponible en esta copia'));
     bubble.append(card);
   } else if (metadata.kind === 'event') {
     const card = makeElement(documentRef, 'div', 'message-structured-card');
@@ -658,7 +679,7 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     bubble.append(card);
   }
   const text = textValue(message?.text ?? message?.content);
-  if (text) {
+  if (text && metadata.kind !== 'poll') {
     const textElement = makeElement(documentRef, 'div', 'message-text');
     appendRichText(textElement, text, documentRef);
     bubble.append(textElement);

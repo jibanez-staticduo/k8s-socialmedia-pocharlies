@@ -1673,6 +1673,69 @@ export function createRouter(
     })();
   });
 
+  router.post('/messages/poll/vote', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        if (
+          process.env.ENABLE_SENDING !== 'true' ||
+          process.env.EMERGENCY_DISABLE_SENDING === 'true'
+        ) {
+          res.status(403).json({
+            ok: false,
+            error: { code: 'SENDING_DISABLED', message: 'Sending is disabled' },
+          });
+          return;
+        }
+        const body = (req.body || {}) as Record<string, unknown>;
+        const chatId = optionalString(body.conversationId || body.chatId);
+        if (!chatId)
+          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'conversationId is required');
+        const pollMessageId = optionalString(body.pollMessageId || body.messageId);
+        if (!pollMessageId)
+          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'pollMessageId is required');
+        const messageId = await client.sendPollVote(chatId, {
+          pollMessageId,
+          options: body.options,
+        });
+        res.json({ ok: true, messageId: messageId ?? null, sent: true });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
+  router.post('/messages/poll/results', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const body = (req.body || {}) as Record<string, unknown>;
+        const chatId = optionalString(body.conversationId || body.chatId);
+        if (!chatId)
+          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'conversationId is required');
+        if (!Array.isArray(body.pollMessageIds) || body.pollMessageIds.length === 0)
+          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'pollMessageIds is required');
+        if (body.pollMessageIds.length > 50)
+          throw new CapabilityError(
+            'INVALID_CAPABILITY_INPUT',
+            'At most 50 pollMessageIds are allowed per request'
+          );
+        const pollMessageIds: string[] = [];
+        for (const value of body.pollMessageIds) {
+          const id = optionalString(value);
+          if (id) pollMessageIds.push(id);
+        }
+        if (!pollMessageIds.length)
+          throw new CapabilityError(
+            'INVALID_CAPABILITY_INPUT',
+            'pollMessageIds must contain non-empty ids'
+          );
+        const polls = await client.getPollResults(chatId, pollMessageIds);
+        res.json({ ok: true, polls });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
   router.post('/messages/event', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {

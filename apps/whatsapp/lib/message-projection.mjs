@@ -23,3 +23,18 @@ export function publicMessageMetadata(value) {
   if (kind === 'sticker') return { kind, isAnimated: source.isAnimated === true };
   return {};
 }
+
+export function publicPollResults(value) {
+  if (!value || typeof value !== 'object') return null;
+  const options = Array.isArray(value.options) ? value.options.slice(0, 100).map(option => ({
+    name: string(option?.name, 500),
+    count: Math.max(0, Math.floor(number(option?.count) ?? 0)),
+    selectedByMe: option?.selectedByMe === true,
+  })).filter(option => option.name) : [];
+  return {
+    available: value.available === true,
+    availability: ['local_full', 'local_partial', 'unavailable'].includes(value.availability) ? value.availability : 'unavailable',
+    totalVoters: Math.max(0, Math.floor(number(value.totalVoters) ?? 0)),
+    options,
+  };
+}

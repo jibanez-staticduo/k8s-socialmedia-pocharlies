@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.mjs';
 import { AppState } from '../lib/app-state.mjs';
-import { publicMessageMetadata } from '../lib/message-projection.mjs';
+import { publicMessageMetadata, publicPollResults } from '../lib/message-projection.mjs';
 
 const auth = `Basic ${Buffer.from('operator:password').toString('base64')}`;
 
@@ -492,6 +492,42 @@ test('message metadata projection allows typed fields but excludes provider secr
   assert.deepEqual(publicMessageMetadata({ kind: 'contact', contacts: [{ displayName: 'Name', phone: '+123', vcard: 'secret', ...privateFields }] }),
     { kind: 'contact', contacts: [{ displayName: 'Name', phone: '+123', email: null, organization: null }] });
   assert.doesNotMatch(JSON.stringify(publicMessageMetadata({ kind: 'event', description: 'Meet', location: { name: 'Place', ...privateFields }, ...privateFields })), /secret/);
+  assert.deepEqual(publicPollResults({ available: true, availability: 'local_partial', totalVoters: 2,
+    options: [{ name: 'Yes', count: 2, selectedByMe: true, voters: ['private-jid'], ...privateFields }], ...privateFields }),
+    { available: true, availability: 'local_partial', totalVoters: 2,
+      options: [{ name: 'Yes', count: 2, selectedByMe: true }] });
+});
+
+test('poll results and votes stay within the selected account and poll', async t => {
+  const calls = [];
+  const db = fixtureDatabase(calls);
+  db.messages['personal-chat'].push({
+    id: '33333333-3333-3333-3333-333333333333', wa_message_id: 'personal:poll-1',
+    conversation_id: 'personal-chat', content: 'Taxi hoy', direction: 'INBOUND', message_type: 'POLL',
+    metadata: { kind: 'poll', options: ['20.30h', '21.30h'], selectableCount: 1 },
+    wa_timestamp: '2026-09-23T09:00:00.000Z',
+  });
+  const upstream = [];
+  const { request } = await fixture(t, { db, fetchImpl: async (url, options) => {
+    upstream.push({ url, body: JSON.parse(options.body || '{}') });
+    if (url.endsWith('/messages/poll/results')) return Response.json({ ok: true, polls: [{
+      pollMessageId: 'poll-1', available: true, availability: 'local_partial', totalVoters: 2,
+      options: [{ name: '20.30h', count: 2, selectedByMe: false, voters: ['private-jid'] }],
+    }] });
+    if (url.endsWith('/messages/poll/vote')) return Response.json({ ok: true, messageId: 'vote-1' });
+    return Response.json({ ok: true });
+  } });
+  const history = await request('/api/messages?account=personal&chat=personal-chat');
+  assert.equal(history.status, 200);
+  const poll = (await history.json()).messages.find(message => message.type === 'POLL');
+  assert.deepEqual(poll.metadata.results.options, [{ name: '20.30h', count: 2, selectedByMe: false }]);
+  assert.equal(upstream.find(call => call.url.endsWith('/messages/poll/results')).body.conversationId, 'personal-chat');
+  assert.deepEqual(upstream.find(call => call.url.endsWith('/messages/poll/results')).body.pollMessageIds, ['poll-1']);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'secondary', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'] })).status, 404);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: [] })).status, 400);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'] })).status, 200);
+  assert.deepEqual(upstream.find(call => call.url.endsWith('/messages/poll/vote')).body,
+    { conversationId: 'personal-chat', pollMessageId: 'poll-1', options: ['20.30h'] });
 });
 
 test('messages endpoint projects reply, edit, reactions and safe content metadata', async t => {
@@ -527,7 +563,7 @@ test('messages endpoint projects reply, edit, reactions and safe content metadat
   assert.match(messageQuery.sql, /target\.conversation_id = ANY\(\$2::text\[\]\)/);
   assert.match(messageQuery.sql, /m\.account \|\| ':' \|\| m\.reply_to_message_id/);
   assert.match(messageQuery.sql, /regexp_replace\(m\.reply_to_message_id, '\^\[\^:\]\+:', ''\)/);
-  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO'\)/);
+  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT'\)/);
 });
 
 test('missing quoted message has an explicit unavailable preview on paginated reads', async t => {
@@ -551,7 +587,7 @@ test('missing quoted message has an explicit unavailable preview on paginated re
     { type: null, text: '', senderName: null, available: false });
   const sql = calls.find(call => /reply\.message_type AS "replyType"/.test(call.sql)).sql;
   assert.match(sql, /LEFT JOIN LATERAL/);
-  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO'\)/);
+  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT'\)/);
 });
 
 test('group details retain provider permissions and account-scoped saved member names', async t => {

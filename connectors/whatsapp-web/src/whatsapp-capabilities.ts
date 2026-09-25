@@ -7,7 +7,11 @@ import type {
   WAPresence,
 } from '@whiskeysockets/baileys';
 
-export type CapabilityErrorCode = 'CAPABILITY_UNSUPPORTED' | 'INVALID_CAPABILITY_INPUT';
+export type CapabilityErrorCode =
+  | 'CAPABILITY_UNSUPPORTED'
+  | 'INVALID_CAPABILITY_INPUT'
+  | 'POLL_NOT_FOUND'
+  | 'POLL_ENCRYPTION_KEY_UNAVAILABLE';
 
 export class CapabilityError extends Error {
   readonly status: number;
@@ -19,7 +23,14 @@ export class CapabilityError extends Error {
   ) {
     super(message);
     this.name = 'CapabilityError';
-    this.status = code === 'CAPABILITY_UNSUPPORTED' ? 501 : 400;
+    this.status =
+      code === 'CAPABILITY_UNSUPPORTED'
+        ? 501
+        : code === 'POLL_NOT_FOUND'
+          ? 404
+          : code === 'POLL_ENCRYPTION_KEY_UNAVAILABLE'
+            ? 409
+            : 400;
   }
 }
 

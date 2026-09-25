@@ -101,6 +101,21 @@ export const messages = {
       fromMe: false,
       status: 'delivered',
     },
+    {
+      id: 'alpha-group-poll',
+      waMessageId: 'poll-fixture',
+      account: 'alpha',
+      chat: 'alpha-group',
+      senderName: 'Ana Fixture',
+      text: '¿A qué hora?',
+      type: 'POLL',
+      metadata: { kind: 'poll', options: ['20.30h', '21.30h'], selectableCount: 1,
+        results: { available: true, availability: 'local_partial', totalVoters: 2, options: [
+          { name: '20.30h', count: 2, selectedByMe: false }, { name: '21.30h', count: 0, selectedByMe: false },
+        ] } },
+      timestamp: '2026-09-23T08:03:00.000Z',
+      fromMe: false,
+    },
   ],
   'alpha-archived': [
     {

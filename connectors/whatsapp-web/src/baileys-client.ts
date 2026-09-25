@@ -30,6 +30,7 @@ import {
   CacheStore,
   GroupMetadata,
   Browsers,
+  generateWAMessageFromContent,
 } from '@whiskeysockets/baileys';
 import { normalizeMessageContent } from '@whiskeysockets/baileys/lib/Utils/messages.js';
 import {
@@ -77,6 +78,8 @@ import {
   ensureDurableTables,
   getMessageKeysForChat,
   getRawWAMessage,
+  getRawWAMessagesByIds,
+  listCapturedPollUpdates,
   listStoredContacts,
   markMessageDeleted,
   markMessageDeletedForMe,
@@ -97,6 +100,17 @@ import {
   type EventMessageInput,
   type PollMessageInput,
 } from './whatsapp-capabilities';
+import {
+  aggregateCapturedPollVotes,
+  buildPollVoteContent,
+  decryptCapturedPollVotes,
+  generateMessageIDV2,
+  parsePollCreationContent,
+  pollEncKeyFromStoredMessage,
+  validatePollVoteSelection,
+  type PollResultsEntry,
+  type StoredPollUpdate,
+} from './poll-votes';
 import {
   appendCompanyToDisplayName,
   displayNameOrPhone,
@@ -2872,6 +2886,140 @@ export class BaileysClient extends EventEmitter {
     const sent = await this.sock.sendMessage(raw, buildPollMessage(input));
     await this.persistSentMessage(sent, raw);
     return sent?.key?.id || undefined;
+  }
+
+  /**
+   * Send a poll vote. rc13's `sendMessage` cannot build `pollUpdateMessage`
+   * content (it falls through to `prepareWAMessageMedia` and throws), so the
+   * proto message is built here with the vote encrypted against the stored
+   * poll encKey and relayed directly, the same way Baileys sends its own
+   * control messages.
+   */
+  async sendPollVote(
+    chatId: string,
+    input: { pollMessageId: string; options: unknown }
+  ): Promise<string | undefined> {
+    if (!this.sock) throw new Error('Client not initialized');
+    if (!this.isConnected()) throw new Error('Client not connected');
+    const pollMessageId = typeof input.pollMessageId === 'string' ? input.pollMessageId.trim() : '';
+    if (!pollMessageId)
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'pollMessageId is required');
+    const stored = await getRawWAMessage(pollMessageId, chatId);
+    if (!stored?.key?.id)
+      throw new CapabilityError(
+        'POLL_NOT_FOUND',
+        'Poll creation message is not in durable storage',
+        {
+          pollMessageId,
+        }
+      );
+    const details = parsePollCreationContent(stored.message);
+    if (!details)
+      throw new CapabilityError('POLL_NOT_FOUND', 'Stored message is not a poll creation message', {
+        pollMessageId,
+      });
+    const pollEncKey = pollEncKeyFromStoredMessage(stored.message);
+    if (!pollEncKey)
+      throw new CapabilityError(
+        'POLL_ENCRYPTION_KEY_UNAVAILABLE',
+        'The poll encKey (messageSecret) was never captured for this poll, so a compatible vote cannot be built',
+        { pollMessageId }
+      );
+    const optionNames = validatePollVoteSelection(details, input.options);
+    const meId = this.meJid || (this.sock.user?.id ? jidNormalizedUser(this.sock.user.id) : null);
+    if (!meId) throw new Error('Client not connected');
+    const content = buildPollVoteContent({
+      pollCreationKey: stored.key,
+      pollEncKey,
+      optionNames,
+      meJid: meId,
+    });
+    const raw = this.toRawJid(chatId);
+    const messageId = generateMessageIDV2(this.sock.user?.id);
+    const fullMsg = generateWAMessageFromContent(raw, content, { messageId, userJid: meId });
+    await this.sock.relayMessage(raw, fullMsg.message as proto.IMessage, { messageId });
+    await this.persistSentMessage(fullMsg, raw);
+    return fullMsg.key.id || messageId;
+  }
+
+  /**
+   * Poll results from locally captured votes only. Counts are a real lower
+   * bound (what this connector stored), never extrapolated; `availability`
+   * tells the app how much to trust them. Ids are echoed exactly as sent.
+   */
+  async getPollResults(chatId: string, pollMessageIds: string[]): Promise<PollResultsEntry[]> {
+    const unique = Array.from(new Set(pollMessageIds));
+    const [creations, updates] = await Promise.all([
+      getRawWAMessagesByIds(unique, chatId),
+      listCapturedPollUpdates(unique, chatId),
+    ]);
+    const creationById = new Map(creations.map(row => [row.waMessageId, row]));
+    const updatesByPoll = new Map<string, StoredPollUpdate[]>();
+    for (const row of updates) {
+      const normalized = normalizeMessageContent(
+        row.content && typeof row.content === 'object'
+          ? (row.content as Parameters<typeof normalizeMessageContent>[0])
+          : undefined
+      );
+      const pollId = normalized?.pollUpdateMessage?.pollCreationMessageKey?.id;
+      if (!pollId || !unique.includes(pollId)) continue;
+      const list = updatesByPoll.get(pollId) || [];
+      list.push({ key: row.key, content: row.content });
+      updatesByPoll.set(pollId, list);
+    }
+    const meId = this.meJid;
+    const entries: PollResultsEntry[] = [];
+    for (const pollMessageId of unique) {
+      const base: PollResultsEntry = {
+        pollMessageId,
+        question: null,
+        selectableCount: null,
+        available: false,
+        availability: 'unavailable',
+        reason: 'NO_LOCAL_DATA',
+        totalVoters: 0,
+        capturedVotes: 0,
+        decryptionFailures: 0,
+        options: [],
+      };
+      const row = creationById.get(pollMessageId);
+      if (!row) {
+        entries.push(base);
+        continue;
+      }
+      const details = parsePollCreationContent(row.content);
+      if (!details) {
+        entries.push({ ...base, reason: 'NOT_A_POLL' });
+        continue;
+      }
+      base.question = details.question || null;
+      base.selectableCount = details.selectableCount;
+      base.options = details.options.map(name => ({ name, count: 0, selectedByMe: false }));
+      const pollEncKey = pollEncKeyFromStoredMessage(row.content);
+      if (!pollEncKey) {
+        entries.push({ ...base, reason: 'ENCRYPTION_KEY_UNAVAILABLE' });
+        continue;
+      }
+      const decrypted = decryptCapturedPollVotes(updatesByPoll.get(pollMessageId) || [], {
+        pollMsgId: pollMessageId,
+        pollEncKey,
+        meJid: meId,
+      });
+      const aggregate = aggregateCapturedPollVotes(details, decrypted.votes);
+      entries.push({
+        ...base,
+        available: true,
+        // Votes can be missed while this connector was offline, so counts are
+        // always a lower bound: never claim a complete ("full") snapshot.
+        availability: 'local_partial',
+        reason: null,
+        totalVoters: aggregate.totalVoters,
+        capturedVotes: aggregate.capturedVotes,
+        decryptionFailures: decrypted.undecryptable,
+        options: aggregate.options,
+      });
+    }
+    return entries;
   }
 
   async sendEvent(chatId: string, input: EventMessageInput): Promise<string | undefined> {

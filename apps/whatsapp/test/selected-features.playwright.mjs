@@ -426,6 +426,16 @@ async function fulfillApi(route, state) {
     message.reactions = [{ emoji: String(body.emoji), count: 1 }];
     return jsonResponse(route, { account, chat: body.chat, messageId: body.messageId, confirmed: true });
   }
+  if (pathName === '/api/messages/poll/vote' && request.method() === 'POST') {
+    const message = messageFor(state, account, body.chat, body.messageId);
+    if (message.type !== 'POLL') return jsonResponse(route, responseError('Not a poll'), 400);
+    for (const option of message.metadata.results.options) {
+      option.selectedByMe = body.options.includes(option.name);
+      if (option.selectedByMe) option.count += 1;
+    }
+    message.metadata.results.totalVoters += 1;
+    return jsonResponse(route, { account, chat: body.chat, confirmed: true, messageId: 'fixture-vote' });
+  }
   if (pathName === '/api/messages/forward' && request.method() === 'POST') {
     const ids = Array.isArray(body.messageIds) ? body.messageIds : [body.messageId];
     for (const id of ids) messageFor(state, account, body.chat, id);
@@ -1062,6 +1072,22 @@ async function runDesktop(page, state, report) {
       await waitForCondition(() => state.log.some(entry => entry.path === '/api/messages/compose' && entry.body?.kind === item.type), `${item.type} share request missing`);
       await closeDialog(page);
     }
+  });
+
+  await check('poll options submit one scoped vote and refresh captured results', async () => {
+    await openChat(page, 'Equipo Fixture');
+    const poll = page.locator('#messages [data-message-id="alpha-group-poll"]');
+    await poll.getByRole('button', { name: /21\.30h/ }).click();
+    assert.equal(await poll.getByRole('button', { name: /21\.30h/ }).getAttribute('aria-pressed'), 'true');
+    await page.screenshot({ path: path.join(outputDir, 'poll-vote-desktop.png') });
+    await page.evaluate(() => { document.body.dataset.theme = 'light'; });
+    await page.screenshot({ path: path.join(outputDir, 'poll-vote-light.png') });
+    await page.evaluate(() => { document.body.dataset.theme = 'dark'; });
+    await poll.getByRole('button', { name: 'Votar' }).click();
+    await waitForCondition(() => state.log.some(entry => entry.path === '/api/messages/poll/vote'
+      && entry.body?.account === 'alpha' && entry.body?.chat === 'alpha-group'
+      && entry.body?.messageId === 'alpha-group-poll' && entry.body?.options?.[0] === '21.30h'), 'poll vote request missing');
+    await poll.getByText('3 votos registrados en esta copia').waitFor();
   });
 
   await check('search and info use usable side panels', async () => {

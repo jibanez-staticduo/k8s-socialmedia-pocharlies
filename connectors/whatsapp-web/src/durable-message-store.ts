@@ -374,3 +374,85 @@ export async function listMessageReactions(
     emoji: row.emoji,
   }));
 }
+
+export interface StoredRawMessageRow {
+  /** Provider message id without the account prefix (echoed to clients). */
+  waMessageId: string;
+  key: WAMessageKey;
+  content: unknown;
+  timestampMs: number | null;
+}
+
+function toStoredRawRows(
+  rows: Array<{
+    wa_message_id?: string | null;
+    message_key?: unknown;
+    message_payload?: unknown;
+    message_timestamp_ms?: string | number | null;
+  }>
+): StoredRawMessageRow[] {
+  return rows
+    .filter(row => row.wa_message_id && row.message_key && row.message_payload)
+    .map(row => ({
+      waMessageId: stripAccountKey(String(row.wa_message_id)),
+      key: deserializeDurableValue(row.message_key) as WAMessageKey,
+      content: deserializeDurableValue(row.message_payload),
+      timestampMs: row.message_timestamp_ms == null ? null : Number(row.message_timestamp_ms),
+    }));
+}
+
+/** Batch raw-payload lookup by unprefixed provider message ids. */
+export async function getRawWAMessagesByIds(
+  messageIds: string[],
+  chatId?: string
+): Promise<StoredRawMessageRow[]> {
+  if (!messageIds.length) return [];
+  const params: unknown[] = [connectorAccount(), messageIds.map(id => accountKey(id))];
+  let where = 'account = $1 AND wa_message_id = ANY($2::text[])';
+  if (chatId) {
+    params.push(accountKey(await canonicalConversationId(storageConversationId(chatId))));
+    where += ` AND conversation_id = $${params.length}`;
+  }
+  const result = await pool().query(
+    `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
+       FROM whatsapp_message_payloads
+      WHERE ${where}`,
+    params
+  );
+  return toStoredRawRows(result.rows);
+}
+
+/**
+ * Raw pollUpdateMessage payloads captured for the given (unprefixed) poll ids.
+ * Votes are independent messages, so this is inherently limited to what this
+ * connector has actually stored — never an extrapolation of total votes.
+ */
+export async function listCapturedPollUpdates(
+  pollMessageIds: string[],
+  chatId: string,
+  limit = 1000
+): Promise<StoredRawMessageRow[]> {
+  if (!pollMessageIds.length) return [];
+  const boundedLimit = Math.max(1, Math.min(limit, 5000));
+  const params: unknown[] = [
+    connectorAccount(),
+    pollMessageIds,
+    accountKey(await canonicalConversationId(storageConversationId(chatId))),
+    boundedLimit,
+  ];
+  const result = await pool().query(
+    `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
+       FROM whatsapp_message_payloads
+      WHERE account = $1
+        AND conversation_id = $3
+        AND (
+          message_payload->'pollUpdateMessage'->'pollCreationMessageKey'->>'id' = ANY($2::text[])
+          OR
+          message_payload#>>'{ephemeralMessage,message,pollUpdateMessage,pollCreationMessageKey,id}' = ANY($2::text[])
+        )
+      ORDER BY message_timestamp_ms ASC NULLS FIRST
+      LIMIT $4`,
+    params
+  );
+  return toStoredRawRows(result.rows);
+}

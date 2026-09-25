@@ -397,7 +397,11 @@ export class MCPServer {
     if (['readCurrentChat', 'sendCurrentChat', 'deliverCurrentChat'].includes(definition.handler)) {
       const scope = verifyCurrentChatCapability(
         args.capability,
-        definition.handler === 'readCurrentChat' ? 'read' : definition.handler === 'sendCurrentChat' ? 'propose' : 'send'
+        definition.handler === 'readCurrentChat'
+          ? 'read'
+          : definition.handler === 'sendCurrentChat'
+            ? 'propose'
+            : 'send'
       );
       await requireCurrentChatTurn(this.redisClient, scope);
     }
@@ -442,10 +446,12 @@ export class MCPServer {
       }
     };
 
-    const directScope = definition.handler === 'deliverCurrentChat'
-      ? verifyCurrentChatCapability(args.capability, 'send')
-      : null;
-    const idempotencyKey = directScope?.requestId ||
+    const directScope =
+      definition.handler === 'deliverCurrentChat'
+        ? verifyCurrentChatCapability(args.capability, 'send')
+        : null;
+    const idempotencyKey =
+      directScope?.requestId ||
       (typeof args.idempotencyKey === 'string' ? args.idempotencyKey.trim() : '');
     const mutates = definition.effect !== 'read' && definition.effect !== 'compute';
     if (definition.handler === 'sendCurrentChat') return execute();
@@ -453,7 +459,9 @@ export class MCPServer {
 
     const payload = { ...args };
     delete payload.idempotencyKey;
-    const payloadHash = createHash('sha256').update(directScope ? args.text : this.stableJson(payload)).digest('hex');
+    const payloadHash = createHash('sha256')
+      .update(directScope ? args.text : this.stableJson(payload))
+      .digest('hex');
     const idempotencyScope = directScope
       ? `${directScope.account}\0${directScope.chat}`
       : `${args.channel}\0${args.accountId}`;
@@ -531,7 +539,11 @@ export class MCPServer {
       );
     }
     const mutates = definition.effect !== 'read' && definition.effect !== 'compute';
-    if (mutates && definition.handler !== 'sendCurrentChat' && definition.handler !== 'deliverCurrentChat') {
+    if (
+      mutates &&
+      definition.handler !== 'sendCurrentChat' &&
+      definition.handler !== 'deliverCurrentChat'
+    ) {
       if (typeof args.channel !== 'string' || !args.channel.trim()) {
         throw this.canonicalError('invalid_request', 'channel is required for every write');
       }
@@ -593,7 +605,9 @@ export class MCPServer {
         const scope = verifyCurrentChatCapability(args.capability, 'send');
         await requireCurrentChatTurn(this.redisClient, scope);
         const chat = await this.resolveCurrentChatReadScope(scope.account, scope.chat);
-        const digest = createHash('sha256').update(`${scope.account}\0${scope.chat}\0${scope.requestId}`).digest('hex');
+        const digest = createHash('sha256')
+          .update(`${scope.account}\0${scope.chat}\0${scope.requestId}`)
+          .digest('hex');
         const token = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
         const result = await this.handleSendMessage({
           account: scope.account,
@@ -602,7 +616,10 @@ export class MCPServer {
           scopedSendToken: token,
         });
         if (!pickString(asObject(this.legacyResultData(result)), ['messageId'])) {
-          throw this.canonicalError('outcome_unknown', 'Connector did not confirm a message ID; do not retry automatically');
+          throw this.canonicalError(
+            'outcome_unknown',
+            'Connector did not confirm a message ID; do not retry automatically'
+          );
         }
         return result;
       }

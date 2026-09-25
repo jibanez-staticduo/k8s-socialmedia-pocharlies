@@ -1545,6 +1545,17 @@ body[data-theme="light"] .ai-panel-avatar { background: #d8e0e3; color: #34464f;
 .feature-list-row > .feature-muted { flex: 0 0 auto; }
 .message-structured-card, .message-reply-reference { display: grid; gap: 5px; margin: 0 0 7px; padding: 9px 12px; border-left: 3px solid var(--accent); border-radius: 5px; background: rgb(0 0 0 / 12%); font-size: 13px; line-height: 1.45; }
 .message-structured-card strong { font-weight: 650; }
+.message-poll-card { display: grid; gap: 8px; min-width: min(260px, 60vw); margin-bottom: 4px; }
+.message-poll-label { color: var(--accent-strong); font-size: 12px; font-weight: 650; }
+.message-poll-question { font-size: 15px; line-height: 1.4; overflow-wrap: anywhere; }
+.message-poll-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); color: var(--text); font: inherit; text-align: left; }
+button.message-poll-option { cursor: pointer; }
+button.message-poll-option:hover, .message-poll-option.is-selected { border-color: var(--accent); }
+.message-poll-option.is-selected { background: color-mix(in srgb, var(--accent) 16%, var(--surface-raised)); }
+.message-poll-count { color: var(--muted-strong); font-size: 12px; }
+.message-poll-submit { justify-self: end; padding: 7px 18px; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 650; cursor: pointer; }
+.message-poll-submit:disabled, button.message-poll-option:disabled { cursor: default; opacity: .6; }
+.message-poll-note { color: var(--muted-strong); font-size: 11px; }
 .message-reply-reference { min-width: 0; color: var(--muted); }
 .message-reply-sender { overflow: hidden; color: var(--accent-strong); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .message-kind-line { display: inline-flex; align-items: center; min-width: 0; gap: 6px; color: var(--muted-strong); }

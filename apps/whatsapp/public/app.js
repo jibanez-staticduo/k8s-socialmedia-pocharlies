@@ -26,7 +26,7 @@ const assistantReady = draftReady.catch(() => null).then(() => import('./assista
   return assistant;
 }).catch(err => { $('ai-root').textContent = `No se pudo cargar el asistente: ${err.message}`; });
 let featureUI = null;
-const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
+const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
 historyNotice.id = 'history-notice';
@@ -153,6 +153,34 @@ function restoreOutbox(scope) {
     persistOutbox();
   } catch { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} }
 }
+function pollKey(message) { return `${state.account}:${state.chat}:${message.id}`; }
+function selectedPollOptions(message) {
+  const key = pollKey(message);
+  if (!state.pollSelections.has(key)) {
+    const selected = new Set();
+    for (const [index, name] of (message.metadata?.options || []).entries()) {
+      if (message.metadata?.results?.options?.find(option => option.name === name)?.selectedByMe) selected.add(index);
+    }
+    state.pollSelections.set(key, selected);
+  }
+  return state.pollSelections.get(key);
+}
+function updatePollControls() {
+  for (const bubble of $('messages').querySelectorAll('.message[data-message-id]')) {
+    const message = state.messages.find(item => String(item.id) === bubble.dataset.messageId);
+    if (!message || message.metadata?.kind !== 'poll' || message.metadata?.results?.available !== true) continue;
+    const selected = selectedPollOptions(message);
+    const busy = state.pollBusy.has(pollKey(message));
+    for (const option of bubble.querySelectorAll('button.message-poll-option')) {
+      const active = selected.has(Number(option.dataset.pollOptionIndex));
+      option.classList.toggle('is-selected', active);
+      option.setAttribute('aria-pressed', String(active));
+      option.disabled = busy;
+    }
+    const submit = bubble.querySelector('.message-poll-submit');
+    if (submit) { submit.disabled = busy || selected.size === 0; submit.textContent = busy ? 'Enviando…' : 'Votar'; }
+  }
+}
 function renderMessages() {
   if (!state.chat || !messageRenderer) return;
   const pane = $('messages');
@@ -167,6 +195,7 @@ function renderMessages() {
   state.signature = signature;
   if (!visible.length) pane.replaceChildren(node('div', 'welcome', 'No hay mensajes sincronizados en esta conversación.'));
   else messageRenderer.reconcileMessageList(pane, visible, {showSenderNames: state.selectedChat?.isGroup === true});
+  updatePollControls();
   for (const item of pending) {
     const bubble = [...pane.querySelectorAll('.message[data-message-id]')].find(element => element.dataset.messageId === item.id);
     if (!bubble) continue;
@@ -215,6 +244,43 @@ function renderMessages() {
   }
   pane.scrollTop = first || atBottom ? pane.scrollHeight : oldTop;
 }
+$('messages').addEventListener('click', async event => {
+  const option = event.target.closest?.('button.message-poll-option');
+  const submit = event.target.closest?.('button.message-poll-submit');
+  if (!option && !submit) return;
+  const bubble = event.target.closest('.message[data-message-id]');
+  const message = state.messages.find(item => String(item.id) === bubble?.dataset.messageId);
+  if (!message || message.metadata?.kind !== 'poll' || message.metadata?.results?.available !== true) return;
+  const key = pollKey(message);
+  if (state.pollBusy.has(key)) return;
+  const selected = selectedPollOptions(message);
+  if (option) {
+    const index = Number(option.dataset.pollOptionIndex);
+    const names = message.metadata.options || [];
+    if (!Number.isInteger(index) || index < 0 || index >= names.length) return;
+    if (selected.has(index)) selected.delete(index);
+    else {
+      const max = Number(message.metadata.selectableCount) > 0 ? Number(message.metadata.selectableCount) : names.length;
+      if (max === 1) selected.clear();
+      else if (selected.size >= max) { error(`Puedes elegir hasta ${max} opciones.`); return; }
+      selected.add(index);
+    }
+    error();
+    updatePollControls();
+    return;
+  }
+  if (!selected.size) return;
+  const ctx = context();
+  state.pollBusy.add(key);
+  updatePollControls();
+  try {
+    await api('/api/messages/poll/vote', {account: ctx.account, chat: ctx.chat, messageId: message.id,
+      options: [...selected].map(index => message.metadata.options[index])});
+    state.pollSelections.delete(key);
+    if (current(ctx)) await loadMessages();
+  } catch (err) { if (current(ctx)) error(err.message); }
+  finally { state.pollBusy.delete(key); if (current(ctx)) updatePollControls(); }
+});
 async function loadMessages() {
   if (!state.chat || state.historyMode) return;
   const ctx = context();

@@ -67,6 +67,14 @@ try {
   assert.equal((await client.query(MESSAGE_LIST_SQL, ['b', ['a:123@lid']])).rows.length, 0);
   assert.equal((await client.query(MESSAGE_LIST_SQL, ['a', ['a:out@lid']])).rows[0].senderName, null);
   await client.query(`
+    INSERT INTO messages (id,wa_message_id,account,conversation_id,sender_wa_id,content,direction,message_type,wa_timestamp) VALUES
+      ('poll','wa-poll','a','a:456@g.us','a:123@lid','Taxi hoy','INBOUND','POLL',now() + interval '1 hour'),
+      ('vote','wa-vote','a','a:456@g.us','a:123@lid',NULL,'INBOUND','POLL_VOTE',now() + interval '2 hours'),
+      ('result','wa-result','a','a:456@g.us','a:123@lid',NULL,'INBOUND','POLL_RESULT',now() + interval '3 hours');
+  `);
+  assert.deepEqual((await client.query(MESSAGE_LIST_SQL, ['a', ['a:456@g.us']])).rows.map(row => row.id), ['poll', 'three']);
+  assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.find(row => row.id === 'a:456@g.us').preview, 'Taxi hoy');
+  await client.query(`
     INSERT INTO messages (id,wa_message_id,account,conversation_id,sender_wa_id,content,direction,message_type,reply_to_message_id,wa_timestamp) VALUES
       ('control','wa-control','a','a:123@lid','a:123@lid',NULL,'INBOUND','MESSAGECONTEXTINFO',NULL,now() + interval '5 hours'),
       ('answer','wa-answer','a','a:123@lid','a:123@lid','Reply','INBOUND','TEXT','wa-one',now() + interval '2 hours'),

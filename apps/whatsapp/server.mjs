@@ -15,7 +15,7 @@ import { mediaRequest } from './lib/media.mjs';
 import { Sessions } from './lib/sessions.mjs';
 import { CHAT_LIST_ACTIVE_SQL, CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
-import { publicMessageMetadata } from './lib/message-projection.mjs';
+import { publicMessageMetadata, publicPollResults } from './lib/message-projection.mjs';
 import { linkPreviewFromPayload } from './lib/link-preview.mjs';
 const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
@@ -122,9 +122,13 @@ function hermesTurnOutcome(payload, header) {
 }
 
 function providerMessageId(message) {
-  const value = cleanProviderValue(message?.wa_message_id, 512)?.replace(/^[^:]+:/, '');
+  const value = optionalProviderMessageId(message?.wa_message_id);
   if (!value) throw featureError(409, 'MESSAGE_ID_UNAVAILABLE', 'WhatsApp message ID is unavailable; this action cannot be confirmed');
   return value;
+}
+
+function optionalProviderMessageId(value) {
+  return cleanProviderValue(value, 512)?.replace(/^[^:]+:/, '') || null;
 }
 
 function providerAck(value) {
@@ -578,6 +582,19 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       [textIds, account.accountId, readIds]
     ) : [];
     const previewPayloads = new Map(previewRows.map(item => [item.id, { extendedTextMessage: item.preview_payload }]));
+    const pollRows = rows.filter(row => row.type === 'POLL' && optionalProviderMessageId(row.waMessageId));
+    const pollResults = new Map();
+    if (pollRows.length) {
+      try {
+        const pollMessageIds = pollRows.slice(0, 50).map(row => optionalProviderMessageId(row.waMessageId));
+        const result = await featureConnector(account, '/messages/poll/results', {
+          body: { conversationId: providerChatId(conversation), pollMessageIds }, timeout: 2500,
+        });
+        for (const poll of Array.isArray(result.polls) ? result.polls : []) {
+          if (pollMessageIds.includes(poll?.pollMessageId)) pollResults.set(poll.pollMessageId, publicPollResults(poll));
+        }
+      } catch { /* The chat remains readable when poll results are unavailable. */ }
+    }
     const local = appState.get(account.accountId);
     const messages = rows.slice().reverse().map(({ metadata, replyType, replyText, replySenderName, replyAvailable, ...row }) => ({
       ...row,
@@ -592,7 +609,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         })(),
       } : {}),
       ...(row.replyToMessageId ? { replyPreview: replyPreview({ replyToMessageId: row.replyToMessageId, replyType, replyText, replySenderName, replyAvailable }) } : {}),
-      metadata: publicMessageMetadata(metadata),
+      metadata: {
+        ...publicMessageMetadata(metadata),
+        ...(row.type === 'POLL' && pollResults.has(optionalProviderMessageId(row.waMessageId))
+          ? { results: pollResults.get(optionalProviderMessageId(row.waMessageId)) } : {}),
+      },
       text: row.text || '',
       isEdited: row.isEdited === true,
       reactions: reactionRows.filter(reaction => reaction.target_wa_message_id === row.waMessageId).map(reaction => ({
@@ -1276,6 +1297,19 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         }
         return json(200, { account: a.accountId, chat, action, confirmed: true, ...result });
       }
+      if (req.method === 'POST' && path === '/api/messages/poll/vote') {
+        const body = await bodyJSON(req);
+        const a = accountParam(body.account); const chat = safeChatId(body.chat);
+        const target = await actionMessage(a, chat, body);
+        if (target.message.message_type !== 'POLL') throw fail(400, 'Message is not a poll');
+        const options = Array.isArray(body.options) ? body.options : [];
+        if (!options.length || options.length > 100 || options.some(option => typeof option !== 'string' || !option.trim() || option.length > 500) || new Set(options).size !== options.length) throw fail(400, 'Invalid poll options');
+        const result = await featureConnector(a, '/messages/poll/vote', {
+          body: { conversationId: target.providerChat, pollMessageId: providerMessageId(target.message), options },
+          requireSending: true, requireMessageId: true,
+        });
+        return json(200, { account: a.accountId, chat, confirmed: true, messageId: result.messageId });
+      }
       if (req.method === 'POST' && (path === '/api/messages/reply' || path === '/api/messages/react' || path === '/api/messages/forward' || path === '/api/messages/edit' || path === '/api/messages/delete' || path === '/api/message-actions' || path === '/api/messages/action' || path === '/api/messages/actions')) {
         const body = await bodyJSON(req);
         const a = accountParam(body.account); const chat = safeChatId(body.chat || body.chatId);
@@ -1615,7 +1649,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             await sessions.save(session);
           }
           let context = [];
-          context = await query("SELECT m.content, m.direction, m.wa_timestamp, COALESCE(NULLIF(p.name, ''), NULLIF(p.push_name, ''), m.sender_wa_id) AS sender FROM messages m LEFT JOIN participants p ON p.account=m.account AND p.id=m.sender_wa_id WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp' AND NOT m.is_deleted ORDER BY m.wa_timestamp DESC LIMIT 60", [a.accountId, await conversationReadIds(a, conversation)]);
+          context = await query(`SELECT m.content, m.direction, m.wa_timestamp, COALESCE(NULLIF(p.name, ''), NULLIF(p.push_name, ''), m.sender_wa_id) AS sender FROM messages m LEFT JOIN participants p ON p.account=m.account AND p.id=m.sender_wa_id WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp' AND NOT m.is_deleted AND ${MESSAGE_VISIBLE_SQL} ORDER BY m.wa_timestamp DESC LIMIT 60`, [a.accountId, await conversationReadIds(a, conversation)]);
           const turn = randomUUID();
           const capability = chatToolCapability(env.HERMES_CHAT_TOOL_SECRET, a.accountId, chat, turn, body.allowPropose === true, allowSend, requestId);
           const toolScope = capability

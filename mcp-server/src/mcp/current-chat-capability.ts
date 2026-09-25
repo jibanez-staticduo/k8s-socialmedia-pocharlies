@@ -50,7 +50,9 @@ export function verifyCurrentChatCapability(
   }
   const value = payload as Record<string, unknown>;
   if (
-    !['account,chat,exp,ops,turn', 'account,chat,exp,ops,requestId,turn'].includes(Object.keys(value).sort().join(',')) ||
+    !['account,chat,exp,ops,turn', 'account,chat,exp,ops,requestId,turn'].includes(
+      Object.keys(value).sort().join(',')
+    ) ||
     typeof value.account !== 'string' ||
     !value.account ||
     typeof value.chat !== 'string' ||
@@ -64,7 +66,11 @@ export function verifyCurrentChatCapability(
     !Array.isArray(value.ops) ||
     value.ops.length === 0 ||
     value.ops.some(op => op !== 'read' && op !== 'propose' && op !== 'send') ||
-    (value.requestId !== undefined && (typeof value.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.requestId))) ||
+    (value.requestId !== undefined &&
+      (typeof value.requestId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          value.requestId
+        ))) ||
     (operation === 'send' && !value.requestId) ||
     !value.ops.includes(operation)
   ) {

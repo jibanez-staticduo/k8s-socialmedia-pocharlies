@@ -186,7 +186,13 @@ test('attachment gallery keeps message ownership and separates media from docume
 test('received contact, poll, event, reply and edited metadata render visible labels', () => {
   const base = { id: 'message-1', fromMe: false };
   assert.match(renderFixtureMessage({ ...base, metadata: { kind: 'contact', contacts: [{ displayName: 'Persona', phone: '+34123456789' }] } }), /Contacto compartido.*Persona/);
-  assert.match(renderFixtureMessage({ ...base, metadata: { kind: 'poll', options: ['Sí', 'No'] } }), /Encuesta.*Sí.*No/);
+  const poll = renderFixtureMessage({ ...base, text: '¿Vienes?', metadata: { kind: 'poll', options: ['Sí', 'No'] } });
+  assert.match(poll, /Encuesta.*¿Vienes\?.*Sí.*No/);
+  assert.equal((poll.match(/¿Vienes\?/g) || []).length, 1);
+  const votable = renderFixtureMessage({ ...base, text: '¿Vienes?', metadata: { kind: 'poll', options: ['Sí', 'No'], results: {
+    available: true, totalVoters: 2, options: [{ name: 'Sí', count: 2, selectedByMe: false }],
+  } } });
+  assert.match(votable, /message-poll-option.*message-poll-count 2.*message-poll-submit Votar/);
   assert.match(renderFixtureMessage({ ...base, metadata: { kind: 'event', description: 'Sala', startTime: 1790154000000 } }), /Evento.*Sala/);
   assert.match(renderFixtureMessage({ ...base, text: 'Respuesta', replyToMessageId: 'provider-id', isEdited: true }), /message-kind-icon.*Mensaje no disponible.*Editado/);
 });
