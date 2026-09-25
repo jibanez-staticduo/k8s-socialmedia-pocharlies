@@ -246,6 +246,20 @@ test('captured votes decrypt through ephemeral wrappers and count failures hones
   assert.equal(result.votes[1].senderTimestampMs, 1727000001000);
 });
 
+test('captured group votes use the encrypted LID even when a PN alias is present', () => {
+  const voterLid = '123456789@lid';
+  const rows = [{
+    key: { remoteJid: CHAT, id: 'VOTE_LID', fromMe: false, participant: voterLid,
+      participantAlt: '346000000001@s.whatsapp.net' },
+    content: voteUpdateContent(voterLid, ['Dos'], 1727000002000),
+  }];
+  const result = decryptCapturedPollVotes(rows, { pollMsgId: POLL_ID, pollEncKey: ENC_KEY, meJid: ME });
+  assert.equal(result.undecryptable, 0);
+  assert.equal(result.votes.length, 1);
+  assert.equal(result.votes[0].voterJid, voterLid);
+  assert.deepEqual(result.votes[0].selectedHashes, [optionHash('Dos')]);
+});
+
 function clientWithFakeSock(): { client: BaileysClient; relayed: unknown[] } {
   const relayed: unknown[] = [];
   const client = new BaileysClient('/tmp/poll-votes-test-session', 'a'.repeat(32));

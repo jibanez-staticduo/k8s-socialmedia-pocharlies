@@ -244,21 +244,43 @@ export function decryptCapturedPollVotes(
       continue;
     }
     const meId = context.meJid || 'me';
-    const voterJid = getKeyAuthor(row.key, meId);
-    const creatorJid = getKeyAuthor(
-      (update.pollCreationMessageKey ?? undefined) as WAMessageKey | undefined,
-      meId
-    );
+    const creationKey = (update.pollCreationMessageKey ?? undefined) as WAMessageKey | undefined;
+    const voterJids = [
+      ...new Set(
+        [row.key.participant, getKeyAuthor(row.key, meId)].filter((jid): jid is string => !!jid)
+      ),
+    ];
+    const creatorJids = [
+      ...new Set(
+        [creationKey?.participant, getKeyAuthor(creationKey, meId)].filter(
+          (jid): jid is string => !!jid
+        )
+      ),
+    ];
     try {
-      const decrypted = decryptPollVote(
-        { encPayload, encIv },
-        {
-          pollCreatorJid: creatorJid || voterJid,
-          pollMsgId: String(update.pollCreationMessageKey?.id ?? context.pollMsgId),
-          pollEncKey: context.pollEncKey,
-          voterJid,
+      let decrypted: ReturnType<typeof decryptPollVote> | undefined;
+      let voterJid = '';
+      for (const creator of creatorJids) {
+        for (const voter of voterJids) {
+          try {
+            decrypted = decryptPollVote(
+              { encPayload, encIv },
+              {
+                pollCreatorJid: creator,
+                pollMsgId: String(update.pollCreationMessageKey?.id ?? context.pollMsgId),
+                pollEncKey: context.pollEncKey,
+                voterJid: voter,
+              }
+            );
+            voterJid = voter;
+            break;
+          } catch {
+            /* Try the alternate PN/LID identity. */
+          }
         }
-      );
+        if (decrypted) break;
+      }
+      if (!decrypted) throw new Error('Vote could not be decrypted with known identities');
       votes.push({
         voterJid,
         fromMe,
