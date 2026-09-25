@@ -563,7 +563,7 @@ test('messages endpoint projects reply, edit, reactions and safe content metadat
   assert.match(messageQuery.sql, /target\.conversation_id = ANY\(\$2::text\[\]\)/);
   assert.match(messageQuery.sql, /m\.account \|\| ':' \|\| m\.reply_to_message_id/);
   assert.match(messageQuery.sql, /regexp_replace\(m\.reply_to_message_id, '\^\[\^:\]\+:', ''\)/);
-  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT'\)/);
+  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'REACTION'\)/);
 });
 
 test('missing quoted message has an explicit unavailable preview on paginated reads', async t => {
@@ -587,7 +587,7 @@ test('missing quoted message has an explicit unavailable preview on paginated re
     { type: null, text: '', senderName: null, available: false });
   const sql = calls.find(call => /reply\.message_type AS "replyType"/.test(call.sql)).sql;
   assert.match(sql, /LEFT JOIN LATERAL/);
-  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT'\)/);
+  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'REACTION'\)/);
 });
 
 test('group details retain provider permissions and account-scoped saved member names', async t => {

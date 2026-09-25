@@ -70,10 +70,15 @@ try {
     INSERT INTO messages (id,wa_message_id,account,conversation_id,sender_wa_id,content,direction,message_type,wa_timestamp) VALUES
       ('poll','wa-poll','a','a:456@g.us','a:123@lid','Taxi hoy','INBOUND','POLL',now() + interval '1 hour'),
       ('vote','wa-vote','a','a:456@g.us','a:123@lid',NULL,'INBOUND','POLL_VOTE',now() + interval '2 hours'),
-      ('result','wa-result','a','a:456@g.us','a:123@lid',NULL,'INBOUND','POLL_RESULT',now() + interval '3 hours');
+      ('result','wa-result','a','a:456@g.us','a:123@lid',NULL,'INBOUND','POLL_RESULT',now() + interval '3 hours'),
+      ('reaction','wa-reaction','a','a:456@g.us','a:123@lid','❤️','INBOUND','REACTION',now() + interval '4 hours'),
+      ('heart-text','wa-heart-text','a','a:456@g.us','a:123@lid','❤️','INBOUND','TEXT',now() + interval '5 hours');
   `);
-  assert.deepEqual((await client.query(MESSAGE_LIST_SQL, ['a', ['a:456@g.us']])).rows.map(row => row.id), ['poll', 'three']);
-  assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.find(row => row.id === 'a:456@g.us').preview, 'Taxi hoy');
+  assert.deepEqual((await client.query(MESSAGE_LIST_SQL, ['a', ['a:456@g.us']])).rows.map(row => row.id), ['heart-text', 'poll', 'three']);
+  assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.find(row => row.id === 'a:456@g.us').preview, '❤️');
+  await client.query(`INSERT INTO messages (id,wa_message_id,account,conversation_id,sender_wa_id,content,direction,message_type,wa_timestamp)
+    VALUES ('only-reaction','wa-only-reaction','a','a:789@c.us','a:123@lid','❤️','INBOUND','REACTION',now() + interval '6 hours')`);
+  assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.find(row => row.id === 'a:789@c.us').preview, 'hello');
   await client.query(`
     INSERT INTO messages (id,wa_message_id,account,conversation_id,sender_wa_id,content,direction,message_type,reply_to_message_id,wa_timestamp) VALUES
       ('control','wa-control','a','a:123@lid','a:123@lid',NULL,'INBOUND','MESSAGECONTEXTINFO',NULL,now() + interval '5 hours'),

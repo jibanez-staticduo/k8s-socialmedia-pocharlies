@@ -1,5 +1,5 @@
 const JID_SUFFIX = /@(lid|c\.us|s\.whatsapp\.net|g\.us|broadcast|newsletter)$/;
-export const MESSAGE_VISIBLE_SQL = "m.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT')";
+export const MESSAGE_VISIBLE_SQL = "m.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'REACTION')";
 
 export const MESSAGE_REPLY_SELECT_SQL = `
        reply.message_type AS "replyType",
@@ -26,7 +26,7 @@ LEFT JOIN LATERAL (
     AND target.conversation_id = ANY($2::text[])
     AND target.platform = 'whatsapp'
     AND NOT target.is_deleted
-    AND target.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT')
+    AND target.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'REACTION')
     AND target.wa_message_id IN (
       m.reply_to_message_id,
       m.account || ':' || m.reply_to_message_id,
