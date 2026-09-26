@@ -94,8 +94,8 @@ export async function syncHermesModelLock({ remote, apiUrl, apiKey, session, mod
     return 'missing';
   }
   if ([404, 405, 501].includes(response.status) && !payload) {
-    // A gateway without the route answers the profile-level 404 as plain text: stay compatible and stop
-    // retrying this pair, while recording that nothing was confirmed.
+    // A gateway without the route may answer a plain-text profile-level 404. Keep the pair
+    // unconfirmed so the caller stops this turn and can retry after the gateway is upgraded.
     session.hermesModelLock = { ...target, state: 'unavailable', at: Date.now() };
     log(`Hermes gateway does not expose the session model lock route (HTTP ${response.status})`);
     return 'unavailable';

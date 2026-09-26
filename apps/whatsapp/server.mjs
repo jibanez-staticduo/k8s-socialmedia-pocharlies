@@ -412,8 +412,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const turnRows = rows.slice(boundary + 1);
     // Refuse another caller's later turn, tool preambles, and old answers.
     if (turnRows.some(row => row.role === 'user')) return null;
-    return turnRows.findLast(row => row.role === 'assistant' && !row.tool_calls?.length && row.display_kind !== 'commentary'
+    const answer = turnRows.findLast(row => row.role === 'assistant' && !row.tool_calls?.length && row.display_kind !== 'commentary'
       && typeof row.content === 'string' && row.content.trim())?.content || null;
+    // Hermes persists this literal placeholder when a tool turn ends without a final answer.
+    return answer?.trim() === '(empty)' ? null : answer;
   }
   async function chatToolInternal(path, { method = 'GET', body, acceptNotFound = false } = {}) {
     if (!env.HERMES_CHAT_TOOL_INTERNAL_URL || !env.HERMES_CHAT_TOOL_SECRET) throw fail(503, 'Hermes chat tool is not configured');

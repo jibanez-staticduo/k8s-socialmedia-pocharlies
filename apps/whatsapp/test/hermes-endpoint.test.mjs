@@ -120,6 +120,21 @@ test('tool-only Hermes stream recovers only the final answer after the current m
   assert.equal(stored.messages.length, 2);
 });
 
+test('tool-only stream does not recover the Hermes empty-answer placeholder', async t => {
+  let currentUser;
+  const {app, request} = await fixture(t, async (url, options) => {
+    if (url.includes('/messages?')) return Response.json({data: [
+      {id: 1, role: 'user', content: currentUser},
+      {id: 2, role: 'assistant', content: 'I will check'},
+      {id: 3, role: 'assistant', content: '(empty)'},
+    ]});
+    currentUser = JSON.parse(options.body).messages.at(-1).content;
+    return streamResponse(fragment('', 'stop') + 'data: [DONE]\n\n');
+  });
+  await assert.rejects(readAgentStream(await request(command)), /complete/);
+  assert.equal((await app.sessions.canonical('personal', 'contact', false)).messages.length, 0);
+});
+
 test('empty stream cannot reuse an old answer or a later caller answer', async t => {
   for (const laterCaller of [false, true]) await t.test(String(laterCaller), async t => {
     let currentUser;
