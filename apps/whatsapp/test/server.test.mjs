@@ -12,7 +12,16 @@ async function fixture(t, extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'whatsapp-test-')); const calls = [];
   const env = { DATA_DIR: dir, UI_AUTH_USERNAME: 'operator', UI_AUTH_PASSWORD: 'password', APP_PUBLIC_URL: 'https://wa.example', APP_ENABLE_SENDING: 'true', PERSONAL_SECRET: 'test-secret', ...extra.env };
   const db = extra.db || { query: async (sql, args) => { calls.push({ sql, args }); return { rows: args[0] === 'personal' && args[1] === 'personal-chat' ? [{ id: 'personal-chat' }] : [] }; } };
-  const app = await createApp({ env, db, registry: [{ channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://connector' }], fetchImpl: extra.fetchImpl || (() => { throw Error('Unexpected upstream request'); }) });
+  const fetchImpl = async (url, options) => {
+    if (/\/api\/sessions\/[^/]+\/model$/.test(url)) {
+      if (extra.modelLockFetch) return extra.modelLockFetch(url, options);
+      const {model, provider = ''} = JSON.parse(options.body);
+      return Response.json({object: 'hermes.session.model_lock', runtime: {model, provider, model_lock: 'accepted'}});
+    }
+    if (extra.fetchImpl) return extra.fetchImpl(url, options);
+    throw Error('Unexpected upstream request');
+  };
+  const app = await createApp({ env, db, registry: [{ channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://connector' }], fetchImpl });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${app.server.address().port}`;

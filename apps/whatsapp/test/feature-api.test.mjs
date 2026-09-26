@@ -184,6 +184,10 @@ test('Hermes reuses Daniel session and scopes current-chat capability across PN 
     HERMES_API_KEY: 'agent-secret', HERMES_CHAT_TOOL_SECRET: secret,
     HERMES_CHAT_TOOL_INTERNAL_URL: 'http://mcp-internal',
   }, fetchImpl: async (url, options) => {
+    if (/\/api\/sessions\/[^/]+\/model$/.test(url)) {
+      const {model, provider = ''} = JSON.parse(options.body);
+      return Response.json({object: 'hermes.session.model_lock', runtime: {model, provider}});
+    }
     if (url.startsWith('http://mcp-internal/')) {
       lifecycle.push({ path: new URL(url).pathname, body: JSON.parse(options.body) });
       return Response.json({ ok: true });

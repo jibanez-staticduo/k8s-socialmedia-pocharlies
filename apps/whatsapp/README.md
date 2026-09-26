@@ -39,15 +39,21 @@ by ffmpeg and normalized to Ogg Opus, with a ten minute duration limit.
 
 AI requires LITELLM_BASE_URL (including /v1) and LITELLM_API_KEY for the model
 catalog, plus HERMES_API_URL and HERMES_API_KEY pointing at an existing
-OpenAI-compatible Hermes gateway: the NAS does not bundle a Hermes. The verified
-target is the shared Fedora gateway, HERMES_API_URL=http://10.71.14.220:8642 with
-HERMES_API_KEY equal to that gateway's API_SERVER_KEY (10.71.14.221 is a second
-NIC that also works; prefer a DHCP reservation or internal DNS name over a raw
-IP). The gateway advertises hermes-agent at /v1/models, but its API server is a
-server_agent that routes regardless of the model string, so the deployment sets
-HERMES_DEFAULT_MODEL to the agent's own default (qwen3.8-flash-next) and
-HERMES_PROVIDER to that agent's provider (openclaw-litellm); HERMES_PROVIDER may
-instead be left empty, and the app then omits it so the agent keeps its own.
+OpenAI-compatible Hermes gateway: the NAS does not bundle a Hermes. Point
+HERMES_API_URL at the existing gateway's `/p/socialmedia/v1` profile endpoint
+and use that profile's API_SERVER_KEY as HERMES_API_KEY. Configure
+HERMES_DEFAULT_MODEL=gpt-6-luna and HERMES_PROVIDER for the existing provider.
+Profile deployment and MCP configuration are documented in
+[Hermes on Fedora](../../docs/hermes-fedora-mcp.md).
+
+The panel submits messages optimistically, clears the composer immediately, and
+streams the answer with temporary thinking/tool activity. The app's SSE events
+carry sanitized status labels, text deltas, and the confirmed final result;
+internal reasoning, tool arguments, and credentials are not displayed. An
+interrupted stream is an error, not a completed answer. Failed turns keep the
+owner's message, mark partial answers as incomplete, and offer an explicit retry
+without adding another local bubble. Retries preserve the turn identifier so a
+lost response cannot create a fresh delivery attempt.
 
 Each turn continues a stable Hermes conversation and is namespaced so the shared
 agent's other sessions and long-term memory are untouched. The agent/session
@@ -66,14 +72,16 @@ Completion is judged from the official response, not headers alone: a turn is
 accepted when the body or headers affirm it (Chat Completion finish_reason stop,
 or Responses status completed, with hermes.completed not false and
 X-Hermes-Completed not false) and it carries an answer plus a continuation
-handle; a truncated or failed turn returns 502 and is never stored locally.
+handle. A truncated or failed turn is never stored as a completed answer: JSON
+requests return an error status, while an already-open SSE response emits an
+`error` event.
 
-The shared Fedora agent runs its own toolsets (web, browser, lazymcp) and does
-not register the socialmedia MCP, so it reads WhatsApp context from the request
-but cannot call social_read_current_chat or social_send_current_chat. The scoped
-draft/proposal flow reaches the send tools only once that external Hermes
-registers the socialmedia MCP against the NAS mcp-sse endpoint; until then the
-assistant answers and the owner sends manually.
+The existing Fedora profile exposes the scoped current-chat MCP tools alongside
+its configured general tools. `social_read_current_chat` reads context,
+`social_send_current_chat` creates a proposal, and `social_deliver_current_chat`
+can send when the authenticated owner's current instruction authorizes it.
+The dedicated draft button never grants direct delivery. Incoming WhatsApp
+messages are untrusted reference data and cannot authorize actions.
 
 The app request contains scoped recent conversation context; tool tenant
 isolation must be enforced by the Hermes/MCP deployment, not by prompt
@@ -93,6 +101,10 @@ send real WhatsApp messages. GET /health is public and reveals no configuration.
 The remaining UI/API routes require the selected authentication mode, and JSON
 POST requests must include the exact configured Origin. TLS should terminate at
 the proxy.
+
+Agent chat screenshots use synthetic conversations:
+[desktop](../../docs/screenshots/agent-chat-desktop.png) and
+[mobile](../../docs/screenshots/agent-chat-mobile.png).
 
 ## NAS verification (2026-09-13)
 

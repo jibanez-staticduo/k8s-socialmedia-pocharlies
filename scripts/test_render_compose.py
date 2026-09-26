@@ -29,6 +29,8 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('INSTAGRAM_SECRET', app['environment'])
         self.assertEqual(app['environment']['APP_ENABLE_SENDING'], '${APP_ENABLE_SENDING:-false}')
         self.assertEqual(app['environment']['EMERGENCY_DISABLE_SENDING'], '${EMERGENCY_DISABLE_SENDING:-false}')
+        self.assertEqual(app['environment']['HERMES_DEFAULT_MODEL'], '${HERMES_DEFAULT_MODEL:-${LLM_CHAT_MODEL}}')
+        self.assertNotIn('whatsapp-hermes', doc['services'])
         self.assertEqual(doc['services']['whatsapp-personal']['environment']['EMERGENCY_DISABLE_SENDING'], '${EMERGENCY_DISABLE_SENDING:-false}')
         self.assertEqual(doc['services']['mcp-sse']['environment']['ENABLE_SENDING'], '${ENABLE_SENDING:-false}')
 

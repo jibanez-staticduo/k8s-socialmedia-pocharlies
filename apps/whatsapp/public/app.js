@@ -38,7 +38,31 @@ showRecent.onclick = () => { state.historyMode = false; loadMessages(); };
 historyNotice.append(showRecent);
 $('messages').before(historyNotice);
 function error(message = '') { $('error').textContent = message; $('error').hidden = !message; }
-async function api(path, data) { const response = await fetch(path, {credentials: 'same-origin', headers: data ? {'Content-Type': 'application/json'} : {}, ...(data ? {method: 'POST', body: JSON.stringify(data)} : {})}); let result; try { result = await response.json(); } catch { throw new Error(`Respuesta del servidor no válida (${response.status}).`); } if (response.status === 401 && result?.code === 'AUTH_REQUIRED') { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} const returnTo = `${location.pathname}${location.search}`; if (location.pathname !== '/auth/login') location.assign(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`); throw new Error('La sesión ha expirado. Redirigiendo al inicio de sesión…'); } if (!response.ok) throw new Error(typeof result.error === 'string' ? result.error : result.error?.message || result.message || `Error del servidor (${response.status}).`); return result; }
+async function api(path, data, onEvent) {
+  const signal = onEvent ? AbortSignal.timeout(240000) : undefined;
+  const timeoutError = () => new Error('Se agotó el tiempo de espera del agente. Comprueba el chat antes de repetir una acción.');
+  const response = await fetch(path, {
+    credentials: 'same-origin',
+    signal,
+    headers: data ? {'Content-Type': 'application/json'} : {},
+    ...(data ? {method: 'POST', body: JSON.stringify(data)} : {})
+  }).catch(error => { throw signal?.aborted ? timeoutError() : error; });
+  if (response.ok && onEvent && response.headers.get('content-type')?.includes('text/event-stream')) {
+    const {readAgentStream} = await import('./agent-stream.mjs');
+    return readAgentStream(response, onEvent).catch(error => { throw signal?.aborted ? timeoutError() : error; });
+  }
+  let result;
+  try { result = await response.json(); }
+  catch { throw new Error(`Respuesta del servidor no válida (${response.status}).`); }
+  if (response.status === 401 && result?.code === 'AUTH_REQUIRED') {
+    try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {}
+    const returnTo = `${location.pathname}${location.search}`;
+    if (location.pathname !== '/auth/login') location.assign(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
+    throw new Error('La sesión ha expirado. Redirigiendo al inicio de sesión…');
+  }
+  if (!response.ok) throw new Error(typeof result.error === 'string' ? result.error : result.error?.message || result.message || `Error del servidor (${response.status}).`);
+  return result;
+}
 function query(path, extra = {}) { return `${path}?${new URLSearchParams({account: state.account, ...extra})}`; }
 function context() { return {account: state.account, chat: state.chat, version: state.version}; }
 function current(ctx) { return ctx.version === state.version && ctx.account === state.account && ctx.chat === state.chat; }

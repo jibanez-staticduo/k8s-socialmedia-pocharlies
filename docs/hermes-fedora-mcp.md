@@ -8,7 +8,7 @@ the selected WhatsApp connector, while draft approval stays in the web app.
 
 Create an empty profile with `hermes profile create socialmedia --no-alias
 --no-skills`. Configure `~/.hermes/profiles/socialmedia/config.yaml` with the
-same model/provider settings as the default profile, its general API toolsets,
+same provider settings as the default profile, its general API toolsets,
 skills, and LazyMCP configuration. Keep platform messaging credentials on the
 default profile so two profiles do not consume the same bot credential. The
 SocialMedia-specific MCP entry is:
@@ -40,6 +40,13 @@ repository or in `config.yaml`. Keep the profile's `config.yaml` mode `0600`.
 Set the deployment's `HERMES_API_URL` to the Fedora gateway URL ending in
 `/p/socialmedia/v1` and `HERMES_API_KEY` to this profile's API key. Do not use
 the default profile's API key for this path.
+
+Set `HERMES_DEFAULT_MODEL=gpt-6-luna` in the Compose `.env` to select the app's
+model independently of other Hermes conversations. Hermes can persist a model
+selection on an existing session; its official
+`POST /api/sessions/{session_id}/model` endpoint changes that selection without
+replacing the session or losing history. The profile's default should match the
+app's model for requests that do not supply an explicit selection.
 
 The web app issues a signed capability for one owner-selected account, chat,
 and turn. The profile also exposes the owner's general Hermes tools.

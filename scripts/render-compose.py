@@ -253,6 +253,7 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
                                'LITELLM_API_KEY': '${LITELLM_API_KEY:-${OPENAI_API_KEY}}',
                                'HERMES_API_URL': variable('HERMES_API_URL'),
                                'HERMES_API_KEY': variable('HERMES_API_KEY'),
+                               'HERMES_DEFAULT_MODEL': '${HERMES_DEFAULT_MODEL:-${LLM_CHAT_MODEL}}',
                                'HERMES_PROVIDER': configurable('HERMES_PROVIDER', 'socialmedia-litellm')},
                   healthcheck=health(3080))
         auth_mode = settings.get('APP_AUTH_MODE', 'basic')
