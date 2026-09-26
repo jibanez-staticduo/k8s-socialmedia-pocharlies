@@ -150,21 +150,21 @@ test('parseRichText recognizes safe web and mail links while leaving unsafe sche
 });
 
 test('date helpers distinguish today, yesterday and older dates', () => {
-  const now = new Date('2026-09-23T15:04:00+02:00');
+  const now = new Date(2026, 8, 23, 15, 4);
 
-  assert.equal(formatDateSeparator('2026-09-23T08:00:00+02:00', now), 'Hoy');
-  assert.equal(formatDateSeparator('2026-09-22T23:00:00+02:00', now), 'Ayer');
-  assert.equal(formatDateSeparator('2026-01-05T23:00:00+01:00', now), '05/01/2026');
-  assert.equal(formatMessageTime('2026-09-23T08:07:00+02:00'), '08:07');
+  assert.equal(formatDateSeparator(new Date(2026, 8, 23, 8), now), 'Hoy');
+  assert.equal(formatDateSeparator(new Date(2026, 8, 22, 23), now), 'Ayer');
+  assert.equal(formatDateSeparator(new Date(2026, 0, 5, 23), now), '05/01/2026');
+  assert.equal(formatMessageTime(new Date(2026, 8, 23, 8, 7).toISOString()), '08:07');
   assert.equal(formatMessageTime('no es una fecha'), '');
 });
 
 test('formatChatListTime follows WhatsApp today, yesterday and older-date labels', () => {
-  const now = new Date('2026-09-23T15:04:00+02:00');
+  const now = new Date(2026, 8, 23, 15, 4);
 
-  assert.equal(formatChatListTime('2026-09-23T08:07:00+02:00', now), '08:07');
-  assert.equal(formatChatListTime('2026-09-22T23:00:00+02:00', now), 'Ayer');
-  assert.equal(formatChatListTime('2026-01-05T23:00:00+01:00', now), '05/01/2026');
+  assert.equal(formatChatListTime(new Date(2026, 8, 23, 8, 7).toISOString(), now), '08:07');
+  assert.equal(formatChatListTime(new Date(2026, 8, 22, 23), now), 'Ayer');
+  assert.equal(formatChatListTime(new Date(2026, 0, 5, 23), now), '05/01/2026');
   assert.equal(formatChatListTime('no es una fecha', now), '');
 });
 

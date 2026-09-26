@@ -30,6 +30,12 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: apps/whatsapp/package-lock.json
+      - name: Install media test dependencies
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
       - run: npm ci
       - run: npm run build
       - run: npm test
