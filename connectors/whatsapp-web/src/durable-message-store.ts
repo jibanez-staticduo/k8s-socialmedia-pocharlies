@@ -8,6 +8,7 @@ import {
   stripAccountKey,
 } from './db-writer';
 import { deserializeDurableValue, serializeDurableValue } from './whatsapp-capabilities';
+import { novedadesKind } from './novedades-store';
 
 let tablesReady = false;
 
@@ -98,6 +99,7 @@ export async function storeRawWAMessage(
   const id = message.key?.id;
   const remoteJid = message.key?.remoteJid;
   if (!id || !remoteJid || !message.message) return;
+  if (novedadesKind(message.key)) return;
   const account = connectorAccount();
   await pool().query(
     `INSERT INTO whatsapp_message_payloads

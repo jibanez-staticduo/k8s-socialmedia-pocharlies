@@ -1,5 +1,19 @@
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
+import {
+  ingestNovedadesMessage,
+  ingestNovedadesUpdate,
+  type NovedadesIngestStore,
+} from './novedades-ingest';
+import {
+  ensureNovedadesTables,
+  novedadesKind,
+  novedadesStatusAuthor,
+  storeNovedadesMessage,
+  storeNovedadesStatus,
+  markNovedadesMessageDeleted,
+  markNovedadesStatusDeleted,
+} from './novedades-store';
 import { SendAlreadyClaimedError } from './send-idempotency';
 /**
  * WhatsApp connector client backed by @whiskeysockets/baileys.
@@ -827,6 +841,7 @@ export class BaileysClient extends EventEmitter {
       }
       await ensureHistoryTables();
       await ensureDurableTables();
+      await ensureNovedadesTables();
 
       const authDir = this.authDir();
       await fsp.mkdir(authDir, { recursive: true });
@@ -986,7 +1001,7 @@ export class BaileysClient extends EventEmitter {
       if (type !== 'notify' && type !== 'append') return;
       const isLive = type === 'notify';
       for (const msg of messages) {
-        if (!msg.message) continue;
+        if (!msg.message && !novedadesKind(msg.key)) continue;
         try {
           await this.ingestMessage(msg, {
             source: isLive ? 'live' : 'baileys_history_sync',
@@ -1002,6 +1017,7 @@ export class BaileysClient extends EventEmitter {
       // chats: Chat[] (Baileys type). Refresh in-memory chat store.
       for (const c of chats) {
         if (!c.id) continue;
+        if (novedadesKind({ remoteJid: c.id })) continue;
         const isGroup = !!isJidGroup(c.id);
         const norm = this.normalizeJid(c.id);
         this.chatStore.set(norm, {
@@ -1068,6 +1084,7 @@ export class BaileysClient extends EventEmitter {
     sock.ev.on('chats.update', updates => {
       for (const u of updates) {
         if (!u.id) continue;
+        if (novedadesKind({ remoteJid: u.id })) continue;
         const norm = this.normalizeJid(u.id);
         const prev = this.chatStore.get(norm);
         if (prev) {
@@ -1104,6 +1121,7 @@ export class BaileysClient extends EventEmitter {
     sock.ev.on('chats.upsert', upserts => {
       for (const c of upserts) {
         if (!c.id) continue;
+        if (novedadesKind({ remoteJid: c.id })) continue;
         const norm = this.normalizeJid(c.id);
         this.chatStore.set(norm, {
           id: norm,
@@ -1180,6 +1198,12 @@ export class BaileysClient extends EventEmitter {
     sock.ev.on('messages.update', updates => {
       for (const u of updates) {
         if (!u.key?.id) continue;
+        if (novedadesKind(u.key)) {
+          void ingestNovedadesUpdate(u.key, u.update, this.novedadesIngestStore()).catch(error =>
+            this.logger.warn(`Novedades update persistence failed: ${error?.message || error}`)
+          );
+          continue;
+        }
         const waMessageId = u.key.id;
         const stubParams = (u.update as any)?.messageStubParameters;
         const ackErrorCode = Array.isArray(stubParams) ? String(stubParams[0] || '') : undefined;
@@ -1489,7 +1513,27 @@ export class BaileysClient extends EventEmitter {
   // Message ingest (live events + history-on-login)
   // ---------------------------------------------------------------------------
 
+  private novedadesIngestStore(): NovedadesIngestStore {
+    return {
+      post: storeNovedadesMessage,
+      status: storeNovedadesStatus,
+      deletePost: markNovedadesMessageDeleted,
+      deleteStatus: key =>
+        markNovedadesStatusDeleted({
+          authorJid: novedadesStatusAuthor(key, { ownJid: this.sock?.user?.id }),
+          messageId: key.id!,
+        }),
+    };
+  }
+
   private async ingestMessage(msg: WAMessage, options: IngestOptions = {}): Promise<IngestResult> {
+    if (
+      await ingestNovedadesMessage(msg, this.novedadesIngestStore(), {
+        ownJid: this.sock?.user?.id,
+        source: options.source,
+      })
+    )
+      return { inserted: false };
     if (msg.key?.id && msg.message) {
       this.rememberMessageForRetry(msg.key, msg.message);
     }
@@ -2149,6 +2193,7 @@ export class BaileysClient extends EventEmitter {
       });
     }
     const quoted = await this.buildQuotedFromId(options?.replyToMessageId, raw);
+    const ownJid = this.sock?.user?.id;
     try {
       const sent = await this.sendTextWithTimeout(raw, content, timeoutMs, {
         useCachedGroupMetadata: isGroup ? false : undefined,
@@ -2176,6 +2221,7 @@ export class BaileysClient extends EventEmitter {
         );
       }
       if (sent?.key) {
+        if (await this.persistSentNovedades(sent, ownJid)) return messageId || undefined;
         this.rememberKey(messageId || '', sent.key, raw);
         this.rememberMessageForRetry(sent.key, sent.message);
         await storeRawWAMessage(sent).catch(error =>
@@ -2348,6 +2394,7 @@ export class BaileysClient extends EventEmitter {
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
     const raw = this.toRawJid(chatId);
+    const ownJid = this.sock.user?.id;
     let buf: Buffer;
     let contentType = '';
     try {
@@ -2403,6 +2450,7 @@ export class BaileysClient extends EventEmitter {
       ...(options?.messageId ? { messageId: options.messageId } : {}),
     });
     if (sent?.key?.id) {
+      if (await this.persistSentNovedades(sent, ownJid)) return sent.key.id;
       try {
         this.rememberKey(sent.key.id, sent.key, raw);
         this.rememberMessageForRetry(sent.key, sent.message);
@@ -2452,6 +2500,7 @@ export class BaileysClient extends EventEmitter {
   ): Promise<void> {
     const providerId = sent.key?.id;
     if (!providerId) return;
+    if (novedadesKind(sent.key)) return;
     await this.ingestMessage(sent, {
       source: 'live',
       publishEvent: false,
@@ -2482,6 +2531,7 @@ export class BaileysClient extends EventEmitter {
       throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
     const raw = this.toRawJid(chatId);
     const payload: AnyMessageContent = { audio, mimetype, ptt: true };
+    const ownJid = this.sock.user?.id;
     await beforeSend?.();
     const sent = await this.sock.sendMessage(
       raw,
@@ -2490,6 +2540,7 @@ export class BaileysClient extends EventEmitter {
     );
     const messageId = sent?.key?.id;
     if (sent?.key) {
+      if (await this.persistSentNovedades(sent, ownJid)) return messageId || undefined;
       this.rememberKey(messageId || '', sent.key, raw);
       this.rememberMessageForRetry(sent.key, sent.message);
       await storeRawWAMessage(sent).catch(error =>
@@ -3480,6 +3531,7 @@ export class BaileysClient extends EventEmitter {
 
   private async persistSentMessage(sent: WAMessage | undefined, rawJid: string): Promise<void> {
     if (!sent?.key?.id) return;
+    if (await this.persistSentNovedades(sent, this.sock?.user?.id)) return;
     this.rememberKey(sent.key.id, sent.key, rawJid);
     this.rememberMessageForRetry(sent.key, sent.message);
     await storeRawWAMessage(sent).catch(error =>
@@ -3487,6 +3539,19 @@ export class BaileysClient extends EventEmitter {
         `durable sent-message store failed for ${sent.key?.id}: ${error?.message || error}`
       )
     );
+  }
+
+  private async persistSentNovedades(sent: WAMessage, ownJid?: string | null): Promise<boolean> {
+    if (!novedadesKind(sent.key)) return false;
+    try {
+      await ingestNovedadesMessage(sent, this.novedadesIngestStore(), { ownJid, source: 'sent' });
+    } catch (error: any) {
+      // The provider accepted the send; a storage failure must not trigger a duplicate retry.
+      this.logger.error(
+        `NOVEDADES_PERSIST_PENDING provider_message_id=${sent.key.id} error=${error?.code || error?.name || 'unknown'}`
+      );
+    }
+    return true;
   }
 
   async refreshGroupSession(
@@ -4109,7 +4174,7 @@ export class BaileysClient extends EventEmitter {
   }
 
   private rememberKey(waMessageId: string, key: WAMessageKey, chatJid: string): void {
-    if (!waMessageId) return;
+    if (!waMessageId || novedadesKind(key)) return;
     if (this.keyCache.size >= KEY_CACHE_MAX) {
       const firstKey = this.keyCache.keys().next().value;
       if (firstKey) this.keyCache.delete(firstKey);
@@ -4121,7 +4186,7 @@ export class BaileysClient extends EventEmitter {
     key: WAMessageKey | undefined,
     message: proto.IMessage | null | undefined
   ): void {
-    if (!key?.id || !message) return;
+    if (!key?.id || !message || novedadesKind(key)) return;
     this.retryMessageCache.set(key.id, message);
     if (key.remoteJid) {
       this.retryMessageCache.set(this.retryMessageCacheKey(key.remoteJid, key.id), message);
@@ -4133,6 +4198,7 @@ export class BaileysClient extends EventEmitter {
   }
 
   private async getMessageForRetry(key: proto.IMessageKey): Promise<proto.IMessage | undefined> {
+    if (novedadesKind(key)) return undefined;
     const messageId = key.id || '';
     if (!messageId) return undefined;
 

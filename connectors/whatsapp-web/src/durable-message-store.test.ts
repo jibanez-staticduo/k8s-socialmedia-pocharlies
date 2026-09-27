@@ -18,8 +18,13 @@ test('durable table bootstrap holds one transaction advisory lock on a dedicated
   const calls: string[] = [];
   const original = pg.Pool.prototype.connect;
   (pg.Pool.prototype as any).connect = async () => ({
-    query: async (sql: string) => { calls.push(sql); return { rows: [] }; },
-    release: () => { calls.push('RELEASE'); },
+    query: async (sql: string) => {
+      calls.push(sql);
+      return { rows: [] };
+    },
+    release: () => {
+      calls.push('RELEASE');
+    },
   });
   try {
     await ensureDurableTables();
@@ -37,7 +42,10 @@ interface QueryCall {
   params: unknown[];
 }
 
-function stubPool(rows: Record<string, unknown>[] = []): { calls: QueryCall[]; restore: () => void } {
+function stubPool(rows: Record<string, unknown>[] = []): {
+  calls: QueryCall[];
+  restore: () => void;
+} {
   const calls: QueryCall[] = [];
   const original = pg.Pool.prototype.query;
   (pg.Pool.prototype as any).query = function (sql: string, params: unknown[] = []) {
@@ -46,6 +54,21 @@ function stubPool(rows: Record<string, unknown>[] = []): { calls: QueryCall[]; r
   };
   return { calls, restore: () => ((pg.Pool.prototype as any).query = original) };
 }
+
+test('raw chat storage ignores Novedades IDs that may collide with chat messages', async () => {
+  const { calls, restore } = stubPool();
+  try {
+    for (const remoteJid of ['100@newsletter', '200@newsletter', 'status@broadcast']) {
+      await storeRawWAMessage({
+        key: { remoteJid, id: 'same' },
+        message: { conversation: 'post' },
+      });
+    }
+    assert.equal(calls.length, 0);
+  } finally {
+    restore();
+  }
+});
 
 test('raw WAMessage persistence is account-scoped and durable', async () => {
   process.env.CONNECTOR_ACCOUNT = 'professional';
@@ -73,7 +96,9 @@ test('PN echo payload indexes under its verified LID while preserving the provid
   const calls: QueryCall[] = [];
   (pg.Pool.prototype as any).query = async (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params });
-    return { rows: /SELECT id FROM conversations/.test(sql) ? [{ id: 'professional:12345@lid' }] : [] };
+    return {
+      rows: /SELECT id FROM conversations/.test(sql) ? [{ id: 'professional:12345@lid' }] : [],
+    };
   };
   try {
     await storeRawWAMessage({
@@ -196,7 +221,12 @@ test('reactions use an account-scoped target and explicit removal state', async 
   process.env.CONNECTOR_ACCOUNT = 'professional';
   const { calls, restore } = stubPool();
   try {
-    await storeMessageReaction({ targetMessageId: 'target', reactorJid: '34600', reactionMessageId: 'reaction', emoji: ':ok:' });
+    await storeMessageReaction({
+      targetMessageId: 'target',
+      reactorJid: '34600',
+      reactionMessageId: 'reaction',
+      emoji: ':ok:',
+    });
     await storeMessageReaction({ targetMessageId: 'target', reactorJid: '34600', emoji: '' });
     assert.equal(calls[0].params[0], 'professional');
     assert.equal(calls[0].params[1], 'professional:target');
