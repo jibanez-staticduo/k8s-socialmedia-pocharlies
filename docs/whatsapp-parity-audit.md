@@ -19,7 +19,9 @@ The audit is ongoing; this document is not a claim of complete parity.
   upload quality, automatic downloads, spellcheck, emoji substitution and
   Enter to send.
 - Status creation offers photos/videos and text; the list separates own status
-  and recent updates. Channels offers discovery, following, and creation.
+  and recent updates. Its empty text editor exposes emoji, font and palette
+  controls plus publish/close; inspected and closed without publishing.
+  Channels offers discovery, following, and creation.
 - The attachment menu exposes Document, Photos/videos, Camera, Audio, Contact,
   Poll, Event and New sticker. The initial SocialMedia menu exposed only five
   entries; multi-file staging and the missing capture/audio flows are implemented
@@ -40,6 +42,16 @@ The audit is ongoing; this document is not a claim of complete parity.
 - The authenticated Windows reference session remains available through Agent
   Jake. New chat searches name, number or username and exposes New group,
   New contact and New community before the contact directory.
+- Official Privacy separates last-seen visibility (all, contacts, exclusions,
+  nobody) from online visibility (all or the last-seen rule). It also exposes
+  profile photo, About, status audience, read receipts, groups, blocked contacts,
+  unknown-account message protection and disabling link previews. These were
+  inspected without changing the owner's preferences; call privacy is excluded.
+- Official Notifications exposes separate Messages, Groups and Status settings,
+  message previews, outgoing-message sound and background synchronization.
+  SocialMedia currently requests browser permission and notifies while its
+  page remains open; account-scoped message/group/preview/sound preferences
+  are in implementation. Closed-tab push and status notifications remain pending.
 - UI inspection does not authorize sending messages, publishing updates,
   joining/leaving communities or modifying other people's chats during QA.
   Private screenshots and contact/message contents are not repository fixtures.
@@ -57,31 +69,31 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Chat filters, archived, favorites and lists | Existing | Bulk select/read actions; provider synchronization of lists |
 | Pinned ordering and mute marker | Verified | Synthetic browser QA; deployed |
 | Full available message history | Verified | Cursor paging, scroll preservation and concurrent polling covered |
-| More than 500 chats | Pending | Chat-list pagination |
+| More than 500 chats | Verified | Deployed 0e7762c: 243 Node 22 tests, 41 browser checks, 650 active/50 archived PG fixture; both accounts pass read-only live QA |
 | Quote reply, edit, delete, forward and selection | Existing | Official menu details and limits |
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
 | Pinned messages and event RSVP | Pending | Provider contracts, ingestion and UI |
-| Search and media/link/document gallery per chat | Existing | Date/sender/type filters; global media browser |
+| Search and media/link/document gallery per chat | Existing | Date/sender/type filters; global media browser in validation |
 | Composer optimistic sends, paste and voice recording | Verified | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | Partial | Full picker/search, sticker creation and packs |
 | Location and live location | Partial | Received locations render; sending not implemented |
 | Link and map previews | Existing | Reference QA and failure states |
-| New chats / contact creation | Existing | Browsable contact directory and account profile/about |
+| New chats / contact creation | In validation | Account-scoped searchable/paginated directory; synthetic drawer QA pending before deployment |
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
 | Settings drawer / wallpaper / spellcheck / Enter preference | Verified | Desktop/mobile, light/dark, persistence |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
-| Own profile and account settings | Pending | Real name/photo/about APIs and controls |
-| Privacy and disappearing messages | Partial | Full privacy fields, blocked list, current values |
+| Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
+| Privacy and disappearing messages | Partial | Online/group-add fields in validation; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
 | Notifications | Partial | Per-type preferences, sound, preview, title count; closed-tab push |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
 | Presence | Partial | Composing/recording labels in validation; live event delivery remains |
 | Real-time updates | Partial | Authenticated events; current message/presence polling remains |
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
-| Status | Pending | Event-backed, 24-hour catalogue; explicit publishing audience |
-| Channels | Pending | Channel-scoped message identity before enabling persistence/UI |
+| Status | Partial | Account/author-scoped persistence and expiry deployed b727ce6; catalogue/viewer and explicit publishing audience remain |
+| Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
 | Chat export / clear / delete / lock | Partial | TXT export of synchronized history verified; clear/delete/lock pending |
 | Accessibility and responsive layouts | Ongoing | Keyboard, focus, small screens and contrasts across features |
 
@@ -111,8 +123,24 @@ not assumptions about the newest documentation, determines the contract.
   options. Its protobuf enum uses `PIN_FOR_ALL=1`, `UNPIN_FOR_ALL=2`; the
   public README example suggesting `0` for unpin must not be copied. Allowed
   durations are 24 hours, 7 days and 30 days. Pin persistence/UI is still pending.
+- Event RSVP needs a version-specific adapter. In installed rc13,
+  `process-message.js` emits `eventResponses` entries with `response` and
+  `senderTimestampMs`, whereas the protobuf declares `eventResponseMessage`
+  and `timestampMs`; the aggregation helper reads another field,
+  `eventResponse`. Do not copy the current documentation's aggregation or
+  decryption signatures without normalizing the installed runtime shape.
+  Sending, persistence and RSVP controls remain unfinished.
+
 
 ## Validation and release
+
+Novedades persistence foundation (`b727ce6`): the exact Node 22 connector
+image passes 230 tests and TypeScript. The disposable PostgreSQL 17 harness
+verifies additive/idempotent startup, account/channel identity, atomic
+client/server reconciliation, status expiry and preservation of legacy history.
+Both deployed connectors are healthy; all three new tables exist. Authenticated
+read-only browser QA passes for both accounts with no profile writes or page
+errors. Catalog APIs, viewers and publishing are separate unfinished work.
 
 First implementation batch, validated locally:
 
@@ -204,7 +232,7 @@ UTC timestamp decoding correction (`38fdbab`), deployed and validated:
   page errors or downloads. Refreshing an already open tab replaces timestamps
   and pagination cursors fetched before the correction.
 
-Typed chat-list previews, validated before deployment:
+Typed chat-list previews (`c964c09`), deployed and validated:
 
 - The list query carries the last visible message's real type alongside its
   text, with a deterministic tie-breaker for equal timestamps. Icons represent
@@ -215,7 +243,89 @@ Typed chat-list previews, validated before deployment:
 - The isolated Node 22 candidate passes 214 app tests and 40 synthetic browser
   checks. A read-only query against both deployed accounts confirms that all
   current chat rows expose a type, including six media previews.
+- Authenticated production browser QA switches both accounts through the
+  visible account buttons and checks the rendered icons against the API types:
+  eight typed icons, no page errors and no live mutations. The deployed image
+  carries the matching `c964c09` revision label and the app is healthy.
+
+Own-account profile (`0e1e779`), deployed and validated:
+
+- Name, about, authenticated photo display, upload and
+  removal with explicit confirmation. Partial or unknown provider reads do not
+  erase known fields or report an unconfirmed write as successful. The isolated
+  Node 22 candidate passes 235 app tests, 190 connector tests, TypeScript and
+  lint with no errors. Synthetic browser QA checks both themes, mobile sizing,
+  account changes and partial readbacks; no live profile was changed.
+- Independent review approved the profile batch. The exact committed images
+  pass the same 235/190 tests and are deployed to the app and both connectors.
+  All three are healthy with revision `0e1e779`. Authenticated read-only browser
+  QA verifies connected own identity/name and the profile panel on both accounts,
+  with zero profile writes or page errors.
+- Fork CI and upstream PR #74 CI both pass on the exact `0e1e779` head.
+
+Chat pagination delivery (`0e7762c`):
+
+- Account/archive-scoped keyset cursors preserve microseconds, order equal
+  timestamps by chat ID and handle null dates. Progressive loading retains
+  old rows until a refresh finishes and rejects stale account responses and
+  repeated cursors. A read-only PG17 fixture traverses 650 active and 50 archived
+  chats without loss or duplication. The exact Node 22 release image passes
+  243 tests; synthetic browser QA passes 41 checks including opening chat 650.
+  Deployed app revision and both connectors are healthy. Live read-only QA
+  verifies both accounts with zero mutations and page errors. Fork and upstream
+  PR CI pass; upstream S3 passed on retry after a network failure to sum.golang.org.
+
+Profile timeout follow-up (`8a9410a`):
+
+- An About read timeout preserves the other profile fields. Accepted writes
+  remain accepted but unconfirmed when readback times out; a write timeout is
+  still rejected. Independently reviewed; the exact Node 22 connector image
+  passes 192 tests and TypeScript. Both connectors are deployed and healthy.
+  Authenticated browser QA verifies both accounts with zero writes/page errors.
+  Fork and upstream PR CI both pass on this head.
+
+Next delivery, not yet deployed:
+
+- Global media library: centered desktop modal matching the inspected official
+  layout, fullscreen mobile, media/documents/links tabs, search, author/order
+  filters, pagination, preview and source-message navigation. Browser QA covers
+  38 requests across two accounts, rejects stale requests and provider URLs,
+  and checks both themes. Independent review's preview-focus and raised-card
+  contrast findings are corrected and retested: minimum text contrast is
+  4.65:1 light and 6.49:1 dark across all three tabs, desktop and mobile.
+  The rail stays clickable outside the modal. Integration review of mutually
+  exclusive panels and authenticated deployment checks remain pending. Multi-selection
+  and duration ordering are not implemented by this batch.
+- Privacy: online and group-add visibility controls preserve an existing
+  contact-exclusion setting when other preferences change. Browser regression
+  verifies only the two changed fields are sent, scoped to the current account.
+  Saving now locks concurrent submissions, stops subsequent writes after closing
+  the dialog or changing account, and advances the baseline after each accepted
+  field so retries do not resend successful changes. Existing feature tests
+  (15 Node 22 tests and 42 browser checks) pass. The dedicated browser suite
+  passes 13 checks including double submission, retrying only a rejected field,
+  account changes, close during save, detached old forms and delayed reads.
+- Bulk chat selection: archive/unarchive, mute/unmute and read/unread capture
+  the account, cancel future writes when scope changes and retry only failed
+  selections. Four unit tests and synthetic browser QA pass; independent review
+  approved the behavior. No real chat was modified during QA.
+- Contact directory: 33 Node 22 tests pass, including deterministic LID/phone
+  deduplication and Unicode-safe pagination boundaries. Read-only database
+  traversal found 1,340 personal-account identities and seven secondary-account
+  identities without duplicate keys. All 165 openable rows matched the archived
+  flag of the exact conversation chosen for opening. The long-label and
+  dual-chat fixes use synthetic regression cases because those cases are not
+  present in the current production data. Dedicated drawer browser QA remains
+  pending; these changes are not yet deployed.
 
 The goal remains open until the matrix is resolved with implemented/verified
 behavior or a concrete documented provider limitation. Calls/video calls are
 the only product area excluded by the owner.
+
+## Interface release candidate
+
+This batch adds the global media library, contact directory, bulk chat selection,
+account-scoped notification preferences and privacy controls. Local validation
+includes 42 selected-feature browser checks, 29 panel-exclusion checks, 13 privacy
+checks and 38 media-library requests across mobile/desktop and both themes.
+Production verification and CI for the new commit remain pending.

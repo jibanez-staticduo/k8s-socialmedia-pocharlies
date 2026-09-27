@@ -43,6 +43,7 @@ const assistantReady = draftReady.catch(() => null).then(() => import('./assista
 let featureUI = null;
 let communitiesUI = null;
 let profileUI = null;
+let mediaLibraryUI = null;
 const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, historyCursor: null, historyInitialized: false, loadingOlder: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
@@ -149,6 +150,7 @@ function renderChats() {
   for (const chat of chats) {
     const button = node('button', `chat-item${chat.isGroup === true ? ' is-group' : ''}`);
     button.type = 'button';
+    button.dataset.chatId = chat.id;
     button.setAttribute('aria-current', String(chat.id === state.chat));
     button.append(chatAvatar(chat));
     const details = node('span', 'chat-details');
@@ -483,7 +485,7 @@ async function switchAccount(accountId) {
   $('message').value = ''; resizeMessageInput(); $('chat-title').textContent = 'SocialMedia'; $('chat-subtitle').textContent = 'Selecciona un chat para empezar'; setConversationAvatar(); setAgentContext();
   $('messages').replaceChildren(node('div', 'welcome', 'Selecciona una conversación de esta cuenta.'));
   assistant?.select(context());
-  document.body.classList.remove('chat-open'); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); error(); renderChats(); updateControls(); await loadChats();
+  document.body.classList.remove('chat-open'); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); error(); renderChats(); updateControls(); await loadChats();
 }
 $('account').onchange = () => switchAccount($('account').value);
 async function sendPayload(path, payload, onSuccess, onConfirmed) { const ctx = context(); state.busy = true; error(); updateControls(); try { const body = typeof payload === 'function' ? await payload() : payload; if (!current(ctx)) return; await api(path, {...ctx, version: undefined, ...body}); onConfirmed?.(ctx); if (current(ctx)) { onSuccess?.(ctx); await Promise.all([loadMessages(), loadChats()]); } } catch (err) { if (current(ctx)) error(err.message); } finally { state.busy = false; updateControls(); } }
@@ -681,12 +683,45 @@ $('record').onclick = async () => {
   }
 };
 $('recording-stop').onclick = () => { if (state.recorder?.state === 'recording') state.recorder.stop(); }; $('recording-cancel').onclick = cancelRecording; $('recording-send').onclick = async () => { if (!state.blob || state.busy || !state.sending) return; const ctx = context(); const blob = state.blob; const token = state.recordingToken; state.recordingSendToken ||= crypto.randomUUID(); try { const data = await base64(blob); if (!current(ctx) || token !== state.recordingToken) return; await sendPayload('/api/upload', {name:`nota-de-voz.${blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'}`,mimeType:blob.type,data,voice:true,sendToken:state.recordingSendToken}, cancelRecording); } catch (err) { if (current(ctx)) error(err.message); } };
-function toggleAI(open) { $('ai-panel').hidden = !open; $('ai-toggle').setAttribute('aria-expanded', String(open)); assistant?.setOpen(open); if (!open) $('ai-toggle').focus(); }
+function toggleAI(open) { $('ai-panel').hidden = !open; $('ai-toggle').setAttribute('aria-expanded', String(open)); if (open) closeRailPanels(['ai']); assistant?.setOpen(open); if (!open) $('ai-toggle').focus(); }
 $('ai-toggle').onclick = () => toggleAI($('ai-panel').hidden); $('ai-close').onclick = () => toggleAI(false); document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('ai-panel').hidden) toggleAI(false); });
-const featureReady = Promise.all([historyReady, mediaReady]).then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error, openCamera: () => state.sending ? cameraController?.open() : error('El envío está desactivado.')}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
-const communitiesReady = import('./communities-ui.mjs').then(({installCommunitiesUI}) => { communitiesUI = installCommunitiesUI({getAccount: () => state.account, api, selectChat, getChats: () => state.chats, showError: error}); return communitiesUI; }).catch(err => { error(`No se pudo cargar Comunidades: ${err.message}`); return null; });
-const profileReady = import('./profile-ui.mjs').then(({installProfileUI}) => { profileUI = installProfileUI({getAccount: () => state.account, api}); return profileUI; }).catch(err => { error(`No se pudo cargar el perfil: ${err.message}`); return null; });
-async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await communitiesReady; await profileReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+const featureReady = Promise.all([historyReady, mediaReady]).then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error, openCamera: () => state.sending ? cameraController?.open() : error('El envío está desactivado.'), onOpen: () => closeRailPanels(['features', 'settings'])}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
+const chatSelectionReady = featureReady.then(() => import('./chat-selection.mjs')).then(({installChatSelection}) => installChatSelection({
+  getScope: () => JSON.stringify([state.account, state.version, featureUI?.isFeatureView?.()]),
+  getAccount: () => state.account, getChats: () => state.chats, canModify: () => state.sending,
+  request: api, refresh: loadChats,
+})).catch(err => { error(`No se pudo cargar la selección de chats: ${err.message}`); return null; });
+// Los paneles del rail comparten viewport, foco y la tecla Escape: abrir uno debe cerrar los demás.
+// `except` admite uno o varios nombres; los modales de features dejan abierto el popover de
+// ajustes porque sus disparadores viven dentro, y cerrarlo dejaría el foco huérfano al volver.
+function closeRailPanels(except = []) {
+  const keep = new Set(Array.isArray(except) ? except : [except]);
+  if (!keep.has('features')) featureUI?.closePanels?.();
+  if (!keep.has('communities')) communitiesUI?.close?.();
+  if (!keep.has('profile')) profileUI?.close?.();
+  if (!keep.has('library')) mediaLibraryUI?.close?.();
+  if (!keep.has('settings')) { const settings = document.querySelector('.rail-settings'); if (settings?.open) settings.open = false; }
+  if (!keep.has('ai') && !$('ai-panel').hidden) toggleAI(false);
+}
+document.querySelector('.rail-settings')?.addEventListener('toggle', event => { if (event.target.open) closeRailPanels(['settings']); });
+const communitiesReady = import('./communities-ui.mjs').then(({installCommunitiesUI}) => {
+  communitiesUI = installCommunitiesUI({getAccount: () => state.account, api, selectChat, getChats: () => state.chats, showError: error, onOpen: () => closeRailPanels(['communities'])});
+  return communitiesUI;
+}).catch(err => { error(`No se pudo cargar Comunidades: ${err.message}`); return null; });
+const profileReady = import('./profile-ui.mjs').then(({installProfileUI}) => { profileUI = installProfileUI({getAccount: () => state.account, api, onOpen: () => closeRailPanels(['profile'])}); return profileUI; }).catch(err => { error(`No se pudo cargar el perfil: ${err.message}`); return null; });
+const mediaLibraryReady = import('./media-library-ui.mjs').then(({installMediaLibraryUI}) => {
+  mediaLibraryUI = installMediaLibraryUI({getAccount: () => state.account, api, selectChat: async chat => {
+    const source = state.chats.find(item => item.id === chat.id) || { ...chat, isGroup: chat.id.endsWith('@g.us') };
+    const selected = selectChat(source);
+    const ctx = context();
+    try {
+      await selected;
+      if (current(ctx) && chat.messageId) await showHistoricalMessage(chat.messageId);
+    } catch (err) { if (current(ctx)) error(err.message); }
+  }, onOpen: () => closeRailPanels(['library']) });
+  return mediaLibraryUI;
+}).catch(err => { error(`No se pudo cargar el contenido multimedia: ${err.message}`); return null; });
+async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await chatSelectionReady; await communitiesReady; await profileReady; await mediaLibraryReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
 let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await Promise.all([loadChats({background: true}), document.hidden ? null : loadMessages()]); } finally { polling = false; } }, 10000);
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });

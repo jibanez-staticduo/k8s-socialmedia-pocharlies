@@ -391,7 +391,7 @@ async function fulfillApi(route, state) {
   if (pathName === '/api/favorites/starred' && request.method() === 'GET') return jsonResponse(route, { account, items: clone(state.starred.get(account) || []), nextCursor: null });
   if (pathName === '/api/lists' && request.method() === 'GET') return jsonResponse(route, { account, lists: [...(state.lists.get(account) || [])] });
   if (pathName === '/api/starred' && request.method() === 'GET') return jsonResponse(route, { account, items: clone(state.starred.get(account) || []) });
-  if (pathName === '/api/privacy' && request.method() === 'GET') return jsonResponse(route, { account, profile: 'all', lastSeen: 'all', readReceipts: true });
+  if (pathName === '/api/privacy' && request.method() === 'GET') return jsonResponse(route, { account, profile: 'contact_blacklist', lastSeen: 'all', online: 'match_last_seen', groupsAdd: 'contact_blacklist', readReceipts: true });
 
   if (pathName === '/api/chat-actions' && request.method() === 'POST') {
     if (state.nextActionGate && body.action === 'archive') {
@@ -462,6 +462,17 @@ async function fulfillApi(route, state) {
     state.chats[account].push(chat);
     state.messages[id] = [];
     return jsonResponse(route, { account, chat: clone(chat), confirmed: true });
+  }
+  if (pathName === '/api/contacts' && request.method() === 'GET') {
+    const q = (url.searchParams.get('q') || '').toLowerCase();
+    const contacts = state.chats[account].filter(chat => !chat.isGroup).map(chat => ({
+      key: chat.id, label: chat.name, kind: 'chat', chatId: chat.id, hasChat: true,
+      canOpen: true, canStart: false, archived: chat.archived === true,
+    })).concat({ key: `${account}-known-number`, label: 'Contacto sin chat', phone: '+34100000099',
+      kind: 'contact', canOpen: false, canStart: true, hasChat: false });
+    const matches = contacts.filter(contact => `${contact.label} ${contact.phone || ''}`.toLowerCase().includes(q));
+    return jsonResponse(route, { account, query: q, contacts: matches, total: matches.length,
+      hasMore: false, nextCursor: null, sendingEnabled: true, sync: { identities: contacts.length } });
   }
   if (pathName === '/api/contacts' && request.method() === 'POST') {
     return jsonResponse(route, { account, contact: { id: `${account}-contact`, name: body.name, address: body.address }, confirmed: true });
@@ -564,7 +575,13 @@ async function dialog(page, title) {
   const result = page.getByRole('dialog');
   await result.waitFor({ state: 'visible' });
   if (title && !await result.locator('.feature-dialog-header').isHidden()) await assertTitle(result, title);
-  else if (title) assert.match(await result.getAttribute('aria-labelledby') || '', /feature-dialog-title/);
+  else if (title) {
+    const label = await result.getAttribute('aria-labelledby');
+    assert(label, 'dialog must have an accessible title');
+    const labelText = await page.locator(`[id=${JSON.stringify(label)}]`).textContent();
+    if (title instanceof RegExp) assert.match(labelText || '', title);
+    else assert.equal(labelText, title);
+  }
   return result;
 }
 
@@ -1026,13 +1043,20 @@ async function runDesktop(page, state, report) {
   await check('new chat, contact and group creation are separate operations', async () => {
     await page.locator('#feature-new-chat').click();
     let create = await dialog(page, /Nuevo chat/i);
-    await fieldLocator(create, 'Número o identificador').fill('+34100000099');
-    await clickDialogButton(create, 'Continuar');
+    await create.getByRole('searchbox').fill('+34100000099');
+    await create.getByRole('button', { name: /Contacto sin chat/ }).click();
     await waitForCondition(() => state.log.some(item => item.path === '/api/chats/new'), 'new chat request missing');
 
     await page.locator('#feature-new-chat').click();
     create = await dialog(page, /Nuevo chat/i);
-    await create.locator('select[aria-label="Tipo de acción"]').selectOption('contact');
+    await create.getByRole('searchbox').fill('+34100000097');
+    await create.getByRole('button', { name: /Abrir chat con \+34100000097/ }).click();
+    await waitForCondition(() => state.log.some(item => item.path === '/api/chats/new' && item.body?.phone === '+34100000097'), 'unsynchronized phone could not start a chat');
+
+    await page.locator('#feature-new-chat').click();
+    create = await dialog(page, /Nuevo chat/i);
+    await create.getByRole('button', { name: 'Nuevo contacto', exact: true }).click();
+    create = await dialog(page, /Nuevo contacto/i);
     await fieldLocator(create, 'Nombre').fill('Contacto Nuevo');
     await fieldLocator(create, 'Número o identificador').fill('+34100000098');
     await clickDialogButton(create, 'Continuar');
@@ -1040,7 +1064,8 @@ async function runDesktop(page, state, report) {
 
     await page.locator('#feature-new-chat').click();
     create = await dialog(page, /Nuevo chat/i);
-    await create.locator('select[aria-label="Tipo de acción"]').selectOption('group');
+    await create.getByRole('button', { name: 'Nuevo grupo', exact: true }).click();
+    create = await dialog(page, /Nuevo grupo/i);
     await fieldLocator(create, 'Nombre').fill('Grupo Nuevo');
     await fieldLocator(create, 'Miembros').fill('ana-fixture,bruno-fixture');
     await clickDialogButton(create, 'Continuar');
@@ -1168,14 +1193,27 @@ async function runDesktop(page, state, report) {
     const menu = await dialog(page, /Opciones de conversaci.n/i);
     await clickDialogButton(menu, 'Privacidad');
     const privacy = await dialog(page, /Privacidad/i);
+    await page.waitForFunction(() => document.querySelector('select[name="online"]')?.value === 'match_last_seen');
+    assert.equal(await privacy.locator('select[name="profile"]').inputValue(), 'contact_blacklist');
+    assert.equal(await privacy.locator('select[name="groupsAdd"]').inputValue(), 'contact_blacklist');
+    const beforeSave = state.log.length;
+    await privacy.locator('select[name="online"]').selectOption('all');
+    await privacy.locator('select[name="groupsAdd"]').selectOption('contacts');
     await clickDialogButton(privacy, 'Guardar privacidad');
-    await waitForCondition(() => state.log.some(item => item.path === '/api/privacy'), 'privacy request missing');
+    await waitForCondition(() => state.log.slice(beforeSave).filter(item => item.path === '/api/privacy' && item.method === 'POST').length === 2, 'privacy changes missing');
+    const changes = state.log.slice(beforeSave).filter(item => item.path === '/api/privacy' && item.method === 'POST');
+    assert.deepEqual(changes.map(item => item.body.field).sort(), ['groupsAdd', 'online']);
+    assert(changes.every(item => item.body.account === 'alpha' && !item.body.chat), 'account privacy must not carry a chat');
   });
 
   await check('notification opt-in does not leak history across accounts', async () => {
     await openSettings(page);
     await page.locator('#feature-notifications').click();
-    await page.waitForFunction(() => document.querySelector('#feature-toast')?.textContent.includes('activadas'));
+    await page.locator('#notification-permission-request').click();
+    await page.waitForFunction(() => Notification.permission === 'granted');
+    await page.locator('#notification-messages-sound').uncheck();
+    await page.locator('#notification-groups-enabled').uncheck();
+    await closeDialog(page);
     await selectAccount(page, 'beta', 'Bruno Fixture');
     const betaText = await page.locator('body').textContent();
     assert(!betaText.includes('Ana Fixture'), 'alpha contact leaked into beta account');
@@ -1207,7 +1245,13 @@ async function runDesktop(page, state, report) {
     await selectAccount(page, 'beta', 'Bruno Fixture');
     const notifications = await page.evaluate(() => window.__fixtureNotifications || []);
     assert(notifications.some(item => item.title === 'Ana Fixture' && item.body.includes('Nuevo mensaje Alpha')), `alpha notification missing: ${JSON.stringify(notifications)}`);
+    assert(notifications.find(item => item.body.includes('Nuevo mensaje Alpha')).silent, 'message sound preference was ignored');
     assert(!notifications.some(item => item.title === 'Bruno Fixture' && item.body.includes('Nuevo mensaje Alpha')), 'alpha notification leaked to beta');
+    await openSettings(page);
+    await page.locator('#feature-notifications').click();
+    assert(await page.locator('#notification-messages-sound').isChecked(), 'alpha sound preference leaked into beta');
+    assert(await page.locator('#notification-groups-enabled').isChecked(), 'alpha group preference leaked into beta');
+    await closeDialog(page);
     await clearReadOnlyDocument(page);
   });
 
@@ -1226,6 +1270,36 @@ async function runDesktop(page, state, report) {
     const text = await page.locator('#chats').textContent();
     assert(text.includes('Ana Fixture'), `stale response removed active alpha chats: ${text}`);
     assert(!text.includes('Bruno Fixture'), `stale beta response replaced alpha chats: ${text}`);
+  });
+
+  await check('bulk selection keeps failed chats selected and retries only those chats', async () => {
+    await clearReadOnlyDocument(page);
+    await selectAccount(page, 'alpha', 'Ana Fixture');
+    await openChat(page, 'Ana Fixture');
+    const original = clone(state.chats.alpha);
+    await page.locator('#chat-selection-toggle').click();
+    await chatLocator(page, 'Ana Fixture').click();
+    await chatLocator(page, 'Equipo Fixture').click();
+    assert.equal(await page.locator('#chat-title').textContent(), 'Ana Fixture');
+    const bar = page.getByRole('region', {name:'Selección de conversaciones'});
+    assert.equal(await bar.locator('.chat-selection-count').textContent(), '2 seleccionados');
+    const start = state.log.length;
+    state.failNextPath = '/api/chat-actions';
+    await bar.getByRole('button', {name:'Silenciar',exact:true}).click();
+    await page.waitForFunction(() => document.querySelector('.chat-selection-status')?.textContent.includes('1 conversaciones pendientes'));
+    assert.equal(await bar.locator('.chat-selection-count').textContent(), '1 seleccionados');
+    await bar.getByRole('button', {name:'Silenciar',exact:true}).click();
+    await page.waitForFunction(() => document.querySelector('.chat-selection-status')?.textContent === 'Cambios aplicados.');
+    const writes = state.log.slice(start).filter(item=>item.path==='/api/chat-actions' && item.body?.action==='mute');
+    assert.equal(writes.length,3);
+    assert(writes.every(item=>item.body.account==='alpha'));
+    assert.equal(writes[2].body.chat,writes[0].body.chat);
+    assert.notEqual(writes[2].body.chat,writes[1].body.chat);
+    await page.keyboard.press('Escape');
+    assert.equal(await bar.isVisible(),false);
+    state.chats.alpha=original;
+    await selectAccount(page,'beta','Bruno Fixture');
+    await selectAccount(page,'alpha','Ana Fixture');
   });
 
   await check('more than 500 chats load and remain searchable and selectable', async () => {
@@ -1277,7 +1351,7 @@ async function runMobile(browser, baseUrl, report) {
     class FixtureNotification {
       static permission = 'default';
       static async requestPermission() { FixtureNotification.permission = 'granted'; return 'granted'; }
-      constructor(title, options = {}) { window.__fixtureNotifications.push({ title, body: options.body || '', tag: options.tag || '' }); }
+      constructor(title, options = {}) { window.__fixtureNotifications.push({ title, body: options.body || '', tag: options.tag || '', silent: options.silent === true }); }
     }
     Object.defineProperty(window, 'Notification', { configurable: true, value: FixtureNotification });
   });
@@ -1368,7 +1442,7 @@ try {
     class FixtureNotification {
       static permission = 'default';
       static async requestPermission() { FixtureNotification.permission = 'granted'; return 'granted'; }
-      constructor(title, options = {}) { window.__fixtureNotifications.push({ title, body: options.body || '', tag: options.tag || '' }); }
+      constructor(title, options = {}) { window.__fixtureNotifications.push({ title, body: options.body || '', tag: options.tag || '', silent: options.silent === true }); }
     }
     Object.defineProperty(window, 'Notification', { configurable: true, value: FixtureNotification });
   });

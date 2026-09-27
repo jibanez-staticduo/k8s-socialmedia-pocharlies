@@ -78,6 +78,7 @@ export function installCommunitiesUI({
   selectChat = () => {},
   getChats = () => [],
   showError = () => {},
+  onOpen = () => {},
 } = {}) {
   if (!documentRef?.body || typeof getAccount !== 'function' || typeof api !== 'function') return null;
   const rail = documentRef.querySelector('.rail-bottom');
@@ -449,6 +450,7 @@ export function installCommunitiesUI({
     opener = documentRef.activeElement || entry;
     shade.hidden = false;
     entry.setAttribute('aria-expanded', 'true');
+    onOpen();
     selected = null;
     selectedDetail = null;
     renderDetail();

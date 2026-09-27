@@ -14,7 +14,7 @@ export function createProfileClient({ api, getAccount }) {
   return { request, scope, current, invalidate() { generation++; } };
 }
 
-export function installProfileUI({ documentRef = document, api, getAccount }) {
+export function installProfileUI({ documentRef = document, api, getAccount, onOpen = () => {} }) {
   const section = documentRef.querySelector('.settings-section');
   if (!section) return null;
   const client = createProfileClient({ api, getAccount });
@@ -146,6 +146,7 @@ export function installProfileUI({ documentRef = document, api, getAccount }) {
   entry.onclick = () => {
     documentRef.querySelector('.rail-settings').open = false;
     panel.hidden = false;
+    onOpen();
     $('.settings-close').focus();
     void load();
   };
@@ -198,5 +199,5 @@ export function installProfileUI({ documentRef = document, api, getAccount }) {
   documentRef.addEventListener('pointerdown', event => {
     if (!panel.hidden && !panel.contains(event.target) && event.target !== entry) close(false);
   });
-  return { accountChanged() { client.invalidate(); if (!panel.hidden) void load(); } };
+  return { accountChanged() { client.invalidate(); if (!panel.hidden) void load(); }, close };
 }

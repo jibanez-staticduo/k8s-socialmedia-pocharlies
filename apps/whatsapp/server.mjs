@@ -1,4 +1,3 @@
-import { readChatDirectory } from './lib/chat-directory.mjs';
 import http from 'node:http';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +13,9 @@ import { utcDatabaseTypes } from './lib/database-time.mjs';
 import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, fail } from './lib/security.mjs';
 import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
+import { readMediaLibrary } from './lib/media-library.mjs';
+import { readChatDirectory } from './lib/chat-directory.mjs';
+import { readContactDirectory } from './lib/contact-directory.mjs';
 import { Sessions } from './lib/sessions.mjs';
 import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
@@ -870,6 +872,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     if (profile) privacy.profile = profile;
     if (lastSeen) privacy.lastSeen = lastSeen;
     if (readReceipts === 'all' || readReceipts === 'none') privacy.readReceipts = readReceipts === 'all';
+    const online = cleanProviderValue(source.online, 64);
+    const groupsAdd = cleanProviderValue(source.groupsAdd || source.groupadd, 64);
+    if (['all', 'match_last_seen'].includes(online)) privacy.online = online;
+    if (['all', 'contacts', 'contact_blacklist'].includes(groupsAdd)) privacy.groupsAdd = groupsAdd;
     return privacy;
   }
   // ---------------------------------------------------------------------------
@@ -1098,6 +1104,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       }
       if (req.method === 'GET' && path === '/api/accounts') return json(200, { accounts: accounts.map(a => ({ id: a.accountId, label: a.label || a.accountId })), sendingEnabled: sendingEnabled(env), outboxScope: principal.sessionId ? createHash('sha256').update(principal.sessionId).digest('hex') : 'basic' });
       if (req.method === 'GET' && path === '/api/models') return json(200, { models: await modelList(), defaultModel: env.HERMES_DEFAULT_MODEL || env.APP_AI_DEFAULT_MODEL || '' });
+      if (req.method === 'GET' && path === '/api/media-library') {
+        const a = accountParam(url.searchParams.get('account'));
+        return json(200, await readMediaLibrary({ account: a.accountId, params: url.searchParams, query }));
+      }
+      if (req.method === 'GET' && path === '/api/contacts') {
+        const a = accountParam(url.searchParams.get('account'));
+        return json(200, await readContactDirectory({ account: a.accountId, params: url.searchParams, query, sendingEnabled: sendingEnabled(env) }));
+      }
       if (req.method === 'GET' && path === '/api/chats') {
         const a = accountParam(url.searchParams.get('account'));
         const requestedArchive = url.searchParams.get('archived');

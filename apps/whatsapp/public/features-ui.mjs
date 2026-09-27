@@ -1,6 +1,8 @@
 'use strict';
 
 import { createPageFetcher, exportConversationText, ChatExportCanceled } from './chat-export.mjs';
+import { installNotificationSettings } from './notification-settings.mjs';
+import { installContactDirectoryUI } from './contact-directory-ui.mjs';
 
 /*
  * Feature UI for the selected WhatsApp Web inventory.  The module owns the
@@ -198,7 +200,7 @@ export function shouldNotifyChatUpdate(previous, next, { hidden = false, permiss
 
 function privacyVisibility(value) {
   const normalized = text(value).trim().toLowerCase();
-  return ['all', 'contacts', 'none'].includes(normalized) ? normalized : null;
+  return ['all', 'contacts', 'contact_blacklist', 'none'].includes(normalized) ? normalized : null;
 }
 
 function privacyReceipts(value) {
@@ -217,10 +219,14 @@ export function normalizePrivacySnapshot(value = {}) {
     : root.data && typeof root.data === 'object'
       ? root.data
       : root;
+  const online = text(source.online).trim().toLowerCase();
+  const groupsAdd = text(source.groupsAdd ?? source.groupadd).trim().toLowerCase();
   return {
     profile: privacyVisibility(source.profile ?? source.profilePicture ?? source.profile_picture),
     lastSeen: privacyVisibility(source.lastSeen ?? source.last_seen ?? source.last),
     readReceipts: privacyReceipts(source.readReceipts ?? source.read_receipts ?? source.readreceipts),
+    ...(['all', 'match_last_seen'].includes(online) ? { online } : {}),
+    ...(['all', 'contacts', 'contact_blacklist'].includes(groupsAdd) ? { groupsAdd } : {}),
   };
 }
 
@@ -232,6 +238,7 @@ export function privacyChanges(initial = {}, current = {}) {
   if (after.profile && after.profile !== before.profile) changes.push({ field: 'profilePicture', value: after.profile });
   if (after.lastSeen && after.lastSeen !== before.lastSeen) changes.push({ field: 'lastSeen', value: after.lastSeen });
   if (after.readReceipts && after.readReceipts !== before.readReceipts) changes.push({ field: 'readReceipts', value: after.readReceipts === 'true' ? 'all' : 'none' });
+  for (const field of ['online', 'groupsAdd']) if (after[field] && after[field] !== before[field]) changes.push({ field, value: after[field] });
   return changes;
 }
 
@@ -393,6 +400,7 @@ export function installFeatureUI({
   setChat = () => {},
   showError = () => {},
   openCamera = () => {},
+  onOpen = () => {},
 } = {}) {
   if (!documentRef || !state || typeof api !== 'function' || typeof query !== 'function') return null;
 
@@ -420,6 +428,16 @@ export function installFeatureUI({
 
   const root = documentRef.body;
   const node = (tag, className = '', value) => makeElement(documentRef, tag, className, value);
+
+  const notificationSettings = installNotificationSettings({
+    documentRef,
+    windowRef,
+    storage: () => windowRef?.localStorage,
+    getAccount: () => runtime.account,
+    openModal,
+    permission: () => runtime.notificationPermission,
+    requestPermission: () => readNotifications(),
+  });
 
   function prefs() { return store.read(runtime.account); }
 
@@ -452,6 +470,7 @@ export function installFeatureUI({
 
   function openModal(title, { wide = false, opener = documentRef.activeElement, variant = '' } = {}) {
     closeModal();
+    closeContactDirectory();
     const overlay = node('div', `feature-modal ${wide ? 'feature-modal-wide' : ''} ${variant ? `feature-modal-${variant}` : ''}`);
     overlay.setAttribute('role', 'presentation');
     const dialog = node('section', 'feature-dialog');
@@ -468,6 +487,8 @@ export function installFeatureUI({
     dialog.append(header, body);
     overlay.append(dialog);
     root.append(overlay);
+    // Rail panels share the viewport, focus and Escape: opening a dialog closes them.
+    onOpen();
     if (variant === 'menu') {
       const bounds = opener?.getBoundingClientRect?.();
       if (bounds) {
@@ -1176,33 +1197,109 @@ export function installFeatureUI({
     await loadPage('');
   }
 
-  function openNewChat(initialType = 'chat') {
-    const modal = openModal(initialType === 'group' ? 'Nuevo grupo' : 'Nuevo chat', { wide: true });
-    const type = documentRef.createElement('select'); type.setAttribute('aria-label', 'Tipo de acción'); type.append(option(documentRef, 'Iniciar chat', 'chat'), option(documentRef, 'Nuevo contacto', 'contact'), option(documentRef, 'Nuevo grupo', 'group'));
-    type.value = initialType === 'group' ? 'group' : 'chat';
+  // The official "Nuevo chat" drawer searches the account's known contacts and
+  // keeps creation as three separate operations. Opening a contact only opens
+  // the conversation; nothing is sent by browsing.
+  function newContactForm() {
+    const modal = openModal('Nuevo contacto', { wide: true });
     const form = node('form', 'feature-form');
     const name = field(documentRef, 'Nombre', 'text', 'name');
     const address = field(documentRef, 'Número o identificador', 'text', 'address');
-    const members = field(documentRef, 'Miembros (separados por comas, solo grupos)', 'text', 'members');
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
-    form.append(makeElement(documentRef, 'label', 'feature-field', 'Operación'), type, name.wrapper, address.wrapper, members.wrapper, submit);
-    const hint = node('p', 'feature-muted', 'Las operaciones de contacto y grupo requieren permisos del proveedor.');
-    function updateFields() { members.wrapper.hidden = type.value !== 'group'; name.wrapper.hidden = type.value === 'chat'; }
-    type.onchange = updateFields; updateFields();
+    form.append(name.wrapper, address.wrapper, submit);
     form.onsubmit = async event => {
       event.preventDefault();
-      const values = formData(form); const selected = type.value;
-      const route = selected === 'contact' ? '/api/contacts' : selected === 'group' ? '/api/groups' : '/api/chats/new';
-      const payload = selected === 'group' ? { name: values.name.trim(), participants: values.members.split(',').map(item => item.trim()).filter(Boolean) } : selected === 'contact' ? { phone: values.address.trim(), displayName: values.name.trim() } : { phone: values.address.trim() };
-      if (selected === 'group' && (!payload.name || !payload.participants.length)) return;
-      if (selected !== 'group' && !payload.phone) return;
-      const result = await mutate(route, payload, { refreshChats: true, success: selected === 'chat' ? 'Chat abierto.' : 'Operación confirmada.' });
+      const values = formData(form);
+      if (!values.name?.trim() || !values.address?.trim()) return;
+      const result = await mutate('/api/contacts', { phone: values.address.trim(), displayName: values.name.trim() }, { refreshChats: true, success: 'Operación confirmada.', includeChat: false });
+      if (result?.confirmed) closeModal();
+    };
+    modal.body.append(form);
+  }
+
+  function newGroupForm() {
+    const modal = openModal('Nuevo grupo', { wide: true });
+    const form = node('form', 'feature-form');
+    const name = field(documentRef, 'Nombre', 'text', 'name');
+    const members = field(documentRef, 'Miembros (separados por comas)', 'text', 'members');
+    const submit = button(documentRef, 'Continuar', 'feature-button primary');
+    submit.type = 'submit';
+    form.append(name.wrapper, members.wrapper, submit);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const values = formData(form);
+      const payload = { name: values.name.trim(), participants: values.members.split(',').map(item => item.trim()).filter(Boolean) };
+      if (!payload.name || !payload.participants.length) return;
+      const result = await mutate('/api/groups', payload, { refreshChats: true, success: 'Operación confirmada.', includeChat: false });
       const chat = result?.chat || result?.conversation;
       if (chat) { closeModal(); selectChat(chat); }
       else if (result?.confirmed) closeModal();
     };
-    modal.body.append(form, hint);
+    modal.body.append(form);
+  }
+
+  function newCommunityForm() {
+    const modal = openModal('Nueva comunidad', { wide: true });
+    const form = node('form', 'feature-form');
+    const subject = field(documentRef, 'Nombre de la comunidad', 'text', 'subject');
+    const description = field(documentRef, 'Descripción (opcional)', 'textarea', 'description');
+    const submit = button(documentRef, 'Continuar', 'feature-button primary');
+    submit.type = 'submit';
+    form.append(subject.wrapper, description.wrapper, submit);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const values = formData(form);
+      if (!values.subject?.trim()) return;
+      const payload = { subject: values.subject.trim().slice(0, 100) };
+      if (values.description?.trim()) payload.description = values.description.trim();
+      const result = await mutate('/api/communities', payload, { refreshChats: true, success: 'Comunidad creada.', includeChat: false });
+      if (result) closeModal();
+    };
+    modal.body.append(form);
+  }
+
+  function closeContactDirectory() {
+    runtime.contactDirectory?.close?.();
+  }
+
+  function contactDirectory() {
+    runtime.contactDirectory ||= installContactDirectoryUI({
+      documentRef,
+      windowRef,
+      api,
+      getAccount: () => runtime.account,
+      // The account switch and any chat change raise this counter, so an open
+      // drawer reloads instead of answering for the previous account.
+      getEpoch: () => runtime.generation,
+      onOpenChat: async entry => {
+        closeContactDirectory();
+        const known = array(getChats()).find(chat => text(chat.id) === entry.chatId);
+        selectChat({ ...known, id: entry.chatId, name: entry.label, isGroup: false });
+      },
+      onStartChat: async entry => {
+        const result = await mutate('/api/chats/new', { phone: entry.phone }, { refreshChats: true, success: 'Chat abierto.', includeChat: false });
+        const chat = result?.chat || result?.conversation;
+        if (!chat?.id) return;
+        closeContactDirectory();
+        selectChat(chat);
+      },
+      onAction: action => {
+        closeContactDirectory();
+        if (action === 'group') newGroupForm();
+        else if (action === 'contact') newContactForm();
+        else newCommunityForm();
+      },
+      onOpen,
+    });
+    return runtime.contactDirectory;
+  }
+
+  function openNewChat(initialType = 'chat') {
+    closeModal();
+    if (initialType === 'group') { newGroupForm(); return; }
+    if (initialType === 'contact') { newContactForm(); return; }
+    contactDirectory()?.open({ opener: documentRef.activeElement });
   }
 
   function openPicker(initial = 'emoji') {
@@ -1258,40 +1355,72 @@ export function installFeatureUI({
 
   async function openPrivacy() {
     const modal = openModal('Privacidad', { wide: true });
+    const scope = { account: runtime.account, generation: runtime.generation };
+    const isCurrent = () => runtime.account === scope.account && runtime.generation === scope.generation && runtime.modal?.overlay === modal.overlay && modal.overlay.isConnected;
     const form = node('form', 'feature-form');
     const profile = documentRef.createElement('select'); profile.name = 'profile'; profile.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'), option(documentRef, 'Nadie', 'none'));
     const lastSeen = documentRef.createElement('select'); lastSeen.name = 'lastSeen'; lastSeen.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'), option(documentRef, 'Nadie', 'none'));
+    const online = documentRef.createElement('select'); online.name = 'online'; online.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Igual que la última vez', 'match_last_seen'));
+    const groupsAdd = documentRef.createElement('select'); groupsAdd.name = 'groupsAdd'; groupsAdd.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'));
+    // Preserve an existing exclusion list; choosing its members needs a separate flow.
+    for (const control of [profile, lastSeen, groupsAdd]) {
+      const excluded = option(documentRef, 'Mis contactos excepto…', 'contact_blacklist');
+      excluded.disabled = true;
+      control.append(excluded);
+    }
     const receipts = documentRef.createElement('select'); receipts.name = 'readReceipts'; receipts.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Activados', 'true'), option(documentRef, 'Desactivados', 'false'));
-    for (const [label, control] of [['Foto y perfil', profile], ['Última vez', lastSeen], ['Confirmaciones de lectura', receipts]]) { const wrapper = node('label', 'feature-field'); wrapper.append(node('span', '', label), control); form.append(wrapper); }
+    for (const [label, control] of [['Foto y perfil', profile], ['Última vez', lastSeen], ['Quién puede verme en línea', online], ['Quién puede añadirme a grupos', groupsAdd], ['Confirmaciones de lectura', receipts]]) { const wrapper = node('label', 'feature-field'); wrapper.append(node('span', '', label), control); form.append(wrapper); }
     const submit = button(documentRef, 'Guardar privacidad', 'feature-button primary'); submit.disabled = true; form.append(submit);
     submit.type = 'submit';
     let loaded = false;
+    let saving = false;
     let initial = normalizePrivacySnapshot();
     form.onsubmit = async event => {
       event.preventDefault();
-      if (!loaded) return;
-      const current = normalizePrivacySnapshot({ profile: profile.value, lastSeen: lastSeen.value, readReceipts: receipts.value });
+      if (!loaded || saving || !isCurrent()) return;
+      const current = normalizePrivacySnapshot({ profile: profile.value, lastSeen: lastSeen.value, online: online.value, groupsAdd: groupsAdd.value, readReceipts: receipts.value });
       const changes = privacyChanges(initial, current);
-      for (const change of changes) {
-        const result = await mutate('/api/privacy', change, { success: '', includeChat: false });
-        if (!result) return;
+      saving = true;
+      const controls = [profile, lastSeen, online, groupsAdd, receipts, submit];
+      controls.forEach(control => { control.disabled = true; });
+      let applied = 0;
+      try {
+        for (const change of changes) {
+          if (!isCurrent()) return;
+          const result = await mutate('/api/privacy', change, { success: '', includeChat: false });
+          if (!result || !isCurrent()) {
+            if (isCurrent() && applied) notice.textContent = 'Algunos ajustes se han guardado. Puedes reintentar los pendientes.';
+            return;
+          }
+          const field = change.field === 'profilePicture' ? 'profile' : change.field;
+          initial[field] = current[field];
+          applied++;
+        }
+        if (changes.length) toast('Privacidad actualizada.', 'success');
+        closeModal();
+      } finally {
+        saving = false;
+        if (isCurrent()) controls.forEach(control => { control.disabled = false; });
       }
-      if (changes.length) toast('Privacidad actualizada.', 'success');
-      closeModal();
     };
     const notice = node('p', 'feature-muted', 'Cargando preferencias…');
     modal.body.append(notice, form);
     try {
       const result = await request('/api/privacy', undefined, { chat: '' });
+      if (!isCurrent()) return;
       initial = normalizePrivacySnapshot(result);
       profile.value = initial.profile || '';
       lastSeen.value = initial.lastSeen || '';
+      online.value = initial.online || '';
+      groupsAdd.value = initial.groupsAdd || '';
       receipts.value = initial.readReceipts || '';
       loaded = true;
       submit.disabled = false;
-      notice.textContent = 'Solo se muestran preferencias respaldadas por la sesión y el proveedor.';
+      notice.textContent = [initial.profile, initial.lastSeen, initial.groupsAdd].includes('contact_blacklist')
+        ? 'Para cambiar las personas excluidas, usa WhatsApp en tu teléfono. Los demás ajustes se aplican a tu cuenta.'
+        : 'Estos ajustes se aplican a tu cuenta de WhatsApp.';
     } catch {
-      notice.textContent = 'No se pudieron cargar las preferencias actuales; Guardar permanece desactivado.';
+      if (isCurrent()) notice.textContent = 'No se pudieron cargar las preferencias actuales; Guardar permanece desactivado.';
     }
   }
 
@@ -1303,7 +1432,12 @@ export function installFeatureUI({
       const permission = await windowRef.Notification.requestPermission();
       runtime.notificationPermission = permission;
       toast(permission === 'granted' ? 'Notificaciones activadas.' : 'No se activaron las notificaciones.', permission === 'granted' ? 'success' : 'error');
+      return permission;
     } catch { toast('No se pudo solicitar el permiso de notificaciones.', 'error'); }
+  }
+
+  function openNotifications() {
+    notificationSettings?.open();
   }
 
   function chatListChanged(chats) {
@@ -1314,6 +1448,7 @@ export function installFeatureUI({
       preview: text(chat?.preview).trim(),
       name: text(chat?.name || chat?.id || 'SocialMedia'),
       muted: chatIsMuted(chat, prefs()),
+      isGroup: chat?.isGroup === true || text(chat?.id).endsWith('@g.us'),
     }]));
     const firstSnapshot = ![...runtime.chatListBaseline.keys()].some(key => key.startsWith(`${account}:`));
     for (const [chatId, next] of current) {
@@ -1325,9 +1460,12 @@ export function installFeatureUI({
         if (next.unread > 0) void markVisibleRead();
       }
       if (firstSnapshot || !shouldNotifyChatUpdate(previous, next, { hidden: documentRef.hidden, permission: runtime.notificationPermission, muted: next.muted })) continue;
+      const delivery = notificationSettings?.payloadFor?.({ isGroup: next.isGroup, name: next.name, preview: next.preview });
+      if (!delivery) continue;
       try {
-        new windowRef.Notification(next.name, {
-          body: next.preview || 'Nuevo mensaje',
+        new windowRef.Notification(delivery.title, {
+          body: delivery.body,
+          silent: delivery.silent,
           tag: `socialmedia-${account}-${chatId}-${next.timestamp || next.unread}`,
         });
       } catch { /* Notification delivery is optional. */ }
@@ -1412,7 +1550,7 @@ export function installFeatureUI({
       documentRef.addEventListener('keydown', event => { if (event.key === 'Escape' && !attachMenu.hidden) { closeAttachMenu(); attachment.focus(); } });
     }
     const settings = documentRef.querySelector('.rail-popover');
-    const notifications = button(documentRef, 'Activar notificaciones', 'feature-button subtle'); notifications.id = 'feature-notifications'; notifications.onclick = readNotifications;
+    const notifications = button(documentRef, 'Notificaciones', 'feature-button subtle'); notifications.id = 'feature-notifications'; notifications.onclick = openNotifications; notifications.setAttribute('aria-haspopup', 'dialog');
     const privacy = button(documentRef, 'Privacidad', 'feature-button subtle'); privacy.id = 'feature-privacy'; privacy.onclick = openPrivacy;
     settings?.append(notifications, privacy);
   }
@@ -1511,6 +1649,8 @@ export function installFeatureUI({
     openInfo,
     openSearch,
     openChatMenu,
+    /** Close every features dialog from the app shell (rail panels are mutually exclusive). */
+    closePanels: () => { runtime.closeAttachMenu?.(); closeContactDirectory(); closeModal(); },
     setView,
     isFeatureView: () => runtime.currentView,
     getState: () => ({ ...runtime, selectedMessageIds: new Set(runtime.selectedMessageIds) }),

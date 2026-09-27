@@ -99,6 +99,18 @@ test('privacy changes emit only changed connector fields and map receipt values'
   assert.deepEqual(privacyChanges({ profile: 'all' }, { profile: 'all', lastSeen: null, readReceipts: null }), []);
 });
 
+test('online and group privacy retain provider values and emit only explicit changes', () => {
+  const initial = normalizePrivacySnapshot({ profile: 'contact_blacklist', online: 'match_last_seen', groupadd: 'contact_blacklist' });
+  assert.equal(initial.profile, 'contact_blacklist');
+  assert.equal(initial.online, 'match_last_seen');
+  assert.equal(initial.groupsAdd, 'contact_blacklist');
+  assert.deepEqual(privacyChanges(initial, initial), []);
+  assert.deepEqual(privacyChanges(initial, { ...initial, online: 'all', groupsAdd: 'contacts' }), [
+    { field: 'online', value: 'all' }, { field: 'groupsAdd', value: 'contacts' },
+  ]);
+  assert.deepEqual(privacyChanges(initial, { online: 'invalid', groupsAdd: 'none' }), []);
+});
+
 test('delayed archive, star and new-chat acknowledgements cannot refresh or alter a switched account', async () => {
   for (const action of ['archive', 'star', 'new-chat']) {
     let acknowledge;

@@ -105,10 +105,33 @@ test('CSRF and account/chat isolation reject before outbound request', async t =
   assert.deepEqual(calls[0].args, ['personal', 'secondary-chat']);
   assert.match(calls[0].sql, /account=\$1/);
 });
+test('global media library requires authentication and a configured account before querying', async t => {
+  const { request, calls } = await fixture(t);
+  assert.equal((await request('/api/media-library?account=personal', null, { authorization: '' })).status, 401);
+  assert.equal((await request('/api/media-library?account=secondary')).status, 404);
+  assert.equal((await request('/api/media-library?account=personal&kind=invalid')).status, 400);
+  assert.equal(calls.length, 0);
+  const response = await request('/api/media-library?account=personal&kind=documents');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { account: 'personal', items: [], nextCursor: null });
+  assert.equal(calls[0].args[0], 'personal');
+});
+
 test('emergency gate prevents connector calls', async t => {
   const { request } = await fixture(t, { env: { EMERGENCY_DISABLE_SENDING: 'true' } });
   assert.equal((await request('/api/send', { account: 'personal', chat: 'personal-chat', text: 'hello' })).status, 403);
   assert.equal((await (await request('/api/accounts')).json()).sendingEnabled, false);
+});
+
+test('privacy projects online and group-add settings without inventing missing values', async t => {
+  const { request } = await fixture(t, { fetchImpl: async () => Response.json({ ok: true, data: {
+    profile: 'contact_blacklist', online: 'match_last_seen', groupadd: 'contacts', readreceipts: 'all',
+  } }) });
+  const response = await request('/api/privacy?account=personal');
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).privacy, {
+    profile: 'contact_blacklist', online: 'match_last_seen', groupsAdd: 'contacts', readReceipts: true,
+  });
 });
 test('connector requests are signed; success requires provider message ID', async t => {
   let outbound;
