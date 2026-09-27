@@ -11,6 +11,14 @@ let messageRenderer = null;
 const rendererReady = import('./message-render.mjs').then(module => { messageRenderer = module; return module; });
 let attachmentTools = null;
 const attachmentReady = import('./composer-attachment.mjs').then(module => { attachmentTools = module; return module; });
+let mediaTools = null;
+let cameraController = null;
+const mediaReady = import('./composer-media.mjs').then(module => {
+  mediaTools = module;
+  cameraController = module.createCameraController({documentRef: document, mediaDevices: navigator.mediaDevices,
+    getContext: context, isCurrent: current, onCapture: stageAttachment, showError: error});
+  return module;
+});
 let accountRailTools = null;
 const accountRailReady = import('./account-rail.mjs').then(module => { accountRailTools = module; return module; });
 let draftTools = null;
@@ -93,7 +101,7 @@ async function api(path, data, onEvent) {
 function query(path, extra = {}) { return `${path}?${new URLSearchParams({account: state.account, ...extra})}`; }
 function context() { return {account: state.account, chat: state.chat, version: state.version}; }
 function current(ctx) { return ctx.version === state.version && ctx.account === state.account && ctx.chat === state.chat; }
-function updateControls() { const disabled = !state.account || !state.chat || !state.sending; for (const id of ['message', 'attach', 'record', 'send']) $(id).disabled = disabled; const suggest = $('suggest'); suggest.disabled = !state.account || !state.chat || state.suggesting || state.busy; suggest.setAttribute('aria-busy', String(state.suggesting)); suggest.classList.toggle('is-busy', state.suggesting); $('attachment-remove').disabled = state.busy; $('record').disabled ||= state.busy || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder; $('sending-notice').hidden = state.sending; }
+function updateControls() { const disabled = !state.account || !state.chat || !state.sending; for (const id of ['message', 'attach', 'record', 'send']) $(id).disabled = disabled; const suggest = $('suggest'); suggest.disabled = !state.account || !state.chat || state.suggesting || state.busy; suggest.setAttribute('aria-busy', String(state.suggesting)); suggest.classList.toggle('is-busy', state.suggesting); $('record').disabled ||= state.busy || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder; $('sending-notice').hidden = state.sending; }
 function setTheme(value) { const theme = value === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : value; document.body.dataset.theme = theme; try { localStorage.setItem('wa-theme', value); } catch {} }
 try { const storedTheme = localStorage.getItem('wa-theme'); $('theme').value = ['dark', 'light', 'system'].includes(storedTheme) ? storedTheme : 'dark'; } catch { $('theme').value = 'dark'; }
 setTheme($('theme').value); $('theme').onchange = () => setTheme($('theme').value); matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTheme($('theme').value));
@@ -268,10 +276,10 @@ function renderMessages() {
       const restore = node('button', 'message-restore', 'Editar texto');
       restore.type = 'button';
       restore.onclick = () => {
-        if (item.file && pendingFile) { error('Retira el adjunto actual antes de recuperar este mensaje.'); return; }
+        if (item.file && pendingFiles.length) { error('Retira los adjuntos actuales antes de recuperar este mensaje.'); return; }
         const composer = $('message');
         composer.value = composer.value ? `${composer.value}\n${item.text}` : item.text;
-        if (item.file && !pendingFile) stageAttachment(item.file);
+        if (item.file && !pendingFiles.length) stageAttachment(item.file);
         if (item.fileName && !item.file) error(`Texto recuperado. Adjunta ${item.fileName} de nuevo antes de enviarlo.`);
         if (item.replyTo && !featureUI?.restoreReply?.(item.replyTo)) error('Texto recuperado. Vuelve a seleccionar la cita original antes de enviarlo.');
         saveDraft();
@@ -282,7 +290,7 @@ function renderMessages() {
         renderMessages();
       };
       meta.append(restore);
-      if (item.sendToken && !item.file && !item.fileName) {
+      if (item.sendToken && (item.file || !item.fileName)) {
         const retry = node('button', 'message-restore', 'Reintentar el mismo envío');
         retry.type = 'button';
         retry.onclick = () => {
@@ -293,7 +301,8 @@ function renderMessages() {
           state.signature = '';
           renderMessages();
           const replyTo = item.replyTo || '';
-          void sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
+          if (item.file) void sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption || '', replyTo));
+          else void sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
         };
         meta.append(retry);
       }
@@ -453,11 +462,11 @@ async function proposeMessage() {
     updateControls();
   }
 }
-function selectChat(chat) { messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.historyMode = false; historyNotice.hidden = true; state.version++; resetMessageHistory(); state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls(); return loadMessages(); }
-$('search').oninput = renderChats; $('message').oninput = saveDraft; $('back').onclick = () => { messageRenderer?.closeMediaViewer?.(); cancelRecording(); document.body.classList.remove('chat-open'); };
+function selectChat(chat) { messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cameraController?.close(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.historyMode = false; historyNotice.hidden = true; state.version++; resetMessageHistory(); state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls(); return loadMessages(); }
+$('search').oninput = renderChats; $('message').oninput = saveDraft; $('back').onclick = () => { messageRenderer?.closeMediaViewer?.(); cancelRecording(); cameraController?.close(); document.body.classList.remove('chat-open'); };
 async function switchAccount(accountId) {
   if (!accountId || accountId === state.account || ![...$('account').options].some(option => option.value === accountId)) return;
-  messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cancelAttachment();
+  messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cameraController?.close(); cancelAttachment();
   state.account = accountId; $('account').value = accountId; accountRailTools?.markActiveAccount($('account-rail'), accountId);
   state.chat = ''; state.historyMode = false; historyNotice.hidden = true; state.selectedChat = null; state.version++; resetMessageHistory(); state.chats = []; state.signature = '';
   $('message').value = ''; resizeMessageInput(); $('chat-title').textContent = 'SocialMedia'; $('chat-subtitle').textContent = 'Selecciona un chat para empezar'; setConversationAvatar(); setAgentContext();
@@ -481,7 +490,7 @@ async function sendOptimistic(item, path, payload) {
       state.signature = '';
       renderMessages();
     }
-    return;
+    return false;
   }
   item.messageId = result.messageId;
   item.state = 'confirmed';
@@ -491,38 +500,45 @@ async function sendOptimistic(item, path, payload) {
     renderMessages();
     await Promise.all([loadMessages(), loadChats()]);
   }
+  return true;
 }
 $('composer').onsubmit = event => {
   event.preventDefault();
   const text = $('message').value.trim();
-  if ((!text && !pendingFile) || !state.sending || !state.chat) return;
+  if ((!text && !pendingFiles.length) || !state.sending || !state.chat) return;
   if (state.historyMode) { state.historyMode = false; resetMessageHistory(); void loadMessages(); }
   const featurePayload = featureUI?.getSendPayload?.() || {};
-  const file = pendingFile?.file || null;
-  if (file) {
-    const problem = attachmentTools.attachmentCaptionError(file, text);
-    if (problem) { error(problem); return; }
-  }
   const ctx = context();
-  const item = {id: `local-${crypto.randomUUID()}`, account: ctx.account, chat: ctx.chat, ctx, text, file, replyTo: featurePayload.replyTo, sendToken: crypto.randomUUID(), timestamp: new Date().toISOString(), state: 'sending', messageId: null};
+  const plans = pendingFiles.length
+    ? mediaTools.planAttachmentSends(pendingFiles.map(entry => entry.file), text, featurePayload.replyTo)
+    : [{text, replyTo: featurePayload.replyTo}];
+  const items = plans.map(plan => ({id: `local-${crypto.randomUUID()}`, account: ctx.account, chat: ctx.chat, ctx,
+    text: plan.text || plan.caption || '', caption: plan.caption || '', file: plan.file || null,
+    replyTo: plan.replyTo || '', sendToken: crypto.randomUUID(), timestamp: new Date().toISOString(), state: 'sending', messageId: null}));
   const key = outgoingKey(ctx.account, ctx.chat);
-  state.outgoing.set(key, [...outgoingFor(ctx.account, ctx.chat), item]);
+  state.outgoing.set(key, [...outgoingFor(ctx.account, ctx.chat), ...items]);
   persistOutbox();
   featureUI?.sendConfirmed?.();
   $('message').value = '';
   resizeMessageInput();
   state.drafts.delete(key);
-  if (file) cancelAttachment();
+  cancelAttachment();
   error();
   state.signature = '';
   renderMessages();
   $('message').focus();
-  if (file) {
-    sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(file, await base64(file), text, featurePayload.replyTo));
-    return;
-  }
-  sendOptimistic(item, featurePayload.replyTo ? '/api/messages/reply' : '/api/send', {text, ...featurePayload, ...(featurePayload.replyTo ? {messageId: featurePayload.replyTo} : {})});
+  void sendPlannedMessages(items);
 };
+async function sendPlannedMessages(items) {
+  for (const item of items) {
+    if (item.file) {
+      await sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption, item.replyTo));
+    } else {
+      const replyTo = item.replyTo;
+      await sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
+    }
+  }
+}
 $('message').onkeydown = event => {
   let enterToSend = true;
   try { enterToSend = localStorage.getItem('wa-enter-to-send') !== 'false'; } catch {}
@@ -532,48 +548,80 @@ $('message').onkeydown = event => {
   }
 };
 function base64(blob) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(new Error('No se pudo leer el archivo.')); reader.readAsDataURL(blob); }); }
-let pendingFile = null;
-let attachmentPreviewUrl = '';
+let pendingFiles = [];
+function renderStagedFiles() {
+  const preview = $('attachment-preview');
+  preview.replaceChildren();
+  for (const [index, entry] of pendingFiles.entries()) {
+    const card = node('div', 'composer-media-card');
+    if (entry.previewUrl) {
+      const thumbnail = node('img', 'composer-attachment-image');
+      if (index === 0) thumbnail.id = 'attachment-thumbnail';
+      thumbnail.alt = '';
+      thumbnail.src = entry.previewUrl;
+      card.append(thumbnail);
+    }
+    const label = node('span', 'composer-attachment-label', `${entry.file.name || 'Imagen pegada'} · ${(entry.file.size / 1024).toFixed(0)} KB`);
+    if (index === 0) label.id = 'attachment-label';
+    const remove = node('button', 'composer-attachment-remove', 'Quitar');
+    if (index === 0) remove.id = 'attachment-remove';
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `Quitar ${entry.file.name || 'imagen'} del borrador`);
+    remove.onclick = () => removeAttachment(entry.id);
+    card.append(label, remove);
+    preview.append(card);
+  }
+  preview.hidden = !pendingFiles.length;
+  $('composer').classList.toggle('has-attachment', pendingFiles.length > 0);
+}
+function removeAttachment(id) {
+  const entry = pendingFiles.find(item => item.id === id);
+  if (entry?.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+  pendingFiles = pendingFiles.filter(item => item.id !== id);
+  renderStagedFiles();
+}
 function cancelAttachment() {
-  pendingFile = null;
-  if (attachmentPreviewUrl) URL.revokeObjectURL(attachmentPreviewUrl);
-  attachmentPreviewUrl = '';
-  $('attachment-thumbnail').removeAttribute('src');
-  $('attachment-thumbnail').hidden = true;
-  $('attachment-preview').hidden = true;
-  $('composer').classList.remove('has-attachment');
+  for (const entry of pendingFiles) if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+  pendingFiles = [];
+  renderStagedFiles();
 }
 function stageAttachment(file) {
-  if (!file || !state.chat || !state.sending || state.busy) return;
-  const problem = attachmentTools.attachmentError(file);
-  if (problem) { error(problem); return; }
-  cancelAttachment();
-  pendingFile = {file, ctx: context()};
-  $('attachment-label').textContent = `${file.name || 'Imagen pegada'} · ${(file.size / 1024).toFixed(0)} KB`;
-  if (file.type?.startsWith('image/')) {
-    attachmentPreviewUrl = URL.createObjectURL(file);
-    $('attachment-thumbnail').src = attachmentPreviewUrl;
-    $('attachment-thumbnail').hidden = false;
-  }
-  $('attachment-preview').hidden = false;
-  $('composer').classList.add('has-attachment');
-  error();
-  $('message').focus();
+  return stageSelectedFiles([file]);
 }
 function stageSelectedFiles(files) {
-  if (files.length > 1) { error(`Solo se admite un adjunto por mensaje. No se añadió ninguno de los ${files.length} archivos; elige uno.`); return; }
-  stageAttachment(files[0]);
+  if (!state.chat || !state.sending || !attachmentTools || !files.length) return false;
+  const rejected = [];
+  for (const file of files) {
+    const problem = attachmentTools.attachmentError(file);
+    if (problem) { rejected.push(`${file?.name || 'Archivo'}: ${problem}`); continue; }
+    pendingFiles.push({id: crypto.randomUUID(), file,
+      previewUrl: file.type?.startsWith('image/') ? URL.createObjectURL(file) : ''});
+  }
+  renderStagedFiles();
+  error(rejected.join(' '));
+  if (pendingFiles.length) $('message').focus();
+  return rejected.length === 0;
 }
-$('attachment-remove').onclick = cancelAttachment;
 $('attach').onclick = () => $('attachment').click();
 $('suggest').onclick = () => { void proposeMessage(); };
 $('attachment').multiple = true;
 $('attachment').onchange = () => { const files = [...$('attachment').files]; $('attachment').value = ''; stageSelectedFiles(files); };
 document.addEventListener('paste', event => {
-  if (!attachmentTools || !state.chat || !state.sending || state.busy) return;
+  if (!attachmentTools || !state.chat || !state.sending) return;
   const target = event.target;
   if (target !== $('message') && (target?.isContentEditable || ['INPUT', 'TEXTAREA'].includes(target?.tagName))) return;
   const files = attachmentTools.filesFromClipboard(event.clipboardData);
+  if (!files.length) return;
+  event.preventDefault();
+  stageSelectedFiles(files);
+});
+const dropZone = document.querySelector('.conversation');
+dropZone?.addEventListener('dragover', event => {
+  if (state.chat && state.sending && [...(event.dataTransfer?.types || [])].includes('Files')) event.preventDefault();
+});
+dropZone?.addEventListener('drop', event => {
+  if (!state.chat || !state.sending) return;
+  const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) return;
   event.preventDefault();
   stageSelectedFiles(files);
@@ -624,11 +672,11 @@ $('record').onclick = async () => {
 $('recording-stop').onclick = () => { if (state.recorder?.state === 'recording') state.recorder.stop(); }; $('recording-cancel').onclick = cancelRecording; $('recording-send').onclick = async () => { if (!state.blob || state.busy || !state.sending) return; const ctx = context(); const blob = state.blob; const token = state.recordingToken; state.recordingSendToken ||= crypto.randomUUID(); try { const data = await base64(blob); if (!current(ctx) || token !== state.recordingToken) return; await sendPayload('/api/upload', {name:`nota-de-voz.${blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'}`,mimeType:blob.type,data,voice:true,sendToken:state.recordingSendToken}, cancelRecording); } catch (err) { if (current(ctx)) error(err.message); } };
 function toggleAI(open) { $('ai-panel').hidden = !open; $('ai-toggle').setAttribute('aria-expanded', String(open)); assistant?.setOpen(open); if (!open) $('ai-toggle').focus(); }
 $('ai-toggle').onclick = () => toggleAI($('ai-panel').hidden); $('ai-close').onclick = () => toggleAI(false); document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('ai-panel').hidden) toggleAI(false); });
-const featureReady = historyReady.then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
+const featureReady = Promise.all([historyReady, mediaReady]).then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error, openCamera: () => state.sending ? cameraController?.open() : error('El envío está desactivado.')}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
 const communitiesReady = import('./communities-ui.mjs').then(({installCommunitiesUI}) => { communitiesUI = installCommunitiesUI({getAccount: () => state.account, api, selectChat, getChats: () => state.chats, showError: error}); return communitiesUI; }).catch(err => { error(`No se pudo cargar Comunidades: ${err.message}`); return null; });
-async function init() { try { await historyReady; await rendererReady; await attachmentReady; await accountRailReady; await draftReady; await featureReady; await communitiesReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await communitiesReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
 let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await loadChats(); if (!document.hidden) await loadMessages(); } finally { polling = false; } }, 10000);
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
-window.addEventListener('pagehide', () => { cancelRecording(); cancelAttachment(); });
+window.addEventListener('pagehide', () => { cancelRecording(); cameraController?.close(); cancelAttachment(); });
 init();

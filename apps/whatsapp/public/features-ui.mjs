@@ -390,6 +390,7 @@ export function installFeatureUI({
   getChats = () => [],
   setChat = () => {},
   showError = () => {},
+  openCamera = () => {},
 } = {}) {
   if (!documentRef || !state || typeof api !== 'function' || typeof query !== 'function') return null;
 
@@ -1161,7 +1162,7 @@ export function installFeatureUI({
     modal.body.append(form, hint);
   }
 
-  function openPicker() {
+  function openPicker(initial = 'emoji') {
     const modal = openModal('Emoji, GIF y stickers', { wide: true });
     const tabs = node('nav', 'feature-picker-tabs');
     const content = node('div', 'feature-picker-content');
@@ -1183,7 +1184,10 @@ export function installFeatureUI({
       content.append(input, send);
     };
     const addTab = (label, render) => { const tab = button(documentRef, label, 'feature-button subtle'); tab.onclick = () => { for (const item of tabs.children) item.classList.remove('active'); tab.classList.add('active'); render(); }; tabs.append(tab); return tab; };
-    addTab('Emoji', renderEmoji).click(); addTab('GIF local', () => renderUpload('GIF', 'image/gif')); addTab('Sticker local', () => renderUpload('sticker', 'image/webp'));
+    const emojiTab = addTab('Emoji', renderEmoji);
+    addTab('GIF local', () => renderUpload('GIF', 'image/gif'));
+    const stickerTab = addTab('Sticker local', () => renderUpload('sticker', 'image/webp'));
+    (initial === 'sticker' ? stickerTab : emojiTab).click();
     modal.body.append(tabs, content);
   }
 
@@ -1335,6 +1339,9 @@ export function installFeatureUI({
     const attachPaths = {
       photo: ['M3 5h18v14H3z', 'M8 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2z', 'm4 17 5-5 3 3 2-2 4 4'],
       document: ['M6 2h8l4 4v16H6z', 'M14 2v5h5', 'M9 12h6', 'M9 16h6'],
+      camera: ['M4 7h4l2-2h4l2 2h4v13H4z', 'M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],
+      audio: ['M9 4v12a3 3 0 1 1-2-3', 'M9 6l10-2v12a3 3 0 1 1-2-3'],
+      sticker: ['M4 4h16v11l-5 5H4z', 'M15 20v-5h5'],
       contact: ['M4 5h16v14H4z', 'M10 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z', 'M6.5 16c0-2 1.5-3 3.5-3s3.5 1 3.5 3', 'M16 10h2', 'M16 13h2'],
       poll: ['M5 5h3v3H5z', 'M11 6h8', 'M5 11h3v3H5z', 'M11 12h8', 'M5 17h3v3H5z', 'M11 18h8'],
       event: ['M4 5h16v16H4z', 'M4 9h16', 'M8 3v4', 'M16 3v4', 'M8 13h3', 'M8 17h3'],
@@ -1348,9 +1355,12 @@ export function installFeatureUI({
     };
     addAttach('Fotos y vídeos', 'photo', () => openFile('image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime'));
     addAttach('Documento', 'document', () => openFile('.pdf,.docx,.xlsx,.pptx,.zip,.txt'));
+    addAttach('Cámara', 'camera', openCamera);
+    addAttach('Audio', 'audio', () => openFile('audio/ogg,audio/webm,audio/mpeg,audio/mp4,audio/wav,audio/x-wav'));
     addAttach('Contacto', 'contact', () => openShare('contact'));
     addAttach('Encuesta', 'poll', () => openShare('poll'));
     addAttach('Evento', 'event', () => openShare('event'));
+    addAttach('Nuevo sticker', 'sticker', () => openPicker('sticker'));
     composer?.append(attachMenu);
     if (attachment) {
       attachment.setAttribute('aria-haspopup', 'menu'); attachment.setAttribute('aria-controls', 'feature-attach-menu'); attachment.setAttribute('aria-expanded', 'false');

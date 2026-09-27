@@ -1,0 +1,46 @@
+.composer-attachment {
+  flex-wrap: wrap;
+  padding: 6px 12px;
+}
+
+.composer-media-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.composer-media-card .composer-attachment-label { max-width: min(38vw, 220px); }
+.composer-media-card .composer-attachment-remove { flex: 0 0 auto; }
+
+.camera-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .78);
+}
+
+.camera-overlay[hidden] { display: none; }
+
+.camera-dialog {
+  width: min(100%, 620px);
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.camera-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.camera-dialog video { display: block; width: 100%; max-height: 60vh; border-radius: 10px; background: #111; }
+.camera-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+.camera-actions button { padding: 9px 14px; border-radius: 10px; background: var(--surface-raised); color: var(--text); }
+.camera-actions #camera-capture { background: var(--accent); color: #07170f; }
+.camera-actions button:disabled { opacity: .5; }

@@ -894,14 +894,14 @@ async function runDesktop(page, state, report) {
     assert.equal(await preview.evaluate(node => getComputedStyle(node).display), 'none');
   });
 
-  await check('multiple selected or pasted attachments are rejected without losing the draft', async () => {
+  await check('multiple selected or pasted attachments remain staged until Send', async () => {
     await openChat(page, 'Ana Fixture');
     const file = {name: 'primera.png', mimeType: 'image/png', buffer: Buffer.from([1, 2, 3])};
     await page.locator('#attachment').setInputFiles(file);
     await page.locator('#message').fill('Leyenda guardada');
     const uploadsBefore = state.log.filter(item => item.path === '/api/upload').length;
     await page.locator('#attachment').setInputFiles([file, {name: 'segunda.png', mimeType: 'image/png', buffer: Buffer.from([4, 5, 6])}]);
-    assert.match(await page.locator('#error').textContent(), /Solo se admite un adjunto/);
+    assert.equal(await page.locator('.composer-media-card').count(), 3);
     assert.match(await page.locator('#attachment-label').textContent(), /primera\.png/);
     await page.locator('#message').evaluate(input => {
       const clipboardData = new DataTransfer();
@@ -909,26 +909,26 @@ async function runDesktop(page, state, report) {
       clipboardData.items.add(new File([new Uint8Array([2])], 'cuarta.png', {type: 'image/png'}));
       input.dispatchEvent(new ClipboardEvent('paste', {clipboardData, bubbles: true, cancelable: true}));
     });
-    assert.match(await page.locator('#error').textContent(), /ninguno de los 2 archivos/);
+    assert.equal(await page.locator('.composer-media-card').count(), 5);
     assert.match(await page.locator('#attachment-label').textContent(), /primera\.png/);
     assert.equal(await page.locator('#message').inputValue(), 'Leyenda guardada');
     assert.equal(state.log.filter(item => item.path === '/api/upload').length, uploadsBefore);
-    await page.locator('#attachment-remove').click();
+    while (await page.locator('.composer-media-card').count()) await page.locator('#attachment-remove').click();
     await page.locator('#message').fill('');
   });
 
-  await check('audio with text stays in the composer and sends no upload', async () => {
+  await check('audio and typed text send as separate messages', async () => {
     await openChat(page, 'Ana Fixture');
     await page.locator('#attachment').setInputFiles({ name: 'audio.mp3', mimeType: 'audio/mpeg', buffer: Buffer.from([1, 2, 3]) });
     await page.locator('#message').fill('Texto que no admite audio');
     const uploadsBefore = state.log.filter(item => item.path === '/api/upload').length;
+    const sendsBefore = state.log.filter(item => item.path === '/api/send').length;
     await page.locator('#composer').evaluate(form => form.requestSubmit());
-    assert.equal(state.log.filter(item => item.path === '/api/upload').length, uploadsBefore);
-    assert.match(await page.locator('#error').textContent(), /no admite texto junto a un audio/);
-    assert.equal(await page.locator('#attachment-preview').isVisible(), true);
-    assert.equal(await page.locator('#message').inputValue(), 'Texto que no admite audio');
-    await page.locator('#attachment-remove').click();
-    await page.locator('#message').fill('');
+    await waitForCondition(() => state.log.filter(item => item.path === '/api/upload').length === uploadsBefore + 1, 'audio upload was not sent');
+    assert.equal(state.log.filter(item => item.path === '/api/send').length, sendsBefore + 1);
+    assert.equal(state.log.filter(item => item.path === '/api/upload').at(-1).body.caption, '');
+    assert.equal(await page.locator('#attachment-preview').isVisible(), false);
+    assert.equal(await page.locator('#message').inputValue(), '');
   });
 
   await check('message reaction posts the selected emoji', async () => {
@@ -1116,7 +1116,7 @@ async function runDesktop(page, state, report) {
     await page.locator('#attach').click();
     const menu = page.locator('#feature-attach-menu');
     assert.equal(await menu.isVisible(), true);
-    assert.equal(await menu.getByRole('menuitem').count(), 5);
+    assert.equal(await menu.getByRole('menuitem').count(), 8);
     await page.screenshot({ path: path.join(outputDir, 'attachment-menu-desktop.png') });
     await page.locator('#message').click();
     assert.equal(await menu.isVisible(), false);
