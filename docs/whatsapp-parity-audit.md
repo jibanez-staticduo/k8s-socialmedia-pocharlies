@@ -179,6 +179,19 @@ TXT export batch, validated with synthetic data:
   [mobile light](screenshots/parity-export-mobile.png) and
   [desktop dark](screenshots/parity-export-desktop.png).
 
+UTC timestamp decoding correction, in validation:
+
+- The connector writes UTC to `timestamp without time zone` columns. The app
+  container runs in Europe/Madrid, where the default PostgreSQL decoder was
+  interpreting stored UTC as local time. A read-only production comparison of
+  20 timestamps against their original provider epoch found a -7,200,000 ms
+  offset for every sample; no message contents were extracted.
+- The app pool now decodes these scalar timestamps as UTC, without changing
+  the database, host timezone, global PostgreSQL parsers or browser formatting.
+- Tests cover UTC, Madrid, New York and Kolkata, winter/summer and DST changes.
+  Existing zoned timestamps retain their original parser; cursor text retains
+  PostgreSQL's microsecond precision.
+
 The goal remains open until the matrix is resolved with implemented/verified
 behavior or a concrete documented provider limitation. Calls/video calls are
 the only product area excluded by the owner.

@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import pg from 'pg';
+import { utcDatabaseTypes } from './lib/database-time.mjs';
 import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, fail } from './lib/security.mjs';
 import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
@@ -262,7 +263,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   const auth = new AppAuth({ env, fetchImpl, ...(oidc ? { oidc } : {}), ...(now ? { now } : {}) });
   const accounts = (registry || JSON.parse(await readFile(env.SOCIAL_ACCOUNTS_FILE, 'utf8'))).filter(a => a.channel === 'whatsapp' && a.enabled !== false);
   if (new Set(accounts.map(a => a.accountId)).size !== accounts.length) throw Error('Duplicate account');
-  const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 10000 });
+  const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 10000, types: utcDatabaseTypes() });
   const dataDir = env.DATA_DIR || '/data';
   await auth.init(dataDir);
   const sessions = new Sessions(dataDir); await sessions.init();
