@@ -461,6 +461,7 @@ interface AboutRead {
   about: string | null;
   setAt: string | null;
   known: boolean;
+  timedOut?: boolean;
 }
 
 async function readAbout(
@@ -487,9 +488,13 @@ async function readAboutQuietly(
     return await readAbout(provider, jid, timeoutMs);
   } catch (error) {
     const mapped = mapProfileProviderError(error, 'about lookup');
-    if (mapped.code === 'PROFILE_UPSTREAM_TIMEOUT') throw mapped;
     // A failed about read must not hide the name and photo the caller can use.
-    return { about: null, setAt: null, known: false };
+    return {
+      about: null,
+      setAt: null,
+      known: false,
+      timedOut: mapped.code === 'PROFILE_UPSTREAM_TIMEOUT',
+    };
   }
 }
 
@@ -609,9 +614,11 @@ async function applyAbout(
     confirmed,
     reason: confirmed
       ? 'READBACK_MATCHED'
-      : readback.known !== true
-        ? 'READBACK_UNAVAILABLE: WhatsApp did not return a readable About, so the change is not confirmed'
-        : 'READBACK_DIFFERS: WhatsApp returned a different About',
+      : readback.timedOut
+        ? 'READBACK_TIMEOUT: WhatsApp accepted the change but its About lookup timed out'
+        : readback.known !== true
+          ? 'READBACK_UNAVAILABLE: WhatsApp did not return a readable About, so the change is not confirmed'
+          : 'READBACK_DIFFERS: WhatsApp returned a different About',
   };
 }
 

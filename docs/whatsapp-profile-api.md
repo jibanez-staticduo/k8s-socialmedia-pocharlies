@@ -69,6 +69,10 @@ confirmed: false` with reason `SESSION_NAME_NOT_REFRESHED...`; the write is
   proof; a new identity, or a photo appearing where none was, is.
 - A mutation response has `confirmed: true` only when nothing failed
   (`partial` false, `failed` empty) and every returned field was read back.
+- An About lookup timeout preserves the readable name/photo and returns
+  `aboutKnown: false`. After an accepted About write it returns
+  `accepted: true`, `confirmed: false`, with reason `READBACK_TIMEOUT`;
+  a write timeout still fails and is never reported as accepted.
 - When the readback itself fails, the response keeps the fields the outcome
   really observed and adds `profileReadback: {available: false, error}`; the
   capabilities the gateway never read are omitted, not reported as false.

@@ -17,7 +17,6 @@ import {
 } from './profile-service';
 import { BaileysClient } from './baileys-client';
 import { USyncStatusProtocol } from '@whiskeysockets/baileys/lib/WAUSync/Protocols/USyncStatusProtocol.js';
-import { Boom } from '@hapi/boom';
 
 /** Synthetic 96x96 RGB checker/gradient, encoded as JPEG with sharp. */
 const REAL_JPEG_BASE64 =
@@ -34,8 +33,7 @@ const statusProtocol = new USyncStatusProtocol();
  * `USyncQuery.parse` emits `{ [protocolName]: parser(node), id }`.
  */
 function usyncStatusList(text: string | null | undefined, atSeconds = 1_760_000_000) {
-  const content =
-    text === null || text === undefined ? undefined : Buffer.from(text, 'utf-8');
+  const content = text === null || text === undefined ? undefined : Buffer.from(text, 'utf-8');
   const node: { tag: string; attrs: Record<string, string>; content?: Buffer } = {
     tag: 'status',
     attrs: { t: String(atSeconds) },
@@ -208,6 +206,44 @@ test('a cleared about is only confirmed by a readback that recognised the answer
   assert.equal(blind.about?.accepted, true);
   assert.equal(blind.about?.confirmed, false, 'an unreadable answer cannot confirm a clear');
   assert.match(blind.about?.reason || '', /READBACK_UNAVAILABLE/);
+});
+
+test('an About lookup timeout preserves the profile and an accepted write', async () => {
+  let writes = 0;
+  const slow = provider({
+    fetchStatus: () => new Promise(() => {}),
+    updateProfileStatus: async () => {
+      writes += 1;
+    },
+  });
+  const view = await readOwnProfile(slow, { timeoutMs: 5 });
+  assert.equal(view.name, 'Old Name');
+  assert.equal(view.aboutKnown, false);
+  assert.equal(view.photoKnown, true);
+  const result = await applyProfileUpdates(slow, { about: 'Available' }, { timeoutMs: 5 });
+  assert.equal(writes, 1);
+  assert.equal(result.about?.accepted, true);
+  assert.equal(result.about?.confirmed, false);
+  assert.match(result.about?.reason || '', /^READBACK_TIMEOUT/);
+});
+
+test('an About write timeout is still rejected without a readback', async () => {
+  let reads = 0;
+  await assert.rejects(
+    applyProfileUpdates(
+      provider({
+        updateProfileStatus: () => new Promise(() => {}),
+        fetchStatus: async () => {
+          reads += 1;
+          return usyncStatusList('Available');
+        },
+      }),
+      { about: 'Available' },
+      { timeoutMs: 5 }
+    ),
+    (error: unknown) => error instanceof ProfileError && error.code === 'PROFILE_UPSTREAM_TIMEOUT'
+  );
+  assert.equal(reads, 0);
 });
 
 test('an about that the provider wrote differently is reported as different', async () => {
@@ -618,9 +654,13 @@ test('the photo identity ignores the rotating CDN token', async () => {
     profilePictureUrl: async () => url,
     updateProfilePicture: async () => undefined,
   });
-  const first = await client.ownProfileProvider().profilePictureIdentity?.('34600123456@s.whatsapp.net');
+  const first = await client
+    .ownProfileProvider()
+    .profilePictureIdentity?.('34600123456@s.whatsapp.net');
   url = 'https://mmwebwhaecxzf.fbcdn.net/v/t39.3436-2/one.jpg?oe=BBB';
-  const second = await client.ownProfileProvider().profilePictureIdentity?.('34600123456@s.whatsapp.net');
+  const second = await client
+    .ownProfileProvider()
+    .profilePictureIdentity?.('34600123456@s.whatsapp.net');
   assert.equal(first, second);
   assert.match(String(first), /^[a-f0-9]{64}$/);
 });
@@ -691,14 +731,11 @@ test('a socket without the profile writers cannot mutate the profile', async () 
     user: { id: '34600123456@s.whatsapp.net', name: 'Daniel' },
     authState: { creds: { me: { id: '34600123456@s.whatsapp.net' } } },
   });
-  await assert.rejects(
-    client.updateOwnProfile({ name: 'Otro' }),
-    (error: unknown) => {
-      assert.ok(error instanceof ProfileError);
-      assert.equal(error.code, 'PROFILE_PROVIDER_UNAVAILABLE');
-      return true;
-    }
-  );
+  await assert.rejects(client.updateOwnProfile({ name: 'Otro' }), (error: unknown) => {
+    assert.ok(error instanceof ProfileError);
+    assert.equal(error.code, 'PROFILE_PROVIDER_UNAVAILABLE');
+    return true;
+  });
   const profile = await client.getOwnProfile();
   assert.deepEqual(profile.capabilities, {
     name: false,
