@@ -8,6 +8,21 @@ import { createApp } from '../server.mjs';
 import { mediaRequest } from '../lib/media.mjs';
 import { uploadBytes } from '../lib/security.mjs';
 const auth = `Basic ${Buffer.from('operator:password').toString('base64')}`;
+test('chat API returns scoped continuation cursors and rejects malformed pagination', async t => {
+  const rows = Array.from({length:3}, (_,i) => ({id:`chat-${3-i}`,name:`Contact ${i}`,preview:'text',previewType:'TEXT',archived:false,_sortTimestamp:'2026-09-27 12:00:00.123456'}));
+  const db = {query:async (sql,args) => ({rows:/FROM conversations c/.test(sql) ? (args.length>3 ? rows.slice(2) : rows) : []})};
+  const {request} = await fixture(t,{db});
+  const first = await (await request('/api/chats?account=personal&limit=2')).json();
+  assert.equal(first.chats.length,2);
+  assert.equal(typeof first.nextCursor,'string');
+  assert(first.chats.every(chat=>!('_sortTimestamp' in chat)));
+  const second = await (await request(`/api/chats?account=personal&limit=2&cursor=${first.nextCursor}`)).json();
+  assert.deepEqual(second.chats.map(chat=>chat.id),['chat-1']);
+  assert.equal(second.nextCursor,null);
+  assert.equal((await request(`/api/chats?account=personal&archived=only&cursor=${first.nextCursor}`)).status,400);
+  assert.equal((await request('/api/chats?account=personal&limit=501')).status,400);
+  assert.equal((await request('/api/chats?account=personal&cursor=garbage')).status,400);
+});
 async function fixture(t, extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'whatsapp-test-')); const calls = [];
   const env = { DATA_DIR: dir, UI_AUTH_USERNAME: 'operator', UI_AUTH_PASSWORD: 'password', APP_PUBLIC_URL: 'https://wa.example', APP_ENABLE_SENDING: 'true', PERSONAL_SECRET: 'test-secret', ...extra.env };

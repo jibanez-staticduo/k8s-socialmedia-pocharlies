@@ -265,7 +265,9 @@ async function fulfillApi(route, state) {
     const archived = url.searchParams.get('archived');
     const all = clone(state.chats[account] || []);
     const filtered = archived === 'only' ? all.filter(item => item.archived === true) : all.filter(item => item.archived !== true);
-    return jsonResponse(route, { account, chats: filtered, archived: archived === 'only' });
+    const offset = Number(url.searchParams.get('cursor') || 0);
+    const limit = Number(url.searchParams.get('limit') || 100);
+    return jsonResponse(route, { account, chats: filtered.slice(offset, offset + limit), archived: archived === 'only', nextCursor: offset + limit < filtered.length ? String(offset + limit) : null });
   }
 
   if (pathName === '/api/messages' && request.method() === 'GET') {
@@ -1224,6 +1226,24 @@ async function runDesktop(page, state, report) {
     const text = await page.locator('#chats').textContent();
     assert(text.includes('Ana Fixture'), `stale response removed active alpha chats: ${text}`);
     assert(!text.includes('Bruno Fixture'), `stale beta response replaced alpha chats: ${text}`);
+  });
+
+  await check('more than 500 chats load and remain searchable and selectable', async () => {
+    state.chats.alpha.push(...Array.from({length:650}, (_,i) => ({id:`older-${i}`,name:`Older Fixture ${i}`,preview:'Earlier conversation',timestamp:'2026-01-01T12:00:00Z',unread:0,archived:false})));
+    await selectAccount(page, 'beta', 'Bruno Fixture');
+    await selectAccount(page, 'alpha', 'Ana Fixture');
+    await page.waitForFunction(() => document.querySelector('#chats')?.textContent.includes('Older Fixture 649'));
+    assert(state.log.some(item => item.path === '/api/chats' && item.query.cursor === '600'));
+    await clearReadOnlyDocument(page);
+    await page.locator('#settings-close').click();
+    await page.locator('#search').fill('Older Fixture 649');
+    assert.equal(await page.locator('#chats .chat-item').count(), 1);
+    await page.locator('#chats .chat-item').click();
+    await page.waitForFunction(() => document.querySelector('#chat-title')?.textContent.includes('Older Fixture 649'));
+    await page.locator('#search').fill('');
+    state.chats.alpha = state.chats.alpha.filter(chat => !chat.id.startsWith('older-'));
+    await selectAccount(page, 'beta', 'Bruno Fixture');
+    await selectAccount(page, 'alpha', 'Ana Fixture');
   });
 
   await check('archive removes a chat from Todos and keeps it in Archivados', async () => {

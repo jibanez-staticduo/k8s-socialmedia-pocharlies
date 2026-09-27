@@ -1,3 +1,4 @@
+import { readChatDirectory } from './lib/chat-directory.mjs';
 import http from 'node:http';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +15,7 @@ import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, fail
 import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
 import { Sessions } from './lib/sessions.mjs';
-import { CHAT_LIST_ACTIVE_SQL, CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
+import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
 import { publicMessageMetadata, publicPollResults } from './lib/message-projection.mjs';
 import { linkPreviewFromPayload } from './lib/link-preview.mjs';
@@ -1102,7 +1103,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const requestedArchive = url.searchParams.get('archived');
         const includeArchived = requestedArchive === 'true' || requestedArchive === '1' || requestedArchive === 'only';
         const onlyArchived = requestedArchive === 'only' || requestedArchive === 'true' || requestedArchive === '1';
-        let chats = await query(onlyArchived ? CHAT_LIST_ARCHIVED_SQL : CHAT_LIST_ACTIVE_SQL, [a.accountId]);
+        const page = await readChatDirectory({ query, account: a.accountId, archived: onlyArchived, cursor: url.searchParams.get('cursor'), limit: url.searchParams.get('limit') });
+        let chats = page.chats;
         chats = chats.map(chat => {
           const { avatar_url: _avatarUrl, avatarUrl: _storedAvatarUrl, ...safeChat } = chat;
           return {
@@ -1124,13 +1126,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           const remoteState = providerState.get(providerChatId(chat));
           return { ...chat, pinned: remoteState?.pinned ?? (localState.pinned === true), muted: remoteState?.muted ?? (localState.muted === true), favorite: local.favorites.includes(chat.id) };
         });
-        return json(200, { chats, archived: includeArchived });
+        return json(200, { chats, archived: includeArchived, nextCursor: page.nextCursor });
       }
       if (req.method === 'GET' && (path === '/api/chats/archived' || path === '/api/archived-chats')) {
         const a = accountParam(url.searchParams.get('account'));
         let chats = await query(CHAT_LIST_ARCHIVED_SQL, [a.accountId]);
         chats = await fillMediaPreviews(chats.filter(chat => chat.archived === true).map(chat => {
-          const { avatar_url: _avatarUrl, avatarUrl: _storedAvatarUrl, ...safeChat } = chat;
+          const { avatar_url: _avatarUrl, avatarUrl: _storedAvatarUrl, _sortTimestamp, ...safeChat } = chat;
           return { ...safeChat, name: readableChatName(chat), avatarUrl: `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}`, archived: true };
         }), a.accountId);
         return json(200, { chats, archived: true });

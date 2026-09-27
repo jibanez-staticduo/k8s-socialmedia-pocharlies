@@ -169,20 +169,30 @@ function renderChats() {
   }
   $('chat-status').textContent = !state.chats.length ? (filter === 'archived' ? 'No hay chats archivados.' : 'Todavía no hay chats sincronizados para esta cuenta.') : !chats.length ? 'No hay conversaciones que coincidan.' : '';
 }
-async function loadChats() {
-  if (!state.account) return;
+async function loadChats({background = false} = {}) {
+  if (!state.account || (background && state.chatLoading)) return;
   const account = state.account;
-  const version = state.version;
   const requestToken = ++state.chatRequestToken;
   const archivedView = featureUI?.isFeatureView?.() === 'archived';
+  const scope = `${account}:${archivedView}`;
+  const previous = state.chatListScope === scope ? state.chats : [];
+  const isCurrent = () => account === state.account && requestToken === state.chatRequestToken && archivedView === (featureUI?.isFeatureView?.() === 'archived');
+  state.chatLoading = true;
   try {
-    const result = await api(query('/api/chats', archivedView ? {archived: 'only'} : {}));
-    if (account !== state.account || version !== state.version || requestToken !== state.chatRequestToken || archivedView !== (featureUI?.isFeatureView?.() === 'archived')) return;
-    state.chats = Array.isArray(result.chats) ? result.chats : [];
-    featureUI?.chatsChanged?.(state.chats);
-    renderChats();
+    const {loadChatPages} = await import('./chat-directory.mjs');
+    await loadChatPages({previous, isCurrent,
+      fetchPage: cursor => api(`/api/chats?${new URLSearchParams({account, limit: '100', ...(archivedView ? {archived: 'only'} : {}), ...(cursor ? {cursor} : {})})}`),
+      onPage: (chats, hasMore) => {
+        state.chats = chats; state.chatListScope = scope;
+        featureUI?.chatsChanged?.(state.chats);
+        renderChats();
+        if (hasMore) $('chat-status').textContent = 'Cargando más conversaciones…';
+      },
+    });
   } catch (err) {
-    if (account === state.account && version === state.version && requestToken === state.chatRequestToken) $('chat-status').textContent = err.message;
+    if (isCurrent()) $('chat-status').textContent = err.message;
+  } finally {
+    if (requestToken === state.chatRequestToken) state.chatLoading = false;
   }
 }
 function outgoingKey(account, chat) { return `${account}:${chat}`; }
@@ -677,7 +687,7 @@ const featureReady = Promise.all([historyReady, mediaReady]).then(() => import('
 const communitiesReady = import('./communities-ui.mjs').then(({installCommunitiesUI}) => { communitiesUI = installCommunitiesUI({getAccount: () => state.account, api, selectChat, getChats: () => state.chats, showError: error}); return communitiesUI; }).catch(err => { error(`No se pudo cargar Comunidades: ${err.message}`); return null; });
 const profileReady = import('./profile-ui.mjs').then(({installProfileUI}) => { profileUI = installProfileUI({getAccount: () => state.account, api}); return profileUI; }).catch(err => { error(`No se pudo cargar el perfil: ${err.message}`); return null; });
 async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await communitiesReady; await profileReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
-let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await loadChats(); if (!document.hidden) await loadMessages(); } finally { polling = false; } }, 10000);
+let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await Promise.all([loadChats({background: true}), document.hidden ? null : loadMessages()]); } finally { polling = false; } }, 10000);
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
 window.addEventListener('pagehide', () => { cancelRecording(); cameraController?.close(); cancelAttachment(); });

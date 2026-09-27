@@ -93,7 +93,7 @@ export function readableChatName(chat) {
  * inbound sender fallback repairs old direct chats whose stored title is a
  * JID, while the group branch never promotes a participant to group title.
  */
-const CHAT_LIST_BASE_SQL = `
+export const CHAT_LIST_BASE_SQL = `
 SELECT c.id,
        c.wa_chat_id AS "waChatId",
        CASE
@@ -156,6 +156,7 @@ SELECT c.id,
        (COALESCE(c.archived, false) OR COALESCE(pn_alias.archived, false)) AS archived,
        COALESCE(c.avatar_url, pn_alias.avatar_url) AS "avatarUrl",
        last_message.wa_timestamp AS timestamp,
+       COALESCE(last_message.wa_timestamp, c.last_message_at)::text AS "_sortTimestamp",
        last_message.direction = 'OUTBOUND' AS "fromMe"
 FROM conversations c
 LEFT JOIN LATERAL (
@@ -226,7 +227,7 @@ WHERE c.account = $1
                regexp_replace(c.id, '@c\\.us$', '@s.whatsapp.net')) = 1
   )`;
 
-const CHAT_LIST_ORDER_SQL = 'ORDER BY COALESCE(last_message.wa_timestamp, c.last_message_at) DESC NULLS LAST';
+const CHAT_LIST_ORDER_SQL = 'ORDER BY COALESCE(last_message.wa_timestamp, c.last_message_at) DESC NULLS LAST, c.id DESC';
 export const CHAT_LIST_SQL = `${CHAT_LIST_BASE_SQL}\n${CHAT_LIST_ORDER_SQL}\nLIMIT 500`;
 export const CHAT_LIST_ACTIVE_SQL = `${CHAT_LIST_BASE_SQL}
 AND (COALESCE(c.archived, false) OR COALESCE(pn_alias.archived, false)) = false
