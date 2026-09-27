@@ -23,7 +23,7 @@ The audit is ongoing; this document is not a claim of complete parity.
 - The attachment menu exposes Document, Photos/videos, Camera, Audio, Contact,
   Poll, Event and New sticker. The initial SocialMedia menu exposed only five
   entries; multi-file staging and the missing capture/audio flows are implemented
-  in the second batch, awaiting its deployment checks.
+  and verified in the second deployed batch.
 - Communities displays community headings, announcement/subgroup rows, a
   full-group-list entry and community creation.
 - The group-header menu exposes Add member, Group info, Search, Select messages,
@@ -57,7 +57,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
 | Pinned messages and event RSVP | Pending | Provider contracts, ingestion and UI |
 | Search and media/link/document gallery per chat | Existing | Date/sender/type filters; global media browser |
-| Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
+| Composer optimistic sends, paste and voice recording | Verified | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | Partial | Full picker/search, sticker creation and packs |
 | Location and live location | Partial | Received locations render; sending not implemented |
@@ -76,7 +76,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Pending | Event-backed, 24-hour catalogue; explicit publishing audience |
 | Channels | Pending | Channel-scoped message identity before enabling persistence/UI |
-| Chat export / clear / delete / lock | Pending | Supported semantics and deliberate confirmation flows |
+| Chat export / clear / delete / lock | Partial | TXT export of synchronized history verified; clear/delete/lock pending |
 | Accessibility and responsive layouts | Ongoing | Keyboard, focus, small screens and contrasts across features |
 
 ## Verified provider boundaries
@@ -136,7 +136,7 @@ synthetic data, and authenticated read-only deployment checks. Test fixtures
 must not call live mutation routes. Do not declare a provider operation
 successful for a malformed, null, partial or failed result.
 
-Second composer batch, locally validated before deployment:
+Second composer batch (`dd52a98`), deployed and validated:
 
 - App tests: 195/195 passing; selected-feature browser suite: 39 checks.
 - Synthetic composer browser QA covers picker/paste/drop, valid image previews,
@@ -145,8 +145,32 @@ Second composer batch, locally validated before deployment:
 - A delayed multi-file upload continues against the captured account/chat when
   the view changes and preserves the next draft. No real messages were sent.
 - Desktop light/dark and mobile staging screenshots were visually inspected.
+- Authenticated production QA verifies the new menu entries, outside-click
+  dismissal and staging/removing two files with zero sends and no page errors.
+  Both connectors and the app are healthy; fork CI passes on this exact commit.
 - The new-sticker entry opens the existing WebP uploader; a full sticker editor
   and per-image crop/annotation are still pending.
+
+Attachment menu visual correction (`2c4cbf4`), deployed and validated:
+
+- Official option order and measured icon colors; theme-aware background.
+- Both themes pass the minimum 4.5:1 text contrast check in Playwright.
+- Authenticated staging/removal check passes with no sends or page errors.
+- Fork and upstream PR checks pass for the published menu correction.
+
+TXT export batch, validated with synthetic data:
+
+- Reads every available message page using the real `before` cursor contract.
+- Keeps the starting account/chat, orders messages chronologically, deduplicates
+  IDs and uses the browser timezone. Attachment content is not downloaded.
+- Reports progress and supports cancellation, including the final pending page.
+  Closing the panel or switching account/chat cancels the download.
+- Repeated/malformed cursors, failed pages and the 50,000-message memory ceiling
+  produce an explicit error, never a partial file. Missing media retains a
+  placeholder in the transcript rather than silently dropping the message.
+- Fifteen module tests and browser download/error/cancellation checks pass.
+  The existing selected-feature browser suite still passes all 39 checks.
+- Real user conversations were not exported during QA.
 
 The goal remains open until the matrix is resolved with implemented/verified
 behavior or a concrete documented provider limitation. Calls/video calls are

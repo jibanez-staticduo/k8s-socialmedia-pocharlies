@@ -1,5 +1,7 @@
 'use strict';
 
+import { createPageFetcher, exportConversationText, ChatExportCanceled } from './chat-export.mjs';
+
 /*
  * Feature UI for the selected WhatsApp Web inventory.  The module owns the
  * feature menus and dialogs while app.js remains responsible for transport,
@@ -440,6 +442,7 @@ export function installFeatureUI({
   function closeModal() {
     const modal = runtime.modal;
     if (!modal) return;
+    modal.onClose?.();
     documentRef.removeEventListener?.('keydown', modal.onKey);
     documentRef.removeEventListener?.('pointerdown', modal.onOutside);
     modal.overlay.remove();
@@ -1064,17 +1067,57 @@ export function installFeatureUI({
   }
 
   function openChatMenu() {
-    const modal = openModal('Opciones de conversación', { opener: documentRef.activeElement });
+    if (!runtime.chat) return;
+    const modal = openModal('Opciones de conversación', { opener: documentRef.activeElement, variant: 'menu' });
     const actions = node('div', 'feature-action-grid');
     const add = (label, action) => { const item = button(documentRef, label, 'feature-button subtle'); item.onclick = () => { closeModal(); action(); }; actions.append(item); };
     add('Información', openInfo);
+    add('Buscar mensajes', openSearch);
     add(chatIsArchived(runtime.selectedChat, prefs()) ? 'Desarchivar' : 'Archivar', () => openChatAction('archive'));
     add(chatIsPinned(runtime.selectedChat, prefs()) ? 'Desfijar' : 'Fijar', () => openChatAction('pin'));
     add(chatIsMuted(runtime.selectedChat, prefs()) ? 'Activar sonido' : 'Silenciar', () => openChatAction('mute'));
     add(chatIsFavorite(runtime.selectedChat, prefs()) ? 'Quitar de favoritos' : 'Añadir a favoritos', () => openChatAction('favorite'));
     add('Listas', openLists);
     add('Privacidad', openPrivacy);
+    add('Exportar chat', openChatExport);
     modal.body.append(actions);
+  }
+
+  function openChatExport() {
+    const account = runtime.account;
+    const chat = runtime.chat;
+    if (!account || !chat) return;
+    const modal = openModal('Exportar chat');
+    const controller = new AbortController();
+    runtime.modal.onClose = () => controller.abort();
+    const progress = node('p', 'feature-muted', 'Se exportarán todos los mensajes sincronizados de este chat a un archivo de texto. Los archivos adjuntos se incluyen por su nombre, sin descargar su contenido.');
+    progress.setAttribute('role', 'status');
+    const start = button(documentRef, 'Exportar TXT', 'feature-button primary');
+    const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
+    cancel.onclick = closeModal;
+    modal.body.append(progress, start, cancel);
+    start.onclick = async () => {
+      start.disabled = true;
+      try {
+        const result = await exportConversationText({
+          fetchPage: createPageFetcher({ fetchImpl: windowRef.fetch.bind(windowRef) }),
+          account, chat, signal: controller.signal,
+          onProgress: ({ messages }) => { if (!controller.signal.aborted) progress.textContent = `Preparando ${messages} mensajes…`; },
+        });
+        if (controller.signal.aborted || runtime.modal?.body !== modal.body || runtime.account !== account || runtime.chat !== chat) return;
+        const url = windowRef.URL.createObjectURL(new windowRef.Blob([result.text], { type: 'text/plain;charset=utf-8' }));
+        const download = node('a');
+        download.href = url; download.download = result.filename;
+        modal.body.append(download); download.click(); download.remove();
+        setTimeout(() => windowRef.URL.revokeObjectURL(url), 5000);
+        progress.textContent = `Exportación preparada: ${result.stats.exported} mensajes.`;
+        cancel.textContent = 'Cerrar';
+      } catch (error) {
+        if (controller.signal.aborted || error instanceof ChatExportCanceled || runtime.modal?.body !== modal.body) return;
+        progress.textContent = error.message || 'No se pudo exportar el chat.';
+        start.disabled = false;
+      }
+    };
   }
 
   function openLists() {
