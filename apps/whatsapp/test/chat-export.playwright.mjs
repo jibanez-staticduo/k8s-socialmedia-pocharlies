@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || '/app/node_modules/playwright/index.mjs');
@@ -78,6 +78,20 @@ try {
   await page.waitForTimeout(250);
   assert.equal(await page.getByRole('button', { name: 'Exportar TXT', exact: true }).count(), 0);
   assert.equal(downloads.length, 1);
+  await page.locator('#chats .chat-item').first().click();
+  if (process.env.UI_OUTPUT_DIR) await mkdir(process.env.UI_OUTPUT_DIR, { recursive: true });
+  for (const [width, theme] of [[390, 'light'], [1280, 'dark']]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.evaluate(theme => { document.body.dataset.theme = theme; }, theme);
+    await page.getByRole('button', { name: 'Opciones de chat', exact: true }).click();
+    const bounds = await page.locator('.feature-modal-menu .feature-dialog').boundingBox();
+    assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= 844);
+    await page.getByRole('button', { name: 'Exportar chat', exact: true }).click();
+    const dialog = await page.locator('.feature-dialog').boundingBox();
+    assert(dialog && dialog.x >= 0 && dialog.x + dialog.width <= width);
+    if (process.env.UI_OUTPUT_DIR) await page.screenshot({ path: path.join(process.env.UI_OUTPUT_DIR, `export-${width}-${theme}.png`), animations: 'disabled' });
+    await page.keyboard.press('Escape');
+  }
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ status: 'passed', syntheticDownloads: downloads.length, canceled: true, partialDownload: false }));
 } finally {

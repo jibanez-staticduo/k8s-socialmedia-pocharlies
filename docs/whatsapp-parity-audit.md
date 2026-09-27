@@ -34,6 +34,9 @@ The audit is ongoing; this document is not a claim of complete parity.
 - Global Media offers Media, Documents and Links tabs, search and selection.
   Its ordering/filter menu includes All, You, Other people, Newest, Oldest
   and Longest. The existing per-chat gallery does not cover this global view.
+- The authenticated Windows reference session remains available through Agent
+  Jake. New chat searches name, number or username and exposes New group,
+  New contact and New community before the contact directory.
 - UI inspection does not authorize sending messages, publishing updates,
   joining/leaving communities or modifying other people's chats during QA.
   Private screenshots and contact/message contents are not repository fixtures.
@@ -171,6 +174,10 @@ TXT export batch, validated with synthetic data:
 - Fifteen module tests and browser download/error/cancellation checks pass.
   The existing selected-feature browser suite still passes all 39 checks.
 - Real user conversations were not exported during QA.
+- Authenticated production verification opens/cancels the export panel without
+  downloading user content; zero page errors. Responsive synthetic screenshots:
+  [mobile light](screenshots/parity-export-mobile.png) and
+  [desktop dark](screenshots/parity-export-desktop.png).
 
 The goal remains open until the matrix is resolved with implemented/verified
 behavior or a concrete documented provider limitation. Calls/video calls are
