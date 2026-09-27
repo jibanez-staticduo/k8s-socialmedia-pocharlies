@@ -42,6 +42,7 @@ import {
 } from '@whiskeysockets/baileys/lib/Utils/tc-token-utils.js';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'events';
+import { createHash } from 'crypto';
 import { promises as fsp } from 'fs';
 import { join } from 'path';
 import QRCode from 'qrcode';
@@ -130,6 +131,17 @@ import {
 } from './media-storage';
 import { buildAudioAttachmentsBeforeEmit, StoredMediaInfo } from './audio-attachments';
 import { notifyDashboard as dashboardNotify } from './dashboard-notifier';
+import {
+  applyProfileUpdates,
+  readOwnProfile,
+  readOwnProfilePhotoBytes,
+  removeOwnProfilePhoto,
+  setOwnProfilePhoto,
+  type OwnProfilePhotoProvider,
+  type ProfileIo,
+  type ProfileUpdateInput,
+  type ProfileUpdateResult,
+} from './profile-service';
 import { readArchiveSnapshot, readCurrentArchiveSnapshot } from './archive-snapshot';
 import { enrichArchiveGroupNames } from './archive-group-names';
 
@@ -2658,6 +2670,111 @@ export class BaileysClient extends EventEmitter {
       phone: this.phoneFromJid(this.sock.user.id || ''),
       platform: 'whatsapp',
     };
+  }
+
+  // -----------------------------------------------------------------------
+  // Own account profile: display name, about and profile photo.
+  // -----------------------------------------------------------------------
+
+  /**
+   * Provider surface for `profile-service`, rebuilt from the live socket on
+   * every call. A writer is advertised only when the installed Baileys really
+   * exposes it, so a provider upgrade degrades to `capability:false` and a 501
+   * instead of a TypeError on a signature assumed from the `.d.ts` files.
+   */
+  ownProfileProvider(): OwnProfilePhotoProvider {
+    const socket = this.sock as unknown as
+      | (Record<string, unknown> & {
+          user?: { id?: string; name?: string; lid?: string };
+          authState?: { creds?: { me?: { id?: string; name?: string } } };
+        })
+      | null;
+    const method = <A extends unknown[], R>(name: string) => {
+      const candidate = socket?.[name];
+      if (typeof candidate !== 'function') return undefined;
+      return (...args: A): Promise<R> => (candidate as (...a: A) => Promise<R>).apply(socket, args);
+    };
+    const ownRawJid = (): string | null => {
+      // `creds.me.id` carries the paired device suffix; the profile IQs and the
+      // USync lookup both need the bare user JID.
+      const candidate = socket?.user?.id || socket?.authState?.creds?.me?.id;
+      if (!candidate) return null;
+      try {
+        return jidNormalizedUser(candidate);
+      } catch {
+        return null;
+      }
+    };
+    return {
+      isConnected: () => this.isConnected(),
+      ownJid: ownRawJid,
+      accountName: () => {
+        const name = socket?.user?.name || socket?.authState?.creds?.me?.name;
+        return typeof name === 'string' && name.trim() ? name.trim() : null;
+      },
+      updateProfileName: method<[string], unknown>('updateProfileName'),
+      updateProfileStatus: method<[string], unknown>('updateProfileStatus'),
+      updateProfilePicture: method<[string, Buffer], unknown>('updateProfilePicture'),
+      removeProfilePicture: method<[string], unknown>('removeProfilePicture'),
+      fetchStatus: method<[string], unknown>('fetchStatus'),
+      // The CDN path identifies the stored picture; the query string is a
+      // rotating access token, so it must not look like a new picture. Hashed
+      // to keep the provider URL out of the API.
+      //
+      // This lookup deliberately does not reuse profilePictureUrlIfAvailable:
+      // that helper is tuned for contact avatars and treats 403 as "no photo".
+      // For our own account a 403 is a refused lookup, not a proven absence,
+      // so it stays unknown and a removal cannot be "confirmed" by an error.
+      // Only a 404 proves that the account has no picture.
+      profilePictureIdentity: async (jid: string) => {
+        const socket = this.sock;
+        if (!socket) throw new Error('Client not connected');
+        const raw = this.toRawJid(jid);
+        let url: string | undefined;
+        try {
+          url = await boundedProfilePictureUrl(timeoutMs =>
+            socket.profilePictureUrl(raw, 'preview', timeoutMs)
+          );
+        } catch (error) {
+          // 404 is the provider's answer for "this account has no picture".
+          if (error instanceof Boom && error.output.statusCode === 404) return null;
+          throw error;
+        }
+        if (!url) {
+          throw new ProfilePictureDownloadError('WhatsApp returned no profile picture URL');
+        }
+        return createHash('sha256').update(url.split('?')[0]).digest('hex');
+      },
+      downloadProfilePhoto: async (jid: string) => this.getProfilePictureBytes(this.toRawJid(jid)),
+    };
+  }
+
+  /** Own profile with the `@c.us` JID shape the rest of this API returns. */
+  async getOwnProfile(io: ProfileIo = {}) {
+    const profile = await readOwnProfile(this.ownProfileProvider(), io);
+    return { ...profile, jid: this.normalizeJid(profile.jid) };
+  }
+
+  async updateOwnProfile(
+    input: ProfileUpdateInput,
+    io: ProfileIo = {}
+  ): Promise<ProfileUpdateResult> {
+    return applyProfileUpdates(this.ownProfileProvider(), input, io);
+  }
+
+  async setOwnProfilePhoto(
+    input: { imageBase64?: unknown; mimeType?: unknown },
+    io: ProfileIo = {}
+  ) {
+    return setOwnProfilePhoto(this.ownProfileProvider(), input, io);
+  }
+
+  async removeOwnProfilePhoto(io: ProfileIo = {}) {
+    return removeOwnProfilePhoto(this.ownProfileProvider(), io);
+  }
+
+  async getOwnProfilePhotoBytes(io: ProfileIo = {}): Promise<Buffer | null> {
+    return readOwnProfilePhotoBytes(this.ownProfileProvider(), io);
   }
 
   async startChat(phone: string): Promise<{ id: string; name: string; phone: string }> {

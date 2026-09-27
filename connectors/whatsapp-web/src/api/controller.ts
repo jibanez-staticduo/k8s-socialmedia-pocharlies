@@ -27,6 +27,7 @@ import {
   WhatsAppContactSeedInput,
 } from '../contact-sync';
 import { CapabilityError } from '../whatsapp-capabilities';
+import { ProfileError } from '../profile-service';
 import { CommunityError } from '../novedades-communities';
 import {
   claimSendAttempt,
@@ -970,6 +971,168 @@ export function createRouter(
         res.json(me);
       } catch (e) {
         res.status(500).json({ error: String(e) });
+      }
+    })();
+  });
+
+  // ---------------------------------------------------------------------
+  // Own account profile (display name, about, profile photo).
+  //
+  // Reads only issue provider lookups (IQ get / USync) and never mutate the
+  // account. Writes change the live WhatsApp account, so they obey the same
+  // emergency gates as message sending. Every response carries the connector
+  // account so a caller can prove which number was touched.
+  // ---------------------------------------------------------------------
+  const profileGateFailure = (): { status: number; code: string; message: string } | null => {
+    if (process.env.ENABLE_SENDING !== 'true') {
+      return {
+        status: 403,
+        code: 'SENDING_DISABLED',
+        message: 'Profile changes are disabled while sending is disabled',
+      };
+    }
+    if (process.env.EMERGENCY_DISABLE_SENDING === 'true') {
+      return {
+        status: 403,
+        code: 'EMERGENCY_DISABLE_SENDING',
+        message: 'Profile changes are blocked by the emergency switch',
+      };
+    }
+    return null;
+  };
+
+  const profileErrorResponse = (res: Response, error: unknown): void => {
+    if (error instanceof ProfileError) {
+      res.status(error.status).json({
+        ok: false,
+        account: connectorAccount(),
+        error: { code: error.code, message: error.message, details: error.details },
+      });
+      return;
+    }
+    capabilityErrorResponse(res, error);
+  };
+
+  router.get('/profile/me', auth, (_req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        res.json({ ok: true, account: connectorAccount(), data: await client.getOwnProfile() });
+      } catch (error) {
+        profileErrorResponse(res, error);
+      }
+    })();
+  });
+
+  const updateOwnProfile = (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      const gate = profileGateFailure();
+      if (gate) {
+        console.warn(
+          `WhatsApp profile update blocked code=${gate.code} account=${connectorAccount()}`
+        );
+        res.status(gate.status).json({
+          ok: false,
+          account: connectorAccount(),
+          error: { code: gate.code, message: gate.message },
+        });
+        return;
+      }
+      try {
+        const body = (req.body || {}) as Record<string, unknown>;
+        const input: { name?: unknown; about?: unknown } = {};
+        if ('name' in body) input.name = body.name;
+        if ('about' in body) input.about = body.about;
+        const data = await client.updateOwnProfile(input);
+        res.json({ ok: true, account: connectorAccount(), data });
+      } catch (error) {
+        profileErrorResponse(res, error);
+      }
+    })();
+  };
+
+  router.patch('/profile/me', auth, updateOwnProfile);
+  router.post('/profile/me', auth, updateOwnProfile);
+
+  const setOwnProfilePhoto = (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      const gate = profileGateFailure();
+      if (gate) {
+        console.warn(
+          `WhatsApp profile photo update blocked code=${gate.code} account=${connectorAccount()}`
+        );
+        res.status(gate.status).json({
+          ok: false,
+          account: connectorAccount(),
+          error: { code: gate.code, message: gate.message },
+        });
+        return;
+      }
+      try {
+        const body = (req.body || {}) as Record<string, unknown>;
+        const data = await client.setOwnProfilePhoto({
+          imageBase64: body.imageBase64 ?? body.data,
+          mimeType: body.mimeType,
+        });
+        res.json({ ok: true, account: connectorAccount(), data });
+      } catch (error) {
+        profileErrorResponse(res, error);
+      }
+    })();
+  };
+
+  router.post('/profile/me/photo', auth, setOwnProfilePhoto);
+
+  router.delete('/profile/me/photo', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      const gate = profileGateFailure();
+      if (gate) {
+        res.status(gate.status).json({
+          ok: false,
+          account: connectorAccount(),
+          error: { code: gate.code, message: gate.message },
+        });
+        return;
+      }
+      try {
+        res.json({
+          ok: true,
+          account: connectorAccount(),
+          data: await client.removeOwnProfilePhoto(),
+        });
+      } catch (error) {
+        profileErrorResponse(res, error);
+      }
+    })();
+  });
+
+  // The account's own photo bytes, mirroring the shape of /chats/:jid/photo so
+  // the app can proxy it without learning any provider URL.
+  router.get('/profile/me/photo', auth, (_req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const bytes = await client.getOwnProfilePhotoBytes();
+        if (!bytes) {
+          res.status(404).json({
+            ok: false,
+            account: connectorAccount(),
+            error: {
+              code: 'PROFILE_PHOTO_UNAVAILABLE',
+              message: 'This account has no profile photo',
+            },
+          });
+          return;
+        }
+        res.json({
+          ok: true,
+          account: connectorAccount(),
+          data: {
+            data: bytes.toString('base64'),
+            size: bytes.length,
+            contentType: 'image/jpeg',
+          },
+        });
+      } catch (error) {
+        profileErrorResponse(res, error);
       }
     })();
   });

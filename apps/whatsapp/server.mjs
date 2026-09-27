@@ -25,6 +25,24 @@ const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
 const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
 const MAX_PAGE_SIZE = 200;
+// Own-account profile limits. They mirror the connector's profile-service so a
+// request is refused with an honest 400/413 before the live account is touched.
+const PROFILE_NAME_MAX_CHARS = 25;
+const PROFILE_ABOUT_MAX_CHARS = 139;
+const PROFILE_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
+const PROFILE_PHOTO_MAX_BASE64_CHARS = 16 * 1024 * 1024;
+const PROFILE_PHOTO_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+// Statuses the connector legitimately uses to refuse a profile request.
+// 404 is included because the connector uses it as its own answer for "this
+// account has no profile photo"; flattening it into a 502 would turn a proven
+// absence into an upstream fault.
+const PROFILE_CONNECTOR_ERRORS = [400, 403, 404, 409, 413, 501, 502, 503, 504];
+// A readback we could not observe must never overwrite what the UI already saw.
+const PROFILE_UNCONFIRMED_REASONS = /^(READBACK_UNAVAILABLE|IDENTITY_UNKNOWN)/;
+// An own-profile read is only usable when the connector names the account it
+// belongs to. The connector returns the raw socket JID, so a device suffix is
+// normal (`34600123456:8@s.whatsapp.net`) and @c.us is equally valid.
+const PROFILE_OWN_JID = /^[A-Za-z0-9_.\-+:]{2,320}@[A-Za-z0-9.\-]{2,128}$/;
 const FEATURE_TIMEOUT_MS = 30000;
 const FEATURE_SEND_TIMEOUT_MS = 90000;
 const HERMES_TURN_TIMEOUT_MS = 180000;
@@ -853,6 +871,186 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     if (readReceipts === 'all' || readReceipts === 'none') privacy.readReceipts = readReceipts === 'all';
     return privacy;
   }
+  // ---------------------------------------------------------------------------
+  // Own-account profile (display name, about, profile photo).
+  //
+  // Reads are provider lookups only; every write goes through the same sending
+  // gates as a message send because it changes the live WhatsApp account. The
+  // connector answers with { ok, account, data } and keeps the provider JIDs and
+  // CDN URLs out of what the browser sees.
+  // ---------------------------------------------------------------------------
+  async function profileConnector(account, path, { method = 'GET', body = {}, timeout = FEATURE_TIMEOUT_MS } = {}) {
+    const normalizedBody = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+    const invalid = (reason) => featureError(502, 'UPSTREAM_INVALID', `WhatsApp connector returned an invalid profile response (${reason})`, { path });
+    const response = await remote(
+      `${account.connectorUrl.replace(/\/$/, '')}/api/v1${path}`,
+      {
+        method,
+        headers: signedHeaders(normalizedBody, env[account.secretEnv]),
+        ...(method === 'GET' || method === 'HEAD' ? {} : { body: JSON.stringify(normalizedBody) }),
+      },
+      timeout,
+      PROFILE_CONNECTOR_ERRORS
+    );
+    let result;
+    try { result = await response.json(); } catch { result = undefined; }
+    const answeredAccount = cleanProviderValue(result?.account, 128);
+    // Multi-account safety: two connectors can be reachable under one registry,
+    // so a profile is only usable when its own account says who it belongs to.
+    if (answeredAccount && answeredAccount !== account.accountId) {
+      throw featureError(502, 'ACCOUNT_MISMATCH', `WhatsApp connector answered for ${answeredAccount} instead of ${account.accountId}`, { path });
+    }
+    if (!response.ok) {
+      // The connector already spoke in profile error codes, so propagate them
+      // instead of flattening everything into a 502.
+      const detail = result?.error && typeof result.error === 'object' ? result.error : {};
+      const status = PROFILE_CONNECTOR_ERRORS.includes(response.status) ? response.status : 502;
+      throw featureError(
+        status,
+        cleanProviderValue(detail.code, 64) || 'UPSTREAM_REJECTED',
+        cleanProviderValue(detail.message, 512) || `WhatsApp profile request failed (HTTP ${response.status})`,
+        { path }
+      );
+    }
+    if (!result || typeof result !== 'object' || Array.isArray(result) || result.ok === false || result.error) throw invalid('envelope');
+    if (!answeredAccount) throw invalid('unattributed account');
+    const data = result.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw invalid('missing payload');
+    return data;
+  }
+  function profileCapabilitiesView(source) {
+    const capabilities = source?.capabilities && typeof source.capabilities === 'object' ? source.capabilities : {};
+    return {
+      name: capabilities.name === true,
+      about: capabilities.about === true,
+      photo: capabilities.photo === true,
+      photoRemove: capabilities.photoRemove === true,
+    };
+  }
+  function profileReadFailure(path, reason) {
+    return featureError(502, 'UPSTREAM_INVALID', `WhatsApp connector returned an invalid profile response (${reason})`, { path });
+  }
+  // An empty object is a valid JSON object but not a readable profile: the
+  // identity JID and the two state objects are what makes the answer usable.
+  function requireProfileRead(data, path) {
+    if (typeof data.jid !== 'string' || !PROFILE_OWN_JID.test(data.jid)) throw profileReadFailure(path, 'own identity missing');
+    for (const field of ['photo', 'capabilities']) {
+      const value = data[field];
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw profileReadFailure(path, `${field} state missing`);
+    }
+    if ('name' in data && data.name !== null && typeof data.name !== 'string') throw profileReadFailure(path, 'name malformed');
+    if ('about' in data && data.about !== null && typeof data.about !== 'string') throw profileReadFailure(path, 'about malformed');
+    return data;
+  }
+  function profileView(source) {
+    const data = source && typeof source === 'object' ? source : {};
+    const profile = {
+      jid: cleanProviderValue(data.jid, 256),
+      phone: cleanProviderValue(data.phone, 32),
+      name: cleanProviderValue(data.name, 512),
+    };
+    // A missing read is not an empty value: only project About and the photo
+    // when the connector proved it looked, so a partial read cannot erase what
+    // the caller already had.
+    if (data.aboutKnown === true) {
+      profile.about = typeof data.about === 'string' ? data.about.slice(0, 1024) : '';
+      const setAt = cleanProviderValue(data.aboutSetAt, 64);
+      if (setAt) profile.aboutSetAt = setAt;
+    }
+    if (data.photoKnown === true) profile.photo = { available: data.photo?.available === true };
+    return profile;
+  }
+  function profileOutcomeView(source) {
+    const outcomes = {};
+    for (const field of ['name', 'about']) {
+      const value = source?.[field];
+      if (!value || typeof value !== 'object') continue;
+      outcomes[field] = {
+        requested: typeof value.requested === 'string' ? value.requested.slice(0, 512) : '',
+        current: typeof value.current === 'string' ? value.current.slice(0, 512) : null,
+        accepted: value.accepted === true,
+        confirmed: value.confirmed === true,
+        reason: cleanProviderValue(value.reason, 512),
+      };
+    }
+    if (source?.photo && typeof source.photo === 'object') {
+      outcomes.photo = {
+        available: source.photo.available === true,
+        accepted: source.photo.accepted === true,
+        confirmed: source.photo.confirmed === true,
+        reason: cleanProviderValue(source.photo.reason, 512),
+      };
+    }
+    return outcomes;
+  }
+  function profileFieldsProven(outcomes) {
+    // Only report what a readback really observed. Anything else is omitted so
+    // the caller keeps the state it already had instead of losing fields.
+    const profile = {};
+    if (outcomes.name && typeof outcomes.name.current === 'string') profile.name = outcomes.name.current;
+    if (outcomes.about && (outcomes.about.confirmed || typeof outcomes.about.current === 'string')) {
+      profile.about = outcomes.about.current;
+    }
+    if (outcomes.photo && !PROFILE_UNCONFIRMED_REASONS.test(outcomes.photo.reason || '')) {
+      profile.photo = { available: outcomes.photo.available };
+    }
+    return profile;
+  }
+  function profileOutcomesConfirmed(outcomes) {
+    // `confirmed` is the provider's own readback verdict, never "the HTTP call
+    // returned 200". A write the account could not prove stays unconfirmed.
+    const fields = ['name', 'about', 'photo'].map(field => outcomes?.[field]).filter(Boolean);
+    return fields.length > 0 && fields.every(field => field.confirmed === true);
+  }
+  function profileMutationConfirmed(result, outcomes) {
+    // A request can be half applied: the provider reports which fields it took
+    // and which failed, and only a complete, read-back-everything write counts
+    // as confirmed.
+    if (result?.partial === true) return false;
+    if (Array.isArray(result?.failed) && result.failed.length) return false;
+    return profileOutcomesConfirmed(outcomes);
+  }
+  function isBase64(value) {
+    if (typeof value !== 'string' || !value.length || value.length % 4 !== 0) return false;
+    const padding = value.length - value.replace(/=+$/, '').length;
+    const body = value.slice(0, value.length - padding);
+    // A backtracking base64 regex overflows the stack on multi-megabyte bodies.
+    return padding <= 2 && body.length > 0 && body.length % 4 !== 1 && !/[^A-Za-z0-9+/]/.test(body);
+  }
+  function profilePhotoPayload(body) {
+    const data = body.data ?? body.imageBase64;
+    if (typeof data !== 'string' || !data.length) throw fail(400, 'A base64 profile photo is required');
+    if (data.length > PROFILE_PHOTO_MAX_BASE64_CHARS) throw featureError(413, 'PHOTO_TOO_LARGE', 'Profile photo is too large');
+    if (!isBase64(data)) throw fail(400, 'Invalid base64 profile photo');
+    const mimeType = typeof body.mimeType === 'string' ? body.mimeType.split(';')[0].trim().toLowerCase() : '';
+    if (!PROFILE_PHOTO_MIME_TYPES.includes(mimeType)) throw fail(400, 'Profile photo must be JPEG, PNG or WebP');
+    const bytes = Buffer.from(data, 'base64');
+    if (!bytes.length) throw fail(400, 'Profile photo is empty');
+    if (bytes.length > PROFILE_PHOTO_MAX_BYTES) {
+      throw featureError(413, 'PHOTO_TOO_LARGE', `Profile photo exceeds ${PROFILE_PHOTO_MAX_BYTES / (1024 * 1024)} MB`);
+    }
+    return { imageBase64: data, mimeType };
+  }
+  async function profileResponse(account, outcomes) {
+    const view = {
+      account: account.accountId,
+      sendingEnabled: sendingEnabled(env),
+    };
+    try {
+      const fresh = requireProfileRead(await profileConnector(account, '/profile/me', { method: 'GET' }), '/profile/me');
+      return { ...view, capabilities: profileCapabilitiesView(fresh), profile: profileView(fresh) };
+    } catch (error) {
+      if (!outcomes) throw error;
+      // The write happened but the readback is unavailable: report only the
+      // fields a readback really observed, omit capabilities the gateway never
+      // read back, and carry the connector error forward for the response.
+      return {
+        ...view,
+        profile: profileFieldsProven(profileOutcomeView(outcomes)),
+        profileReadback: { available: false, error: cleanProviderValue(error?.message, 256) || 'unavailable' },
+      };
+    }
+  }
   const server = http.createServer(async (req, res) => {
     const json = (status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
     const redirect = (location, setCookie) => {
@@ -1579,6 +1777,82 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           applied.push(await featureConnector(a, '/privacy', { method: 'POST', body: update, requireSending: true }));
         }
         return json(200, { account: a.accountId, chat: chat || null, confirmed: true, applied });
+      }
+      // Own-account profile. Reads are provider lookups only; each write passes
+      // the same sending gate as a message send because it changes the live
+      // account. Responses always carry { account, profile } so the browser can
+      // merge its own snapshot, and every field reports what was confirmed.
+      if (req.method === 'GET' && path === '/api/profile') {
+        const a = accountParam(url.searchParams.get('account'));
+        const data = requireProfileRead(await profileConnector(a, '/profile/me'), '/profile/me');
+        return json(200, {
+          account: a.accountId,
+          sendingEnabled: sendingEnabled(env),
+          capabilities: profileCapabilitiesView(data),
+          profile: profileView(data),
+        });
+      }
+      if ((req.method === 'POST' || req.method === 'PATCH') && path === '/api/profile') {
+        if (req.method === 'PATCH') checkOrigin(req, env);
+        const body = await bodyJSON(req); const a = accountParam(body.account);
+        if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+        const update = {};
+        if (body.name !== undefined) update.name = required(body.name, 'name', PROFILE_NAME_MAX_CHARS);
+        if (body.about !== undefined) {
+          if (typeof body.about !== 'string' || body.about.length > PROFILE_ABOUT_MAX_CHARS) throw fail(400, 'Invalid about');
+          update.about = body.about;
+        }
+        if (!Object.keys(update).length) throw fail(400, 'No profile field was provided');
+        const result = await profileConnector(a, '/profile/me', { method: 'PATCH', body: update, timeout: FEATURE_SEND_TIMEOUT_MS });
+        const outcomes = profileOutcomeView(result);
+        return json(200, {
+          ...(await profileResponse(a, result)),
+          confirmed: profileMutationConfirmed(result, outcomes),
+          partial: result.partial === true,
+          results: outcomes,
+        });
+      }
+      if (req.method === 'POST' && path === '/api/profile/photo') {
+        const body = await bodyJSON(req); const a = accountParam(body.account);
+        if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+        const payload = profilePhotoPayload(body);
+        const result = await profileConnector(a, '/profile/me/photo', { method: 'POST', body: payload, timeout: FEATURE_SEND_TIMEOUT_MS });
+        const outcomes = profileOutcomeView(result);
+        return json(200, {
+          ...(await profileResponse(a, result)),
+          confirmed: profileMutationConfirmed(result, outcomes),
+          results: outcomes,
+        });
+      }
+      if (req.method === 'POST' && path === '/api/profile/photo/remove') {
+        const body = await bodyJSON(req); const a = accountParam(body.account);
+        if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+        const result = await profileConnector(a, '/profile/me/photo', { method: 'DELETE', timeout: FEATURE_SEND_TIMEOUT_MS });
+        const outcomes = profileOutcomeView(result);
+        return json(200, {
+          ...(await profileResponse(a, result)),
+          confirmed: profileMutationConfirmed(result, outcomes),
+          results: outcomes,
+        });
+      }
+      if (req.method === 'GET' && path === '/api/profile/photo') {
+        const a = accountParam(url.searchParams.get('account'));
+        const data = await profileConnector(a, '/profile/me/photo');
+        if (typeof data.data !== 'string' || !data.data.length) {
+          throw featureError(404, 'PROFILE_PHOTO_UNAVAILABLE', 'This account has no profile photo');
+        }
+        // Buffer.from would silently decode garbage into a body that is not an
+        // image, so a malformed payload is rejected before any bytes go out.
+        if (!isBase64(data.data) || data.data.length % 4 !== 0) throw profileReadFailure('/profile/me/photo', 'photo payload malformed');
+        const bytes = Buffer.from(data.data, 'base64');
+        if (!bytes.length) throw featureError(404, 'PROFILE_PHOTO_UNAVAILABLE', 'This account has no profile photo');
+        if (bytes.length > PROFILE_PHOTO_MAX_BYTES) throw featureError(413, 'PHOTO_TOO_LARGE', `Profile photo exceeds ${PROFILE_PHOTO_MAX_BYTES / (1024 * 1024)} MB`);
+        res.statusCode = 200;
+        res.setHeader('content-type', safeImageType(data.contentType));
+        res.setHeader('content-length', bytes.length);
+        res.setHeader('content-disposition', 'inline; filename="profile-photo"');
+        res.end(bytes);
+        return;
       }
       if (req.method === 'POST' && (path === '/api/favorites' || path === '/api/lists' || path === '/api/local-actions')) {
         const body = await bodyJSON(req); const a = accountParam(body.account); const action = String(body.action || body.operation || '').toLowerCase();
