@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as renderer from '../public/message-render.mjs';
 import {
   decorateMessages,
   appendRichText,
@@ -115,6 +116,20 @@ const fakeDocument = {
 function treeText(node) {
   return node.children?.reduce((text, child) => text + (child.tagName === '#TEXT' ? child.textContent : child.textContent || treeText(child)), node.textContent || '') || node.textContent || '';
 }
+
+test('chat preview icons follow message type, preserve captions and never infer media from text', () => {
+  assert.equal(typeof renderer.renderChatPreview, 'function');
+  for (const previewType of ['IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT', 'STICKER', 'CONTACT', 'EVENT', 'POLL', 'LOCATION']) {
+    const preview = renderer.renderChatPreview({ previewType, preview: '<b>recuerdo</b>' }, { document: fakeDocument });
+    assert(preview.querySelector('.message-kind-icon'));
+    assert.equal(treeText(preview), '<b>recuerdo</b>');
+  }
+  const text = renderer.renderChatPreview({ previewType: 'TEXT', preview: 'Imagen' }, { document: fakeDocument });
+  assert.equal(text.querySelector('.message-kind-icon'), null);
+  assert.equal(treeText(text), 'Imagen');
+  const empty = renderer.renderChatPreview({ previewType: 'AUDIO', preview: '' }, { document: fakeDocument });
+  assert.equal(treeText(empty), 'Audio');
+});
 
 test('parseRichText renders supported WhatsApp formatting without treating HTML as markup', () => {
   const tokens = parseRichText('*negrita* _cursiva_ ~tachado~ `codigo` ```bloque```');

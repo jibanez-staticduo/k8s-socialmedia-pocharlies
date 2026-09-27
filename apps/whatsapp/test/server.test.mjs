@@ -209,7 +209,28 @@ test('chat list labels a captionless image instead of an empty preview', async t
   const { request } = await fixture(t, { db });
   const response = await request('/api/chats?account=personal');
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).chats[0].preview, 'Imagen');
+  const chat = (await response.json()).chats[0];
+  assert.equal(chat.preview, 'Imagen');
+  assert.equal(chat.previewType, 'IMAGE');
+});
+test('chat previews preserve typed captions and label typed media without secondary lookups', async t => {
+  const db = { query: async sql => {
+    if (/SELECT c\.id,/.test(sql)) return { rows: [
+      { id: 'a', name: 'A', preview: 'Un recuerdo', previewType: 'IMAGE', archived: false },
+      { id: 'b', name: 'B', preview: '', previewType: 'AUDIO', archived: false },
+      { id: 'c', name: 'C', preview: 'Imagen', previewType: 'TEXT', archived: false },
+    ] };
+    if (/SELECT DISTINCT ON \(m\.conversation_id\)/.test(sql)) assert.fail('Typed previews must not query again');
+    return { rows: [] };
+  } };
+  const { request } = await fixture(t, { db });
+  const response = await request('/api/chats?account=personal');
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).chats.map(({ preview, previewType }) => ({ preview, previewType })), [
+    { preview: 'Un recuerdo', previewType: 'IMAGE' },
+    { preview: 'Audio', previewType: 'AUDIO' },
+    { preview: 'Imagen', previewType: 'TEXT' },
+  ]);
 });
 test('timeouts and absent confirmation never claim sending succeeded', async t => {
   const { request } = await fixture(t, { fetchImpl: async () => Response.json({ sent: true }) });

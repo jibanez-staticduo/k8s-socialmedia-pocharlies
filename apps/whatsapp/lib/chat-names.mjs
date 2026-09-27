@@ -150,6 +150,7 @@ SELECT c.id,
          )
        END AS name,
        COALESCE(last_message.content, '') AS preview,
+       last_message.message_type AS "previewType",
        COALESCE(c.unread_count, 0) + COALESCE(pn_alias.unread_count, 0) AS unread,
        COALESCE(c.is_group, false) AS "isGroup",
        (COALESCE(c.archived, false) OR COALESCE(pn_alias.archived, false)) AS archived,
@@ -181,14 +182,14 @@ LEFT JOIN LATERAL (
                regexp_replace(c.wa_chat_id, '@c\\.us$', '@s.whatsapp.net')) = 1
 ) pn_alias ON true
 LEFT JOIN LATERAL (
-  SELECT m.content, m.wa_timestamp, m.direction
+  SELECT m.content, m.wa_timestamp, m.direction, m.message_type
   FROM messages m
   WHERE m.conversation_id = ANY(array_prepend(c.id, COALESCE(pn_alias.ids, ARRAY[]::text[])))
     AND m.account = $1
     AND m.platform = 'whatsapp'
     AND NOT m.is_deleted
     AND ${MESSAGE_VISIBLE_SQL}
-  ORDER BY m.wa_timestamp DESC
+  ORDER BY m.wa_timestamp DESC, m.id DESC
   LIMIT 1
 ) last_message ON true
 LEFT JOIN LATERAL (

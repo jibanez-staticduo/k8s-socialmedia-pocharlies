@@ -34,6 +34,9 @@ The audit is ongoing; this document is not a claim of complete parity.
 - Global Media offers Media, Documents and Links tabs, search and selection.
   Its ordering/filter menu includes All, You, Other people, Newest, Oldest
   and Longest. The existing per-chat gallery does not cover this global view.
+  On desktop it is a centered modal occupying 80% of the viewport, rather
+  than a narrow side drawer; the reference header combines tabs with search,
+  ordering, selection and close controls.
 - The authenticated Windows reference session remains available through Agent
   Jake. New chat searches name, number or username and exposes New group,
   New contact and New community before the contact directory.
@@ -103,6 +106,11 @@ not assumptions about the newest documentation, determines the contract.
   An absent publication audience must never mean all contacts.
 - Provider privacy can withhold photos, presence and last-seen information.
   Display unavailable information honestly, without invented values.
+- Pin-message documentation currently differs from the installed rc13 source:
+  this version accepts `{ pin: messageKey, type, time }`, not nested pin
+  options. Its protobuf enum uses `PIN_FOR_ALL=1`, `UNPIN_FOR_ALL=2`; the
+  public README example suggesting `0` for unpin must not be copied. Allowed
+  durations are 24 hours, 7 days and 30 days. Pin persistence/UI is still pending.
 
 ## Validation and release
 
@@ -179,7 +187,7 @@ TXT export batch, validated with synthetic data:
   [mobile light](screenshots/parity-export-mobile.png) and
   [desktop dark](screenshots/parity-export-desktop.png).
 
-UTC timestamp decoding correction, in validation:
+UTC timestamp decoding correction (`38fdbab`), deployed and validated:
 
 - The connector writes UTC to `timestamp without time zone` columns. The app
   container runs in Europe/Madrid, where the default PostgreSQL decoder was
@@ -191,6 +199,22 @@ UTC timestamp decoding correction, in validation:
 - Tests cover UTC, Madrid, New York and Kolkata, winter/summer and DST changes.
   Existing zoned timestamps retain their original parser; cursor text retains
   PostgreSQL's microsecond precision.
+- The exact Node 22 image passes 212 tests. After deployment, all 20 production
+  samples have zero offset; authenticated read-only browser QA passes with no
+  page errors or downloads. Refreshing an already open tab replaces timestamps
+  and pagination cursors fetched before the correction.
+
+Typed chat-list previews, validated before deployment:
+
+- The list query carries the last visible message's real type alongside its
+  text, with a deterministic tie-breaker for equal timestamps. Icons represent
+  photos, videos, audio, documents, stickers, polls, locations, contacts and
+  events, retaining captions. Ordinary text such as "Imagen" stays ordinary text.
+- Known types no longer trigger a second database lookup to label captionless
+  media. Account-scoped fallback lookups remain for incomplete projections.
+- The isolated Node 22 candidate passes 214 app tests and 40 synthetic browser
+  checks. A read-only query against both deployed accounts confirms that all
+  current chat rows expose a type, including six media previews.
 
 The goal remains open until the matrix is resolved with implemented/verified
 behavior or a concrete documented provider limitation. Calls/video calls are

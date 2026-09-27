@@ -11,6 +11,8 @@ const MESSAGE_KINDS = {
   STICKER: { label: 'Sticker', icon: 'sticker' },
   POLL: { label: 'Encuesta', icon: 'poll' },
   LOCATION: { label: 'Ubicacion', icon: 'location' },
+  CONTACT: { label: 'Contacto', icon: 'contact' },
+  EVENT: { label: 'Evento', icon: 'event' },
 };
 const ICON_PATHS = {
   image: ['M4 4h16v16H4z', 'M8 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z', 'm5 17 4-5 3 3 2-2 5 4'],
@@ -20,6 +22,8 @@ const ICON_PATHS = {
   sticker: ['M4 3h16v11l-7 7H4z', 'M13 21v-7h7', 'M8 9h.01', 'M16 9h.01', 'M9 14c2 2 4 2 6 0'],
   poll: ['M5 18V9h3v9z', 'M11 18V4h3v14z', 'M17 18v-6h3v6z'],
   location: ['M19 10c0 5-7 12-7 12S5 15 5 10a7 7 0 1 1 14 0z', 'M12 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'],
+  contact: ['M4 4h16v16H4z', 'M12 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M7 19v-2a5 5 0 0 1 10 0v2'],
+  event: ['M4 5h16v15H4z', 'M8 3v4', 'M16 3v4', 'M4 10h16', 'm8 15 3 3 5-5'],
   unavailable: ['M6 3h9l4 4v14H6z', 'M15 3v5h4', 'M9 12h6', 'M9 16h6', 'M4 4l16 16'],
 };
 
@@ -587,6 +591,14 @@ function messageKindLine(documentRef, type, value, { unavailable = false } = {})
   const label = unavailable ? 'Mensaje no disponible' : textValue(value).trim() || kind?.label || 'Mensaje no disponible';
   if (kind || unavailable || !textValue(value).trim()) line.append(messageIcon(documentRef, unavailable || !kind ? 'unavailable' : kind.icon));
   line.append(makeElement(documentRef, 'span', 'message-kind-label', label));
+  return line;
+}
+
+export function renderChatPreview(chat, { document: documentRef = globalThis.document } = {}) {
+  const type = messageType(chat?.previewType);
+  const value = textValue(chat?.preview);
+  const line = messageKindLine(documentRef, type, value || MESSAGE_KINDS[type]?.label || 'Sin mensajes disponibles');
+  line.className = 'chat-preview message-kind-line';
   return line;
 }
 

@@ -689,6 +689,17 @@ async function runDesktop(page, state, report) {
     assert((await fallback.textContent())?.trim(), 'group avatar has no fallback label');
   });
 
+  await check('chat previews render semantic media icons with unchanged captions', async () => {
+    const direct = chatLocator(page, 'Ana Fixture').locator('.chat-preview');
+    const media = chatLocator(page, 'Equipo Fixture').locator('.chat-preview');
+    assert.equal(await direct.locator('svg').count(), 0);
+    assert.equal(await media.locator('svg').count(), 1);
+    assert.equal(await media.textContent(), 'Grupo fixture');
+    const icon = await media.locator('svg').boundingBox();
+    assert(icon && icon.width === 16 && icon.height === 16);
+    assert.equal(await media.locator('svg').getAttribute('aria-hidden'), 'true');
+  });
+
   await check('visible chat marks only the selected chat as read', async () => {
     state.log.length = 0;
     await openChat(page, 'Ana Fixture');

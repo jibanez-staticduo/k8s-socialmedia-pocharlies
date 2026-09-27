@@ -160,7 +160,7 @@ function renderChats() {
       nameRow.append(muted);
     }
     if (chat.timestamp && messageRenderer) { const label = messageRenderer.formatChatListTime(chat.timestamp); if (label) { const time = node('time', 'chat-time', label); const date = new Date(typeof chat.timestamp === 'number' && chat.timestamp < 1e12 ? chat.timestamp * 1000 : chat.timestamp); if (!Number.isNaN(date.getTime())) time.dateTime = date.toISOString(); nameRow.append(time); } }
-    details.append(nameRow, node('span', 'chat-preview', chat.preview || 'Sin mensajes disponibles'));
+    details.append(nameRow, messageRenderer ? messageRenderer.renderChatPreview(chat) : node('span', 'chat-preview', chat.preview || 'Sin mensajes disponibles'));
     button.append(details);
     if (Number(chat.unread) > 0 || chat.unread === true) button.append(node('span', 'badge', String(chat.unread === true ? '' : chat.unread)));
     button.onclick = () => selectChat(chat);

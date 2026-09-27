@@ -499,8 +499,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     }
   }
   async function fillMediaPreviews(chats, accountId) {
-    const candidates = chats.filter(chat => !chat.preview && chat.timestamp);
-    if (!candidates.length) return chats;
+    const labels = { IMAGE: 'Imagen', VIDEO: 'Vídeo', AUDIO: 'Audio', DOCUMENT: 'Documento', STICKER: 'Sticker', LOCATION: 'Ubicación', CONTACT: 'Contacto', POLL: 'Encuesta', EVENT: 'Evento' };
+    const withType = (chat, type = chat.previewType) => ({ ...chat, previewType: type || null, preview: chat.preview || labels[type] || '' });
+    const candidates = chats.filter(chat => !chat.preview && chat.timestamp && !chat.previewType);
+    if (!candidates.length) return chats.map(chat => withType(chat));
     const idsByChat = new Map();
     for (const chat of candidates) idsByChat.set(chat.id, await conversationReadIds({ accountId }, { id: chat.id, wa_chat_id: chat.waChatId, is_group: chat.isGroup }));
     const ids = [...new Set([...idsByChat.values()].flat())];
@@ -512,11 +514,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       [accountId, ids]
     );
     const types = new Map(rows.map(row => [row.conversation_id, row]));
-    const labels = { IMAGE: 'Imagen', VIDEO: 'Vídeo', AUDIO: 'Audio', DOCUMENT: 'Documento', STICKER: 'Sticker' };
     return chats.map(chat => {
       const latest = idsByChat.get(chat.id)?.map(id => types.get(id)).filter(Boolean)
         .sort((a, b) => new Date(b.wa_timestamp) - new Date(a.wa_timestamp))[0];
-      return { ...chat, preview: chat.preview || labels[latest?.message_type] || '' };
+      return withType(chat, chat.previewType || latest?.message_type);
     });
   }
   async function readMessageRows(account, chat, { before, limit, around }) {
