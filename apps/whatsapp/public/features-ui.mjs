@@ -1353,8 +1353,8 @@ export function installFeatureUI({
       for (const pathValue of attachPaths[tone]) { const path = documentRef.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', pathValue); icon.append(path); }
       symbol.append(icon); item.append(symbol, node('span', '', label)); item.onclick = () => { closeAttachMenu(); handler(); }; attachMenu.append(item);
     };
-    addAttach('Fotos y vídeos', 'photo', () => openFile('image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime'));
     addAttach('Documento', 'document', () => openFile('.pdf,.docx,.xlsx,.pptx,.zip,.txt'));
+    addAttach('Fotos y vídeos', 'photo', () => openFile('image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime'));
     addAttach('Cámara', 'camera', openCamera);
     addAttach('Audio', 'audio', () => openFile('audio/ogg,audio/webm,audio/mpeg,audio/mp4,audio/wav,audio/x-wav'));
     addAttach('Contacto', 'contact', () => openShare('contact'));

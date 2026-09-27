@@ -102,6 +102,20 @@ try {
   assert.equal(uploads.at(-1).sendToken, failedToken);
 
   await page.locator('#attach').click();
+  for (const theme of ['dark', 'light']) {
+    await page.locator('#theme').evaluate((select, value) => { select.value = value; select.dispatchEvent(new Event('change', {bubbles:true})); }, theme);
+    const ratio = await page.locator('#feature-attach-menu').evaluate(menu => {
+      const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(Number).map(value => {
+        const s = value / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4;
+      }).reduce((sum, value, index) => sum + value * [.2126, .7152, .0722][index], 0);
+      const bg = luminance(getComputedStyle(menu).backgroundColor);
+      const fg = luminance(getComputedStyle(menu.querySelector('button')).color);
+      return (Math.max(bg, fg) + .05) / (Math.min(bg, fg) + .05);
+    });
+    assert(ratio >= 4.5, `${theme}: attachment menu text contrast is too low`);
+    assert.equal(await page.locator('#feature-attach-menu .camera').evaluate(icon => getComputedStyle(icon).color === 'rgb(255, 255, 255)'), false);
+    await page.locator('#feature-attach-menu').screenshot({path:path.join(outputDir, `attachment-menu-${theme}.png`)});
+  }
   await page.getByRole('menuitem', {name:'Cámara'}).click();
   await page.locator('#camera-capture').waitFor({state:'visible'});
   await page.waitForFunction(() => !document.querySelector('#camera-capture').disabled);

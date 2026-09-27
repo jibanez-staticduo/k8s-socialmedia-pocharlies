@@ -44,3 +44,15 @@
 .camera-actions button { padding: 9px 14px; border-radius: 10px; background: var(--surface-raised); color: var(--text); }
 .camera-actions #camera-capture { background: var(--accent); color: #07170f; }
 .camera-actions button:disabled { opacity: .5; }
+.feature-attach-menu { width: max-content; min-width: 190px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 140px); overflow-y: auto; background: var(--surface); }
+.feature-attach-option { gap: 10px; min-height: 40px; border-radius: 12px; padding: 6px 10px; }
+.feature-attach-symbol { width: 24px; height: 24px; }
+.feature-attach-symbol.document { background: transparent; color: #7f66ff; }
+.feature-attach-symbol.photo { background: transparent; color: #007bfc; }
+.feature-attach-symbol.camera { background: transparent; color: #ff2e74; }
+.feature-attach-symbol.audio { background: transparent; color: #fa6533; }
+.feature-attach-symbol.contact { background: transparent; color: #009de2; }
+.feature-attach-symbol.poll { background: transparent; color: #ffb938; }
+.feature-attach-symbol.event { background: transparent; color: #ff2e74; }
+.feature-attach-symbol.sticker { background: transparent; color: #06cf9c; }
+@media (pointer: coarse) { .feature-attach-option { min-height: 44px; } }
