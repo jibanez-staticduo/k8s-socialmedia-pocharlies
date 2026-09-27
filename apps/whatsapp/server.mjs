@@ -1150,7 +1150,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const cursorScope = { account: a.accountId, chat, queryHash: createHash('sha256').update(q).digest('hex'), searchScope };
         const cursor = url.searchParams.has('cursor') ? decodeSearchCursor(url.searchParams.get('cursor'), cursorScope) : null;
         const args = [a.accountId, `%${q}%`];
-        const clauses = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', 'm.content ILIKE $2'];
+        const clauses = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_VISIBLE_SQL, 'm.content ILIKE $2'];
         if (conversation) { args.push(await conversationReadIds(a, conversation)); clauses.push(`m.conversation_id=ANY($${args.length}::text[])`); }
         if (cursor) {
           args.push(cursor.timestamp, cursor.id);

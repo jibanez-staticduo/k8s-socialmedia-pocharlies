@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createApp } from '../server.mjs';
 import { AppState } from '../lib/app-state.mjs';
 import { publicMessageMetadata, publicPollResults } from '../lib/message-projection.mjs';
+import { MESSAGE_VISIBLE_SQL } from '../lib/chat-names.mjs';
 
 const auth = `Basic ${Buffer.from('operator:password').toString('base64')}`;
 
@@ -244,6 +245,7 @@ test('search cursor pages tied timestamps without duplicates and stays bound to 
   }));
   db.query = async (sql, args) => {
     if (!/SELECT m\.id,m\.wa_message_id,m\.conversation_id/.test(sql)) return originalQuery(sql, args);
+    assert.ok(sql.includes(MESSAGE_VISIBLE_SQL), 'search must use the same visible-chat filter as the timeline');
     let rows = stored.filter(row => row.content.includes(String(args[1]).slice(1, -1)));
     if (Array.isArray(args[2])) rows = rows.filter(row => args[2].includes(row.conversation_id));
     if (/\(m\.wa_timestamp, m\.id::text\) < /.test(sql)) {
