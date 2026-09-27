@@ -90,7 +90,9 @@ export class CommunityService {
   }
 
   private async metadata(jid: string): Promise<GroupMetadata> {
-    const meta = providerMetadata(await this.socket.communityMetadata(groupJid(jid)), jid);
+    // rc13 communityMetadata expects <community>, but WhatsApp returns <group>
+    // with a <parent> marker, including the PN/LID participant fields.
+    const meta = providerMetadata(await this.socket.groupMetadata(groupJid(jid)), jid);
     if (meta.isCommunity !== true) {
       throw new CommunityError('NOT_A_COMMUNITY', 'This group is not a community', 400);
     }
@@ -98,7 +100,8 @@ export class CommunityService {
   }
 
   async list(): Promise<Community[]> {
-    const result = await this.socket.communityFetchAllParticipating();
+    // Both rc13 methods send the same IQ; only the group parser reads <groups>.
+    const result = await this.socket.groupFetchAllParticipating();
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
       throw new CommunityError(
         'INVALID_PROVIDER_RESPONSE',
@@ -197,8 +200,7 @@ export class CommunityService {
       }
     }
     if (action === 'subject') await this.socket.communityUpdateSubject(jid, subject!);
-    else if (action === 'description')
-      await this.socket.communityUpdateDescription(jid, description);
+    else if (action === 'description') await this.socket.groupUpdateDescription(jid, description);
     else if (action === 'link') await this.socket.communityLinkGroup(target!, jid);
     else if (action === 'unlink') await this.socket.communityUnlinkGroup(target!, jid);
     else await this.socket.communityLeave(jid);

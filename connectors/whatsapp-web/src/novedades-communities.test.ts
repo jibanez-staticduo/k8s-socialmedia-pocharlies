@@ -1,9 +1,80 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CommunityService } from './novedades-communities';
+import { extractGroupMetadata } from '@whiskeysockets/baileys/lib/Socket/groups.js';
+import {
+  getBinaryNodeChildren,
+  getBinaryNodeChild,
+  type BinaryNode,
+} from '@whiskeysockets/baileys';
 
 const communityId = '123@g.us';
 const groupId = '456@g.us';
+
+test('installed group parser reads real parent, subgroup and announcement wire nodes', async () => {
+  const parent: BinaryNode = {
+    tag: 'group',
+    attrs: {
+      id: '123',
+      subject: 'Community',
+      addressing_mode: 'lid',
+      size: '20',
+      creation: '1700000000',
+    },
+    content: [
+      { tag: 'parent', attrs: { default_membership_approval_mode: 'request_required' } },
+      {
+        tag: 'participant',
+        attrs: { jid: '99@lid', phone_number: '1@s.whatsapp.net', type: 'admin' },
+      },
+      {
+        tag: 'description',
+        attrs: { id: 'desc-1' },
+        content: [{ tag: 'body', attrs: {}, content: Buffer.from('Description') }],
+      },
+    ],
+  };
+  const subgroup: BinaryNode = {
+    tag: 'group',
+    attrs: { id: '456', subject: 'Discussion', creation: '1700000001' },
+    content: [{ tag: 'linked_parent', attrs: { jid: communityId } }],
+  };
+  const announcement: BinaryNode = {
+    tag: 'group',
+    attrs: { id: '789', subject: 'Announcements', creation: '1700000002' },
+    content: [
+      { tag: 'linked_parent', attrs: { jid: communityId } },
+      { tag: 'default_sub_group', attrs: {} },
+    ],
+  };
+  const wire: BinaryNode = {
+    tag: 'iq',
+    attrs: { type: 'result' },
+    content: [{ tag: 'groups', attrs: {}, content: [parent, subgroup, announcement] }],
+  };
+  const parsed = Object.fromEntries(
+    getBinaryNodeChildren(getBinaryNodeChild(wire, 'groups'), 'group').map(node => {
+      const meta = extractGroupMetadata({ tag: 'result', attrs: {}, content: [node] });
+      return [meta.id, meta];
+    })
+  );
+  assert.equal(getBinaryNodeChild(wire, 'communities'), undefined);
+  assert.equal(parsed[communityId].isCommunity, true);
+  assert.equal(parsed[groupId].linkedParent, communityId);
+  assert.equal(parsed['789@g.us'].isCommunityAnnounce, true);
+  assert.equal(parsed[communityId].participants[0].phoneNumber, '1@s.whatsapp.net');
+  const { socket } = fixture();
+  socket.groupFetchAllParticipating = async () => parsed;
+  socket.groupMetadata = async (jid: string) => parsed[jid];
+  const service = new CommunityService(socket);
+  const result = await service.list();
+  assert.equal(result.length, 1);
+  assert.equal(result[0].capabilities.manageGroups, true);
+  assert.equal(result[0].participantCount, 20);
+  assert.equal((await service.detail(communityId)).community.description, 'Description');
+  await assert.rejects(service.detail(groupId), { code: 'NOT_A_COMMUNITY' });
+});
+
 function fixture(admin = true) {
   const calls: unknown[] = [];
   const community = {
@@ -16,9 +87,12 @@ function fixture(admin = true) {
   const group = { id: groupId, subject: 'Group', participants: community.participants };
   const socket: any = {
     user: { id: '1:2@s.whatsapp.net' },
-    communityMetadata: async () => community,
-    groupMetadata: async () => group,
-    communityFetchAllParticipating: async () => ({ [communityId]: community, [groupId]: group }),
+    communityMetadata: async () => {
+      throw new Error('rc13 community parser is incompatible');
+    },
+    groupMetadata: async (jid: string) => (jid === communityId ? community : group),
+    communityFetchAllParticipating: async () => ({}),
+    groupFetchAllParticipating: async () => ({ [communityId]: community, [groupId]: group }),
     communityFetchLinkedGroups: async () => ({
       communityJid: communityId,
       isCommunity: true,
@@ -31,7 +105,7 @@ function fixture(admin = true) {
     communityUpdateSubject: async (...args: unknown[]) => {
       calls.push(args);
     },
-    communityUpdateDescription: async (...args: unknown[]) => {
+    groupUpdateDescription: async (...args: unknown[]) => {
       calls.push(args);
     },
     communityLinkGroup: async (...args: unknown[]) => {
@@ -59,7 +133,7 @@ test('listing includes only explicit communities and exposes safe metadata', asy
 
 test('ordinary group without linkedParent is not accepted as community', async () => {
   const { service, socket, group } = fixture();
-  socket.communityMetadata = async () => group;
+  socket.groupMetadata = async () => group;
   await assert.rejects(service.detail(groupId), { code: 'NOT_A_COMMUNITY', status: 400 });
 });
 
@@ -148,9 +222,9 @@ test('detail projects linked groups without provider owner or participant data',
 
 test('failed post-write metadata refresh reports uncertain result and does not repeat write', async () => {
   const { service, socket, calls } = fixture();
-  socket.communityUpdateDescription = async (...args: unknown[]) => {
+  socket.groupUpdateDescription = async (...args: unknown[]) => {
     calls.push(args);
-    socket.communityMetadata = async () => {
+    socket.groupMetadata = async () => {
       throw new Error('network');
     };
   };
