@@ -27,6 +27,7 @@ import {
   WhatsAppContactSeedInput,
 } from '../contact-sync';
 import { CapabilityError } from '../whatsapp-capabilities';
+import { CommunityError } from '../novedades-communities';
 import {
   claimSendAttempt,
   confirmTextSend,
@@ -56,6 +57,12 @@ function errorMessage(error: unknown): string {
 }
 
 function capabilityErrorResponse(res: Response, error: unknown): void {
+  if (error instanceof CommunityError) {
+    res
+      .status(error.status)
+      .json({ ok: false, error: { code: error.code, message: error.message } });
+    return;
+  }
   if (error instanceof CapabilityError) {
     res.status(error.status).json({
       ok: false,
@@ -1481,6 +1488,61 @@ export function createRouter(
       }
     })();
   });
+
+  router.get('/communities', auth, (_req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        res.json({ ok: true, communities: await client.listCommunities() });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
+  router.get('/communities/:jid', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        res.json({ ok: true, ...(await client.getCommunity(req.params.jid)) });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
+  const communityWritesAllowed = (res: Response): boolean => {
+    if (process.env.ENABLE_SENDING === 'true' && process.env.EMERGENCY_DISABLE_SENDING !== 'true')
+      return true;
+    res
+      .status(403)
+      .json({ ok: false, error: { code: 'SENDING_DISABLED', message: 'Sending is disabled' } });
+    return false;
+  };
+
+  router.post('/communities', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        if (!communityWritesAllowed(res)) return;
+        res.status(201).json({ ok: true, community: await client.createCommunity(req.body) });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
+  router.post(
+    '/communities/:jid/action',
+    auth,
+    (req: AuthenticatedRequest, res: Response): void => {
+      void (async () => {
+        try {
+          if (!communityWritesAllowed(res)) return;
+          res.json({ ok: true, ...(await client.communityAction(req.params.jid, req.body)) });
+        } catch (error) {
+          capabilityErrorResponse(res, error);
+        }
+      })();
+    }
+  );
 
   router.post('/groups/create', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {

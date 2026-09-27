@@ -593,7 +593,10 @@ function messageKindLine(documentRef, type, value, { unavailable = false } = {})
 function replyReference(message, documentRef) {
   const preview = message?.replyPreview;
   const available = preview?.available === true;
-  const reference = makeElement(documentRef, 'div', 'message-reply-reference');
+  const reference = makeElement(documentRef, 'button', 'message-reply-reference');
+  reference.type = 'button';
+  reference.dataset.replyToMessageId = String(message.replyToMessageId);
+  reference.setAttribute('aria-label', 'Ir al mensaje citado');
   const sender = textValue(preview?.senderName).trim();
   if (sender) reference.append(makeElement(documentRef, 'strong', 'message-reply-sender', sender));
   reference.append(messageKindLine(documentRef, available ? preview.type : null, available ? preview.text : '', { unavailable: !available }));

@@ -9,7 +9,11 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/assistant-ui.css">
+  <link rel="stylesheet" href="/features-parity.css">
+  <link rel="stylesheet" href="/communities-ui.css">
+  <link rel="stylesheet" href="/settings-ui.css">
   <script src="/app.js" defer></script>
+  <script src="/settings-ui.mjs" type="module"></script>
 </head>
 <body data-theme="dark">
   <main class="app-shell">
@@ -17,19 +21,32 @@
       <nav id="account-rail" class="rail-top rail-accounts" aria-label="Cuentas de WhatsApp"></nav>
       <div class="rail-bottom">
         <details class="rail-settings">
-          <summary class="rail-icon" aria-label="Ajustes" title="Ajustes"><svg viewBox="0 0 24 24" focusable="false"><path d="m9.7 3.5.5 1.9a7.2 7.2 0 0 0-1.8 1l-1.8-1-1.6 1.6 1 1.8a7.2 7.2 0 0 0-1 1.8l-1.9.5v2.2l1.9.5a7.2 7.2 0 0 0 1 1.8l-1 1.8 1.6 1.6 1.8-1a7.2 7.2 0 0 0 1.8 1l-.5 1.9h2.2l.5-1.9a7.2 7.2 0 0 0 1.8-1l1.8 1 1.6-1.6-1-1.8a7.2 7.2 0 0 0 1-1.8l1.9-.5v-2.2l-1.9-.5a7.2 7.2 0 0 0-1-1.8l1-1.8-1.6-1.6-1.8 1a7.2 7.2 0 0 0-1.8-1l.5-1.9z"/><circle cx="12" cy="12" r="2.5"/></svg></summary>
-          <div class="rail-popover">
-            <p class="rail-popover-title">Preferencias</p>
-            <label>Cuenta
-              <select id="account" aria-label="Cuenta de WhatsApp"></select>
-            </label>
-            <label>Tema
-              <select id="theme" aria-label="Tema">
-                <option value="dark">Oscuro</option>
-                <option value="system">Sistema</option>
-                <option value="light">Claro</option>
-              </select>
-            </label>
+          <summary class="rail-icon" aria-label="Ajustes" title="Ajustes" aria-controls="settings-panel"><svg viewBox="0 0 24 24" focusable="false"><path d="m9.7 3.5.5 1.9a7.2 7.2 0 0 0-1.8 1l-1.8-1-1.6 1.6 1 1.8a7.2 7.2 0 0 0-1 1.8l-1.9.5v2.2l1.9.5a7.2 7.2 0 0 0 1 1.8l-1 1.8 1.6 1.6 1.8-1a7.2 7.2 0 0 0 1.8 1l-.5 1.9h2.2l.5-1.9a7.2 7.2 0 0 0 1.8-1l1.8 1 1.6-1.6-1-1.8a7.2 7.2 0 0 0 1-1.8l1.9-.5v-2.2l-1.9-.5a7.2 7.2 0 0 0-1-1.8l1-1.8-1.6-1.6-1.8 1a7.2 7.2 0 0 0-1.8-1l.5-1.9z"/><circle cx="12" cy="12" r="2.5"/></svg></summary>
+          <div id="settings-panel" class="rail-popover" role="region" aria-label="Ajustes">
+            <header class="settings-header"><div><span class="settings-eyebrow">SocialMedia</span><h2 class="rail-popover-title">Ajustes</h2></div><button id="settings-close" class="settings-close" type="button" aria-label="Cerrar ajustes">&times;</button></header>
+            <div class="settings-scroll">
+              <section class="settings-section" aria-labelledby="settings-account-title">
+                <h3 id="settings-account-title">Cuenta</h3>
+                <label class="settings-field">Cuenta activa
+                  <select id="account" aria-label="Cuenta de WhatsApp"></select>
+                </label>
+              </section>
+              <section class="settings-section" aria-labelledby="settings-chats-title">
+                <h3 id="settings-chats-title">Chats</h3>
+                <label class="settings-field">Tema
+                  <select id="theme" aria-label="Tema">
+                    <option value="dark">Oscuro</option>
+                    <option value="system">Sistema</option>
+                    <option value="light">Claro</option>
+                  </select>
+                </label>
+                <label class="settings-switch"><span><strong>Corrección ortográfica</strong><small>Revisar el texto al escribir mensajes</small></span><input id="settings-spellcheck" type="checkbox"></label>
+                <label class="settings-switch"><span><strong>Enter para enviar</strong><small>Desactívalo para usar Ctrl o Cmd + Enter</small></span><input id="settings-enter-send" type="checkbox"></label>
+                <fieldset class="settings-wallpaper"><legend>Fondo del chat</legend><div class="settings-swatches" role="group" aria-label="Fondo del chat"><label><input type="radio" name="wallpaper" value="default"><span class="settings-swatch settings-swatch-default" title="Predeterminado"></span><small>Original</small></label><label><input type="radio" name="wallpaper" value="sand"><span class="settings-swatch settings-swatch-sand" title="Arena"></span><small>Arena</small></label><label><input type="radio" name="wallpaper" value="sage"><span class="settings-swatch settings-swatch-sage" title="Salvia"></span><small>Salvia</small></label><label><input type="radio" name="wallpaper" value="slate"><span class="settings-swatch settings-swatch-slate" title="Pizarra"></span><small>Pizarra</small></label></div></fieldset>
+              </section>
+              <section class="settings-section settings-shortcuts" aria-labelledby="settings-shortcuts-title"><h3 id="settings-shortcuts-title">Atajos</h3><p>Enter envía cuando está activado. Ctrl o Cmd + Enter envía cuando está desactivado. Shift + Enter añade una línea. Esc cierra este panel.</p></section>
+            </div>
+            <div class="settings-footer"><p id="settings-logout-error" role="alert" hidden></p><button id="settings-logout" type="button">Cerrar sesión</button></div>
           </div>
         </details>
       </div>

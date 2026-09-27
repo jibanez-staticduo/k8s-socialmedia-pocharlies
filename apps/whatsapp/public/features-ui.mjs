@@ -22,6 +22,7 @@ export const FEATURE_CONTRACT = Object.freeze({
   contactCreate: { method: 'POST', path: '/api/contacts', body: 'account, phone, displayName' },
   groupCreate: { method: 'POST', path: '/api/groups', body: 'account, name, participants[]' },
   groupMember: { method: 'POST', path: '/api/groups/action', body: 'account, chat, action=add|remove|promote|demote, participant' },
+  groupUpdate: { method: 'POST', path: '/api/groups/action', body: 'account, chat, action=subject|description, value' },
   list: { method: 'GET/POST', path: '/api/lists', response: 'GET lists[]; POST accepts action=list, list, chat|id' },
   starred: { method: 'GET', path: '/api/favorites/starred', response: 'items[] with id, messageId, chatId, text, timestamp' },
   share: { method: 'POST', path: '/api/messages/compose', body: 'account, chat, kind=contact|poll|event, payload' },
@@ -109,7 +110,9 @@ export function findList(localState, listId) {
 export function presenceLabel(value, locale = 'es-ES', now = new Date()) {
   const source = value && typeof value === 'object' ? value : {};
   const presence = text(source.presence || source.status || source.state).toLowerCase();
-  if (source.online === true || ['online', 'available', 'composing', 'recording', 'paused'].includes(presence)) return 'En línea';
+  if (presence === 'composing') return 'Escribiendo…';
+  if (presence === 'recording') return 'Grabando audio…';
+  if (source.online === true || ['online', 'available', 'paused'].includes(presence)) return 'En línea';
   const lastSeen = source.lastSeen || source.last_seen || source.lastSeenAt;
   const date = lastSeen == null ? null : new Date(typeof lastSeen === 'number' && lastSeen < 1e12 ? lastSeen * 1000 : lastSeen);
   if (date && !Number.isNaN(date.getTime())) {
@@ -123,6 +126,27 @@ export function visiblePresenceLabel(value, locale = 'es-ES', now = new Date()) 
   if (!value || value.available !== true) return '';
   const label = presenceLabel(value, locale, now);
   return label === 'Estado no disponible' ? '' : label;
+}
+
+const SHORTCUTS = Object.freeze({
+  'CS:f': 'search', 'CA:n': 'new-chat', 'CAS:n': 'new-group',
+  'A:i': 'info', 'A:a': 'attach', 'CA:e': 'emoji',
+  'CAS:u': 'unread', 'CAS:m': 'mute', 'CAS:e': 'archive', 'CAS:p': 'pin',
+});
+
+/** A shortcut must never hijack typing, IME input, or a dialog. */
+export function featureShortcut(event, { account = '', chat = '', modalOpen = false } = {}) {
+  const target = event?.target;
+  if (!account || modalOpen || event?.defaultPrevented || event?.repeat || event?.isComposing || event?.key === 'Process' || event?.metaKey ||
+      target?.isContentEditable || target?.closest?.('input, textarea, select, [contenteditable], [role="dialog"]')) return '';
+  const prefix = `${event.ctrlKey ? 'C' : ''}${event.altKey ? 'A' : ''}${event.shiftKey ? 'S' : ''}`;
+  const action = SHORTCUTS[`${prefix}:${text(event.key).toLowerCase()}`] || '';
+  return chat || ['search', 'new-chat', 'new-group'].includes(action) ? action : '';
+}
+
+export function hasOpenBlockingDialog(documentRef) {
+  return [...(documentRef?.querySelectorAll?.('[role="dialog"][aria-modal="true"]') || [])]
+    .some(dialog => !dialog.closest?.('[hidden]'));
 }
 
 /** Only authenticated, same-origin app media paths are accepted for photos. */
@@ -150,8 +174,8 @@ export function safeWebUrl(value, baseUrl = 'http://localhost/') {
   }
 }
 
-export function canMarkVisibleRead({ hidden = false, visibilityState = 'visible', account = '', chat = '', lastMarked = '' } = {}) {
-  return Boolean(account && chat && !hidden && visibilityState === 'visible' && `${account}:${chat}` !== lastMarked);
+export function canMarkVisibleRead({ hidden = false, visibilityState = 'visible', account = '', chat = '', lastMarked = '', manualUnreadKey = '' } = {}) {
+  return Boolean(account && chat && !hidden && visibilityState === 'visible' && `${account}:${chat}` !== lastMarked && `${account}:${chat}` !== manualUnreadKey);
 }
 
 /** Return only incoming messages observed after the per-chat notification baseline. */
@@ -380,6 +404,7 @@ export function installFeatureUI({
     replyTarget: null,
     currentView: store.read(state.account).view,
     readPending: new Set(),
+    manualUnreadKey: '',
     generation: 0,
     lastFocus: null,
     chatListBaseline: new Map(),
@@ -599,11 +624,21 @@ export function installFeatureUI({
     identity.append(photo, copy);
     modal.body.append(identity);
     if (isGroup) {
-      if (info.description || info.desc) modal.body.append(node('p', 'feature-description', info.description || info.desc));
+      const about = node('p', 'feature-description', info.description || info.desc || 'Sin descripción');
+      modal.body.append(about);
+      const capabilities = result.capabilities || info.capabilities || {};
+      if (bool(capabilities.editInfo)) {
+        const edit = node('div', 'feature-group-edit-actions');
+        for (const [label, action] of [['Editar asunto', 'subject'], ['Editar descripción', 'description']]) {
+          const control = button(documentRef, label, 'feature-button subtle');
+          control.onclick = () => openGroupEdit(action, action === 'subject' ? info.subject || info.name : info.description || info.desc || '');
+          edit.append(control);
+        }
+        modal.body.append(edit);
+      }
       addSection(modal.body, `Miembros${members.length ? ` · ${members.length}` : ''}`);
       if (!members.length) modal.body.append(node('p', 'feature-muted', 'No hay miembros disponibles para esta cuenta.'));
       else for (const member of members) renderMember(member, { ...info, capabilities: result.capabilities || info.capabilities }, modal.body);
-      const capabilities = result.capabilities || info.capabilities || {};
       if (bool(capabilities.manageMembers)) {
         const addMember = button(documentRef, 'Añadir miembro', 'feature-button primary');
         addMember.onclick = () => openMemberForm();
@@ -648,6 +683,29 @@ export function installFeatureUI({
       actions.append(control);
     }
     modal.body.append(actions);
+  }
+
+  function openGroupEdit(action, previous) {
+    if (!runtime.chat || !['subject', 'description'].includes(action)) return;
+    const subject = action === 'subject';
+    const modal = openModal(subject ? 'Editar asunto' : 'Editar descripción');
+    const entry = field(documentRef, subject ? 'Asunto del grupo' : 'Descripción del grupo', subject ? 'text' : 'textarea', 'value', text(previous));
+    entry.input.maxLength = subject ? 255 : 4096;
+    entry.input.required = true;
+    const save = button(documentRef, 'Guardar', 'feature-button primary');
+    save.type = 'submit';
+    const form = node('form', 'feature-form');
+    form.append(entry.wrapper, save);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const value = entry.input.value.trim();
+      if (!value || value === text(previous).trim()) { if (!value) entry.input.focus(); return; }
+      save.disabled = true;
+      const result = await mutate('/api/groups/action', { action, value }, { refreshChats: subject, success: subject ? 'Asunto actualizado.' : 'Descripción actualizada.' });
+      if (result && runtime.modal?.body === modal.body) { closeModal(); void openInfo(); }
+      else if (runtime.modal?.body === modal.body) save.disabled = false;
+    };
+    modal.body.append(form);
   }
 
   function openMemberForm() {
@@ -836,9 +894,27 @@ export function installFeatureUI({
       if (!action) {
         action = button(documentRef, '⋯', 'feature-message-action');
         action.setAttribute('aria-label', 'Acciones del mensaje');
-        action.onclick = event => { event.stopPropagation(); openMessageActions(message); };
         bubble.append(action);
       }
+      action.onclick = event => { event.stopPropagation(); openMessageActions(message); };
+      const quoted = bubble.querySelector('.message-reply-reference[data-reply-to-message-id]');
+      if (quoted) quoted.onclick = async event => {
+        event.stopPropagation();
+        const context = { account: runtime.account, chat: runtime.chat, generation: runtime.generation };
+        const originalId = text(message.replyToMessageId);
+        const original = runtime.currentMessages.find(item => text(item.id) === originalId || text(item.waMessageId) === originalId);
+        const targetId = text(original?.id || originalId);
+        if (original && targetId !== id) {
+          const target = [...documentRef.querySelectorAll('#messages [data-message-id]')].find(item => item.dataset.messageId === targetId);
+          if (target) { target.tabIndex = -1; target.scrollIntoView?.({ block: 'center' }); target.focus?.({ preventScroll: true }); return; }
+        }
+        try {
+          const found = await showHistoricalMessage(originalId);
+          if (!found && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation) toast('No se pudo mostrar el mensaje citado.', 'error');
+        } catch (error) {
+          if (runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation) toast(error.message || 'No se pudo mostrar el mensaje citado.', 'error');
+        }
+      };
       let selector = bubble.querySelector('.feature-message-select');
       if (runtime.selectedMessageIds.size) {
         if (!selector) {
@@ -944,6 +1020,15 @@ export function installFeatureUI({
     const actions = node('div', 'feature-action-grid');
     const add = (label, handler, className = 'feature-button subtle') => { const item = button(documentRef, label, className); item.onclick = () => handler(message); actions.append(item); };
     add('Responder', item => { closeModal(); replyTo(item); });
+    if (text(message.text ?? message.content).trim()) add('Copiar texto', async item => {
+      const context = { account: runtime.account, chat: runtime.chat, generation: runtime.generation };
+      closeModal();
+      try {
+        if (!windowRef?.navigator?.clipboard?.writeText) throw new Error('El portapapeles no está disponible en este navegador.');
+        await windowRef.navigator.clipboard.writeText(text(item.text ?? item.content));
+        if (runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation) toast('Texto copiado.', 'success');
+      } catch (error) { if (runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation) toast(error.message || 'No se pudo copiar el texto.', 'error'); }
+    });
     add('Reaccionar', item => { closeModal(); openReactionPicker(item); });
     add('Reenviar', item => { closeModal(); openForwardPicker([text(item.id)]); });
     add('Seleccionar', item => { closeModal(); toggleMessageSelected(item.id, true); });
@@ -955,17 +1040,23 @@ export function installFeatureUI({
     modal.body.append(actions);
   }
 
-  async function openChatAction(action) {
+  async function openChatAction(action, desiredValue = null) {
     if (!runtime.chat) return;
     if (action === 'read') {
       const unread = Number(runtime.selectedChat?.unread) > 0 || bool(runtime.selectedChat?.unread);
+      if (desiredValue === true && unread) return;
+      const unreadKey = `${runtime.account}:${runtime.chat}`;
+      if (!unread) runtime.manualUnreadKey = unreadKey;
+      else runtime.manualUnreadKey = '';
       const result = await mutate('/api/chat-actions', { action: unread ? 'read' : 'unread' }, { refreshChats: true, success: unread ? 'Chat marcado como leído.' : 'Chat marcado como no leído.' });
+      if (!result && runtime.manualUnreadKey === unreadKey) runtime.manualUnreadKey = '';
       if (result) updateChatFlags(runtime.chat, { unread: unread ? 0 : 1 });
       return;
     }
     const fieldName = { archive: 'archived', pin: 'pinned', mute: 'muted', favorite: 'favorite' }[action];
     if (!fieldName) return;
     const currentValue = { archived: chatIsArchived(runtime.selectedChat, prefs()), pinned: chatIsPinned(runtime.selectedChat, prefs()), muted: chatIsMuted(runtime.selectedChat, prefs()), favorite: chatIsFavorite(runtime.selectedChat, prefs()) }[fieldName];
+    if (desiredValue !== null && currentValue === desiredValue) return;
     const providerAction = action === 'archive' ? (currentValue ? 'unarchive' : 'archive') : action === 'pin' ? (currentValue ? 'unpin' : 'pin') : action === 'mute' ? (currentValue ? 'unmute' : 'mute') : (currentValue ? 'unfavorite' : 'favorite');
     const result = await mutate('/api/chat-actions', { action: providerAction }, { refreshChats: true, success: `${fieldName === 'archived' ? (!currentValue ? 'Chat archivado.' : 'Chat desarchivado.') : 'Preferencia actualizada.'}` });
     if (result) updateChatFlags(runtime.chat, { [fieldName]: !currentValue });
@@ -1041,9 +1132,10 @@ export function installFeatureUI({
     await loadPage('');
   }
 
-  function openNewChat() {
-    const modal = openModal('Nuevo chat', { wide: true });
+  function openNewChat(initialType = 'chat') {
+    const modal = openModal(initialType === 'group' ? 'Nuevo grupo' : 'Nuevo chat', { wide: true });
     const type = documentRef.createElement('select'); type.setAttribute('aria-label', 'Tipo de acción'); type.append(option(documentRef, 'Iniciar chat', 'chat'), option(documentRef, 'Nuevo contacto', 'contact'), option(documentRef, 'Nuevo grupo', 'group'));
+    type.value = initialType === 'group' ? 'group' : 'chat';
     const form = node('form', 'feature-form');
     const name = field(documentRef, 'Nombre', 'text', 'name');
     const address = field(documentRef, 'Número o identificador', 'text', 'address');
@@ -1198,7 +1290,7 @@ export function installFeatureUI({
   function addHeaderControls() {
     const sidebarHeader = documentRef.querySelector('.chat-sidebar-header');
     const sidebarActions = node('div', 'chat-sidebar-actions');
-    const newChat = button(documentRef, '+', 'sidebar-action sidebar-action-new'); newChat.id = 'feature-new-chat'; newChat.setAttribute('aria-label', 'Nuevo chat'); newChat.title = 'Nuevo chat'; newChat.onclick = openNewChat;
+    const newChat = button(documentRef, '+', 'sidebar-action sidebar-action-new'); newChat.id = 'feature-new-chat'; newChat.setAttribute('aria-label', 'Nuevo chat'); newChat.title = 'Nuevo chat'; newChat.onclick = () => openNewChat();
     const lists = button(documentRef, '☆', 'sidebar-action sidebar-action-favorites'); lists.id = 'feature-lists'; lists.setAttribute('aria-label', 'Favoritos y listas'); lists.title = 'Favoritos y listas'; lists.onclick = openLists;
     sidebarActions.append(newChat, lists); sidebarHeader?.append(sidebarActions);
     const search = documentRef.querySelector('.chat-sidebar > .search');
@@ -1288,14 +1380,14 @@ export function installFeatureUI({
   function accountChanged(account) {
     clearInterval(runtime.presenceTimer); runtime.presenceTimer = null;
     runtime.closeAttachMenu?.();
-    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView();
+    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView();
   }
 
   async function markVisibleRead() {
     const chat = runtime.chat;
     const account = runtime.account;
     const key = `${account}:${chat}`;
-    if (!canMarkVisibleRead({ hidden: documentRef.hidden, visibilityState: documentRef.visibilityState, account, chat }) || runtime.readPending.has(key)) return;
+    if (!canMarkVisibleRead({ hidden: documentRef.hidden, visibilityState: documentRef.visibilityState, account, chat, manualUnreadKey: runtime.manualUnreadKey }) || runtime.readPending.has(key)) return;
     if (!documentRef.body.classList.contains('chat-open')) return;
     if (!(Number(runtime.selectedChat?.unread) > 0 || bool(runtime.selectedChat?.unread))) return;
     runtime.readPending.add(key);
@@ -1307,7 +1399,7 @@ export function installFeatureUI({
   function chatChanged(chat) {
     clearInterval(runtime.presenceTimer); runtime.presenceTimer = null;
     runtime.closeAttachMenu?.();
-    closeModal(); runtime.generation += 1; runtime.selectedChat = chat; runtime.chat = text(chat?.id); runtime.currentMessages = []; runtime.currentMessageIds.clear(); runtime.selectedMessageIds.clear(); clearReply(); enhanceMessages();
+    closeModal(); runtime.generation += 1; runtime.selectedChat = chat; runtime.chat = text(chat?.id); runtime.manualUnreadKey = ''; runtime.currentMessages = []; runtime.currentMessageIds.clear(); runtime.selectedMessageIds.clear(); clearReply(); enhanceMessages();
     if (chat?.isGroup !== true && runtime.chat) {
       const account = runtime.account; const chatId = runtime.chat; const generation = runtime.generation;
       void refreshHeaderPresence(account, chatId, generation, true);
@@ -1339,6 +1431,18 @@ export function installFeatureUI({
   }
 
   documentRef.addEventListener?.('visibilitychange', () => { if (!documentRef.hidden) { void markVisibleRead(); if (runtime.chat && runtime.selectedChat?.isGroup !== true) void refreshHeaderPresence(runtime.account, runtime.chat, runtime.generation); } });
+  documentRef.addEventListener?.('keydown', event => {
+    const action = featureShortcut(event, { account: runtime.account, chat: runtime.chat, modalOpen: Boolean(runtime.modal) || hasOpenBlockingDialog(documentRef) || Boolean(documentRef.querySelector('.rail-settings[open]')) || documentRef.getElementById('feature-attach-menu')?.hidden === false });
+    if (!action) return;
+    event.preventDefault();
+    if (action === 'search') documentRef.getElementById('search')?.focus?.();
+    else if (action === 'new-chat') openNewChat();
+    else if (action === 'new-group') openNewChat('group');
+    else if (action === 'info') void openInfo();
+    else if (action === 'attach') documentRef.getElementById('attach')?.click?.();
+    else if (action === 'emoji') documentRef.getElementById('feature-emoji')?.click?.();
+    else void openChatAction({ unread: 'read', mute: 'mute', archive: 'archive', pin: 'pin' }[action], true);
+  });
   windowRef?.addEventListener?.('pagehide', () => { clearInterval(runtime.presenceTimer); runtime.presenceTimer = null; });
 
   addHeaderControls();

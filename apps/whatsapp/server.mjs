@@ -19,6 +19,7 @@ import { publicMessageMetadata, publicPollResults } from './lib/message-projecti
 import { linkPreviewFromPayload } from './lib/link-preview.mjs';
 import { HermesStreamAccumulator, openSse } from './lib/hermes-stream.mjs';
 import { hermesApiBaseUrl, syncHermesModelLock } from './lib/hermes-model-lock.mjs';
+import { communityJid, communityCreateBody, communityActionBody, publicCommunity, publicCommunityList, publicLinkedGroups } from './lib/communities.mjs';
 const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
 const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
@@ -1481,6 +1482,40 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           requireSending: true,
         });
         return json(200, { account: a.accountId, contact: result, confirmed: true });
+      }
+      if (req.method === 'GET' && path === '/api/communities') {
+        const a = accountParam(url.searchParams.get('account'));
+        const result = await featureConnector(a, '/communities', { method: 'GET' });
+        return json(200, { account: a.accountId, communities: publicCommunityList(result.communities) });
+      }
+      const communityRoute = path.match(/^\/api\/communities\/([^/]+)(\/action)?$/);
+      if (req.method === 'GET' && communityRoute && !communityRoute[2]) {
+        const a = accountParam(url.searchParams.get('account'));
+        const jid = communityJid(decodeURIComponent(communityRoute[1]));
+        const result = await featureConnector(a, `/communities/${encodeURIComponent(jid)}`, { method: 'GET' });
+        const community = publicCommunity(result.community);
+        if (community.id !== jid) throw fail(502, 'Community response does not match the request');
+        const linkedGroups = publicLinkedGroups(result.linkedGroups);
+        const storedGroups = linkedGroups.length ? await query(
+          'SELECT id, wa_chat_id FROM conversations WHERE account=$1 AND is_group=true AND COALESCE(wa_chat_id,id)=ANY($2::text[])',
+          [a.accountId, linkedGroups.map(group => group.id)]
+        ) : [];
+        const chatIds = new Map(storedGroups.map(group => [group.wa_chat_id || group.id, group.id]));
+        return json(200, { account: a.accountId, community, linkedGroups: linkedGroups.map(group => ({ ...group, chatId: chatIds.get(group.id) || null })) });
+      }
+      if (req.method === 'POST' && path === '/api/communities') {
+        const body = await bodyJSON(req); const a = accountParam(body.account);
+        const result = await featureConnector(a, '/communities', { method: 'POST', body: communityCreateBody(body), requireSending: true });
+        return json(201, { account: a.accountId, community: publicCommunity(result.community), confirmed: true });
+      }
+      if (req.method === 'POST' && communityRoute?.[2]) {
+        const body = await bodyJSON(req); const a = accountParam(body.account);
+        const jid = communityJid(decodeURIComponent(communityRoute[1]));
+        const action = communityActionBody(body);
+        if (action.groupJid === jid) throw fail(400, 'A community cannot be linked to itself');
+        const result = await featureConnector(a, `/communities/${encodeURIComponent(jid)}/action`, { method: 'POST', body: action, requireSending: true });
+        if (result.communityId !== jid || result.action !== action.action) throw fail(502, 'Community action is not confirmed');
+        return json(200, { account: a.accountId, communityId: jid, action: action.action, confirmed: true });
       }
       if (req.method === 'POST' && (path === '/api/groups' || path === '/api/groups/create')) {
         const body = await bodyJSON(req); const a = accountParam(body.account); const name = required(body.name || body.subject, 'name', 255);

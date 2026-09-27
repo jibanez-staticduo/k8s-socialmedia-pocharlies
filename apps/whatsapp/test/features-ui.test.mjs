@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
   FeatureStore,
+  featureShortcut,
+  hasOpenBlockingDialog,
   attachmentItems,
   canMarkVisibleRead,
   chatIsArchived,
@@ -143,6 +145,8 @@ test('visible read marking is scoped and never fires for hidden/background chats
   assert.equal(canMarkVisibleRead({ account: 'alpha', chat: 'chat', hidden: true, visibilityState: 'hidden', lastMarked: '' }), false);
   assert.equal(canMarkVisibleRead({ account: 'alpha', chat: 'chat', hidden: false, visibilityState: 'hidden', lastMarked: '' }), false);
   assert.equal(canMarkVisibleRead({ account: 'alpha', chat: 'chat', hidden: false, visibilityState: 'visible', lastMarked: 'alpha:chat' }), false);
+  assert.equal(canMarkVisibleRead({ account: 'alpha', chat: 'chat', manualUnreadKey: 'alpha:chat' }), false);
+  assert.equal(canMarkVisibleRead({ account: 'beta', chat: 'chat', manualUnreadKey: 'alpha:chat' }), true);
   assert.equal(canMarkVisibleRead({ account: '', chat: 'chat', hidden: false, visibilityState: 'visible', lastMarked: '' }), false);
 });
 
@@ -163,6 +167,8 @@ test('presence and photo helpers do not fabricate private data or allow external
   assert.equal(presenceLabel({}), 'Estado no disponible');
   assert.equal(presenceLabel({ online: true }), 'En línea');
   assert.equal(presenceLabel({ state: 'available', available: true }), 'En línea');
+  assert.equal(visiblePresenceLabel({ state: 'composing', online: true, available: true }), 'Escribiendo…');
+  assert.equal(visiblePresenceLabel({ state: 'recording', online: true, available: true }), 'Grabando audio…');
   assert.equal(presenceLabel({ state: 'unavailable', available: true }), 'Desconectado');
   assert.match(presenceLabel({ lastSeen: '2026-09-23T09:00:00Z' }), /Última vez/);
   assert.equal(visiblePresenceLabel({ state: 'online', available: false }), '');
@@ -171,6 +177,43 @@ test('presence and photo helpers do not fabricate private data or allow external
   assert.equal(safePhotoUrl('https://cdn.example.test/avatar.jpg', 'https://app.example.test/'), '');
   assert.equal(safePhotoUrl('/api/profile/photo?id=1', 'https://app.example.test/'), 'https://app.example.test/api/profile/photo?id=1');
   assert.equal(safePhotoUrl('javascript:alert(1)', 'https://app.example.test/'), '');
+});
+
+test('shortcuts honor exact modifiers and leave typing, dialogs and IME alone', () => {
+  const key = (name, modifiers = {}) => ({ key: name, ...modifiers, target: { closest: () => null } });
+  const context = { account: 'alpha', chat: 'alpha-direct' };
+  assert.equal(featureShortcut(key('F', { ctrlKey: true, shiftKey: true }), context), 'search');
+  assert.equal(featureShortcut(key('n', { ctrlKey: true, altKey: true }), { account: 'alpha' }), 'new-chat');
+  assert.equal(featureShortcut(key('N', { ctrlKey: true, altKey: true, shiftKey: true }), { account: 'alpha' }), 'new-group');
+  for (const [letter, modifiers, expected] of [
+    ['i', { altKey: true }, 'info'], ['a', { altKey: true }, 'attach'],
+    ['e', { ctrlKey: true, altKey: true }, 'emoji'],
+    ['u', { ctrlKey: true, altKey: true, shiftKey: true }, 'unread'],
+    ['m', { ctrlKey: true, altKey: true, shiftKey: true }, 'mute'],
+    ['e', { ctrlKey: true, altKey: true, shiftKey: true }, 'archive'],
+    ['p', { ctrlKey: true, altKey: true, shiftKey: true }, 'pin'],
+  ]) assert.equal(featureShortcut(key(letter, modifiers), context), expected);
+  assert.equal(featureShortcut(key('i', { altKey: true }), { account: 'alpha' }), '');
+  assert.equal(featureShortcut(key('i', { altKey: true }), { ...context, modalOpen: true }), '');
+  assert.equal(featureShortcut(key('i', { altKey: true, isComposing: true }), context), '');
+  assert.equal(featureShortcut(key('i', { altKey: true, repeat: true }), context), '');
+  assert.equal(featureShortcut(key('i', { altKey: true, metaKey: true }), context), '');
+  assert.equal(featureShortcut({ ...key('i', { altKey: true }), target: { closest: () => ({ tagName: 'TEXTAREA' }) } }, context), '');
+  assert.equal(featureShortcut(key('i', { altKey: true }), { chat: 'alpha-direct' }), '');
+});
+
+test('a visible modal dialog blocks shortcuts even when focus remains on a button behind it', () => {
+  const behind = { closest: () => null };
+  const shortcut = { key: 'e', ctrlKey: true, altKey: true, shiftKey: true, target: behind };
+  const context = { account: 'alpha', chat: 'alpha-direct' };
+  const hiddenDialog = { closest: selector => selector === '[hidden]' ? { className: 'communities-shade' } : null };
+  const openDialog = { closest: () => null };
+  const documentRef = { querySelectorAll: () => [hiddenDialog] };
+  assert.equal(hasOpenBlockingDialog(documentRef), false);
+  assert.equal(featureShortcut(shortcut, { ...context, modalOpen: hasOpenBlockingDialog(documentRef) }), 'archive');
+  documentRef.querySelectorAll = () => [openDialog];
+  assert.equal(hasOpenBlockingDialog(documentRef), true);
+  assert.equal(featureShortcut(shortcut, { ...context, modalOpen: hasOpenBlockingDialog(documentRef) }), '');
 });
 
 test('attachment gallery keeps message ownership and separates media from documents', () => {

@@ -128,6 +128,17 @@ test('parseRichText renders supported WhatsApp formatting without treating HTML 
   assert.equal(values(parseRichText('<img src=x onerror=alert(1)>')), '<img src=x onerror=alert(1)>');
 });
 
+test('quoted messages expose an accessible target without changing the preview text', () => {
+  const bubble = renderMessage({ id: 'answer', text: 'Respuesta', replyToMessageId: 'original', replyPreview: { available: true, type: 'TEXT', text: 'Hola', senderName: 'Ana' } }, { document: fakeDocument });
+  const quote = bubble.querySelector('.message-reply-reference');
+  assert.equal(quote.tagName, 'BUTTON');
+  assert.equal(quote.type, 'button');
+  assert.equal(quote.dataset.replyToMessageId, 'original');
+  assert.equal(quote.attributes.get('aria-label'), 'Ir al mensaje citado');
+  assert.match(treeText(quote), /Ana/);
+  assert.match(treeText(quote), /Hola/);
+});
+
 test('parseRichText preserves unmatched and boundary delimiters', () => {
   assert.equal(values(parseRichText('2 * 3, foo_bar_baz, *sin cierre')), '2 * 3, foo_bar_baz, *sin cierre');
   assert.equal(values(parseRichText('* valido *')), '* valido *');

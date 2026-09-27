@@ -1560,6 +1560,7 @@ button.message-poll-option:hover, .message-poll-option.is-selected { border-colo
 .message-reply-sender { overflow: hidden; color: var(--accent-strong); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .message-kind-line { display: inline-flex; align-items: center; min-width: 0; gap: 6px; color: var(--muted-strong); }
 .message-kind-icon { width: 16px; height: 16px; flex: none; }
+.chat-muted { display: inline-block; width: 15px; height: 15px; flex: none; overflow: hidden; font-size: 0; background: var(--muted); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M10 5 6 9H3v6h3l4 4V5Zm5 4 6 6m0-6-6 6' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
 .message-kind-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message > .message-kind-line { padding: 2px 0; }
 .message-edited { font-size: 11px; opacity: .7; }

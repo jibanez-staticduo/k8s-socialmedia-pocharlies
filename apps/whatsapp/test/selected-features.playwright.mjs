@@ -550,6 +550,9 @@ function chatLocator(page, name) {
 
 async function openChat(page, name) {
   await closeDialog(page);
+  if (await page.locator('.rail-settings').evaluate(element => element.open)) {
+    await page.locator('#settings-close').click();
+  }
   await chatLocator(page, name).click();
   await page.waitForFunction(expected => document.querySelector('#chat-title')?.textContent.includes(expected), name);
   await page.waitForFunction(() => document.querySelectorAll('#messages .message').length > 0);

@@ -1,4 +1,5 @@
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
+import { CommunityService, CommunityError } from './novedades-communities';
 import { SendAlreadyClaimedError } from './send-idempotency';
 /**
  * WhatsApp connector client backed by @whiskeysockets/baileys.
@@ -2672,6 +2673,26 @@ export class BaileysClient extends EventEmitter {
     const name = this.contactNameFor(found.jid, id) || normalized.phoneE164;
     await ensureEmptyConversation(id, name);
     return { id, name, phone: normalized.phoneE164 };
+  }
+
+  private communities(): CommunityService {
+    if (!this.sock || !this.isConnected()) {
+      throw new CommunityError('COMMUNITY_DISCONNECTED', 'WhatsApp account is not connected', 503);
+    }
+    return new CommunityService(this.sock);
+  }
+
+  async listCommunities() {
+    return this.communities().list();
+  }
+  async getCommunity(jid: string) {
+    return this.communities().detail(jid);
+  }
+  async createCommunity(input: unknown) {
+    return this.communities().create(input);
+  }
+  async communityAction(jid: string, input: unknown) {
+    return this.communities().action(jid, input);
   }
 
   async getGroupInfo(groupId: string): Promise<any> {

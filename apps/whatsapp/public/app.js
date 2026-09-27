@@ -1,4 +1,11 @@
 'use strict';
+let mergeMessages;
+let mergeRecentMessages;
+let pinnedFirst;
+let shouldSubmitMessageKey;
+const historyReady = import('./chat-history.mjs').then(module => {
+  ({mergeMessages, mergeRecentMessages, pinnedFirst, shouldSubmitMessageKey} = module);
+});
 const $ = id => document.getElementById(id);
 let messageRenderer = null;
 const rendererReady = import('./message-render.mjs').then(module => { messageRenderer = module; return module; });
@@ -26,7 +33,8 @@ const assistantReady = draftReady.catch(() => null).then(() => import('./assista
   return assistant;
 }).catch(err => { $('ai-root').textContent = `No se pudo cargar el asistente: ${err.message}`; });
 let featureUI = null;
-const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
+let communitiesUI = null;
+const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, historyCursor: null, historyInitialized: false, loadingOlder: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
 historyNotice.id = 'history-notice';
@@ -34,9 +42,28 @@ historyNotice.hidden = true;
 historyNotice.append(node('span', '', 'Mostrando mensajes antiguos. '));
 const showRecent = node('button', 'feature-button', 'Volver a recientes');
 showRecent.type = 'button';
-showRecent.onclick = () => { state.historyMode = false; loadMessages(); };
+showRecent.onclick = () => { state.historyMode = false; historyNotice.hidden = true; resetMessageHistory(); state.signature = ''; $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); loadMessages(); };
 historyNotice.append(showRecent);
 $('messages').before(historyNotice);
+const olderNotice = node('div', 'notice');
+olderNotice.hidden = true;
+const loadOlderButton = node('button', 'feature-button', 'Cargar mensajes anteriores');
+loadOlderButton.type = 'button';
+loadOlderButton.onclick = () => { void loadOlderMessages(); };
+olderNotice.append(loadOlderButton);
+$('messages').before(olderNotice);
+function updateOlderControl() {
+  olderNotice.hidden = !state.chat || !state.historyCursor;
+  loadOlderButton.disabled = state.loadingOlder;
+  loadOlderButton.textContent = state.loadingOlder ? 'Cargando mensajes anteriores…' : 'Cargar mensajes anteriores';
+}
+function resetMessageHistory() {
+  state.messages = [];
+  state.historyCursor = null;
+  state.historyInitialized = false;
+  state.loadingOlder = false;
+  updateOlderControl();
+}
 function error(message = '') { $('error').textContent = message; $('error').hidden = !message; }
 async function api(path, data, onEvent) {
   const signal = onEvent ? AbortSignal.timeout(240000) : undefined;
@@ -107,7 +134,7 @@ function renderChats() {
   const search = $('search').value.trim().toLocaleLowerCase();
   const filter = chatFilterValue();
   state.chatFilter = filter;
-  const chats = state.chats.filter(chat => chatMatchesFilter(chat, filter) && `${chat.name || ''} ${chat.preview || ''}`.toLocaleLowerCase().includes(search));
+  const chats = pinnedFirst(state.chats.filter(chat => chatMatchesFilter(chat, filter) && `${chat.name || ''} ${chat.preview || ''}`.toLocaleLowerCase().includes(search)));
   $('chat-count').textContent = String(state.chats.length);
   $('chats').replaceChildren();
   for (const chat of chats) {
@@ -118,6 +145,12 @@ function renderChats() {
     const details = node('span', 'chat-details');
     const nameRow = node('span', 'chat-name-row');
     nameRow.append(node('span', 'chat-name', chat.name || chat.id));
+    if (chat.muted === true || chat.isMuted === true) {
+      const muted = node('span', 'chat-muted', 'Silenciado');
+      muted.setAttribute('aria-label', 'Chat silenciado');
+      muted.title = 'Chat silenciado';
+      nameRow.append(muted);
+    }
     if (chat.timestamp && messageRenderer) { const label = messageRenderer.formatChatListTime(chat.timestamp); if (label) { const time = node('time', 'chat-time', label); const date = new Date(typeof chat.timestamp === 'number' && chat.timestamp < 1e12 ? chat.timestamp * 1000 : chat.timestamp); if (!Number.isNaN(date.getTime())) time.dateTime = date.toISOString(); nameRow.append(time); } }
     details.append(nameRow, node('span', 'chat-preview', chat.preview || 'Sin mensajes disponibles'));
     button.append(details);
@@ -311,18 +344,44 @@ async function loadMessages() {
   const requestToken = ++state.messageRequestToken;
   try {
     await rendererReady;
-    const result = await api(query('/api/messages', {chat: ctx.chat}));
+    const result = await api(query('/api/messages', {chat: ctx.chat, limit: 100}));
     if (!current(ctx) || state.historyMode || requestToken !== state.messageRequestToken) return;
     const messages = Array.isArray(result.messages) ? result.messages : [];
-    state.messages = messages;
+    state.messages = mergeRecentMessages(state.messages, messages);
+    if (!state.historyInitialized) {
+      state.historyCursor = result.nextCursor || null;
+      state.historyInitialized = true;
+      updateOlderControl();
+    }
     const key = outgoingKey(ctx.account, ctx.chat);
-    const remaining = outgoingFor(ctx.account, ctx.chat).filter(item => !messages.some(message => matchesConfirmedMessage(item, message)));
+    const remaining = outgoingFor(ctx.account, ctx.chat).filter(item => !state.messages.some(message => matchesConfirmedMessage(item, message)));
     state.outgoing.set(key, remaining);
     persistOutbox();
     renderMessages();
     historyNotice.hidden = true;
-    featureUI?.messagesChanged?.(messages);
-  } catch (err) { if (current(ctx)) error(err.message); }
+    featureUI?.messagesChanged?.(state.messages);
+  } catch (err) { if (current(ctx) && requestToken === state.messageRequestToken) error(err.message); }
+}
+async function loadOlderMessages() {
+  if (!state.chat || !state.historyCursor || state.loadingOlder) return;
+  const ctx = context();
+  const cursor = state.historyCursor;
+  state.loadingOlder = true;
+  updateOlderControl();
+  try {
+    const result = await api(query('/api/messages', {chat: ctx.chat, before: cursor, limit: 100}));
+    if (!current(ctx) || cursor !== state.historyCursor) return;
+    const pane = $('messages');
+    const previousHeight = pane.scrollHeight;
+    const previousTop = pane.scrollTop;
+    state.messages = mergeMessages(state.messages, Array.isArray(result.messages) ? result.messages : []);
+    state.historyCursor = result.nextCursor || null;
+    renderMessages();
+    pane.scrollTop = previousTop + pane.scrollHeight - previousHeight;
+    featureUI?.messagesChanged?.(state.messages);
+    error();
+  } catch (err) { if (current(ctx) && cursor === state.historyCursor) error(err.message); }
+  finally { if (current(ctx)) { state.loadingOlder = false; updateOlderControl(); } }
 }
 async function showHistoricalMessage(messageId) {
   const ctx = context();
@@ -336,6 +395,9 @@ async function showHistoricalMessage(messageId) {
     const target = messages.find(message => [message.id, message.waMessageId].some(id => String(id) === targetId || String(id) === String(messageId)));
     if (!target) throw new Error('El mensaje ya no está disponible en esta conversación.');
     state.messages = messages;
+    state.historyCursor = messages[0]?.id || null;
+    state.historyInitialized = true;
+    updateOlderControl();
     state.signature = '';
     renderMessages();
     historyNotice.hidden = false;
@@ -347,7 +409,7 @@ async function showHistoricalMessage(messageId) {
     bubble.scrollIntoView({block: 'center'});
     return true;
   } catch (err) {
-    if (current(ctx) && requestToken === state.messageRequestToken) { state.historyMode = false; void loadMessages(); }
+    if (current(ctx) && requestToken === state.messageRequestToken) { state.historyMode = false; historyNotice.hidden = true; resetMessageHistory(); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); void loadMessages(); }
     throw err;
   }
 }
@@ -391,17 +453,17 @@ async function proposeMessage() {
     updateControls();
   }
 }
-function selectChat(chat) { messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.messages = []; state.historyMode = false; historyNotice.hidden = true; state.version++; state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls(); return loadMessages(); }
+function selectChat(chat) { messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.historyMode = false; historyNotice.hidden = true; state.version++; resetMessageHistory(); state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls(); return loadMessages(); }
 $('search').oninput = renderChats; $('message').oninput = saveDraft; $('back').onclick = () => { messageRenderer?.closeMediaViewer?.(); cancelRecording(); document.body.classList.remove('chat-open'); };
 async function switchAccount(accountId) {
   if (!accountId || accountId === state.account || ![...$('account').options].some(option => option.value === accountId)) return;
   messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cancelAttachment();
   state.account = accountId; $('account').value = accountId; accountRailTools?.markActiveAccount($('account-rail'), accountId);
-  state.chat = ''; state.messages = []; state.historyMode = false; historyNotice.hidden = true; state.selectedChat = null; state.version++; state.chats = []; state.signature = '';
+  state.chat = ''; state.historyMode = false; historyNotice.hidden = true; state.selectedChat = null; state.version++; resetMessageHistory(); state.chats = []; state.signature = '';
   $('message').value = ''; resizeMessageInput(); $('chat-title').textContent = 'SocialMedia'; $('chat-subtitle').textContent = 'Selecciona un chat para empezar'; setConversationAvatar(); setAgentContext();
   $('messages').replaceChildren(node('div', 'welcome', 'Selecciona una conversación de esta cuenta.'));
   assistant?.select(context());
-  document.body.classList.remove('chat-open'); featureUI?.accountChanged?.(state.account); error(); renderChats(); updateControls(); await loadChats();
+  document.body.classList.remove('chat-open'); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); error(); renderChats(); updateControls(); await loadChats();
 }
 $('account').onchange = () => switchAccount($('account').value);
 async function sendPayload(path, payload, onSuccess, onConfirmed) { const ctx = context(); state.busy = true; error(); updateControls(); try { const body = typeof payload === 'function' ? await payload() : payload; if (!current(ctx)) return; await api(path, {...ctx, version: undefined, ...body}); onConfirmed?.(ctx); if (current(ctx)) { onSuccess?.(ctx); await Promise.all([loadMessages(), loadChats()]); } } catch (err) { if (current(ctx)) error(err.message); } finally { state.busy = false; updateControls(); } }
@@ -434,7 +496,7 @@ $('composer').onsubmit = event => {
   event.preventDefault();
   const text = $('message').value.trim();
   if ((!text && !pendingFile) || !state.sending || !state.chat) return;
-  if (state.historyMode) { state.historyMode = false; void loadMessages(); }
+  if (state.historyMode) { state.historyMode = false; resetMessageHistory(); void loadMessages(); }
   const featurePayload = featureUI?.getSendPayload?.() || {};
   const file = pendingFile?.file || null;
   if (file) {
@@ -461,7 +523,14 @@ $('composer').onsubmit = event => {
   }
   sendOptimistic(item, featurePayload.replyTo ? '/api/messages/reply' : '/api/send', {text, ...featurePayload, ...(featurePayload.replyTo ? {messageId: featurePayload.replyTo} : {})});
 };
-$('message').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !matchMedia('(pointer: coarse)').matches) { event.preventDefault(); $('composer').requestSubmit(); } };
+$('message').onkeydown = event => {
+  let enterToSend = true;
+  try { enterToSend = localStorage.getItem('wa-enter-to-send') !== 'false'; } catch {}
+  if (shouldSubmitMessageKey(event, enterToSend, matchMedia('(pointer: coarse)').matches)) {
+    event.preventDefault();
+    $('composer').requestSubmit();
+  }
+};
 function base64(blob) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(new Error('No se pudo leer el archivo.')); reader.readAsDataURL(blob); }); }
 let pendingFile = null;
 let attachmentPreviewUrl = '';
@@ -555,8 +624,9 @@ $('record').onclick = async () => {
 $('recording-stop').onclick = () => { if (state.recorder?.state === 'recording') state.recorder.stop(); }; $('recording-cancel').onclick = cancelRecording; $('recording-send').onclick = async () => { if (!state.blob || state.busy || !state.sending) return; const ctx = context(); const blob = state.blob; const token = state.recordingToken; state.recordingSendToken ||= crypto.randomUUID(); try { const data = await base64(blob); if (!current(ctx) || token !== state.recordingToken) return; await sendPayload('/api/upload', {name:`nota-de-voz.${blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'}`,mimeType:blob.type,data,voice:true,sendToken:state.recordingSendToken}, cancelRecording); } catch (err) { if (current(ctx)) error(err.message); } };
 function toggleAI(open) { $('ai-panel').hidden = !open; $('ai-toggle').setAttribute('aria-expanded', String(open)); assistant?.setOpen(open); if (!open) $('ai-toggle').focus(); }
 $('ai-toggle').onclick = () => toggleAI($('ai-panel').hidden); $('ai-close').onclick = () => toggleAI(false); document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('ai-panel').hidden) toggleAI(false); });
-const featureReady = import('./features-ui.mjs').then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
-async function init() { try { await rendererReady; await attachmentReady; await accountRailReady; await draftReady; await featureReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+const featureReady = historyReady.then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
+const communitiesReady = import('./communities-ui.mjs').then(({installCommunitiesUI}) => { communitiesUI = installCommunitiesUI({getAccount: () => state.account, api, selectChat, getChats: () => state.chats, showError: error}); return communitiesUI; }).catch(err => { error(`No se pudo cargar Comunidades: ${err.message}`); return null; });
+async function init() { try { await historyReady; await rendererReady; await attachmentReady; await accountRailReady; await draftReady; await featureReady; await communitiesReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
 let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await loadChats(); if (!document.hidden) await loadMessages(); } finally { polling = false; } }, 10000);
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
