@@ -445,6 +445,39 @@ export function pnFromLidMessage(msg: WAMessage | undefined | null): LidPnInfo |
 }
 
 /**
+ * INFRA-288 (P1 of INFRA-112): limits for the reconnect history backfill.
+ *
+ * When a Baileys socket drops, WhatsApp keeps the messages that arrived while
+ * offline only in the phone; the reconnect itself replays nothing. So on every
+ * `connection.update: open` we ask for the dropped window — bounded, never
+ * unbounded history. Pure function of env so the constructor and the tests
+ * share one reading of the flags:
+ *
+ * - WA_RECONNECT_BACKFILL_WINDOW_HOURS (default 6): how far back the dropped
+ *   window reaches. Hard defensive ceiling 24h.
+ * - WA_RECONNECT_BACKFILL_MAX_MESSAGES (default 500): total messages asked for
+ *   per burst. Hard defensive ceiling 1000.
+ *
+ * `0` or negative on either flag disables the feature entirely (zero fetches).
+ * Batch per chat is 50 — the maximum the Postgres-side history machinery
+ * (backfillHistory / messaging-history.set) handles per request.
+ */
+export function reconnectBackfillLimitsFromEnv(
+  env: NodeJS.ProcessEnv = process.env
+): { windowMs: number; maxMessages: number; batchSize: number } | null {
+  const rawHours = parseInt(env.WA_RECONNECT_BACKFILL_WINDOW_HOURS ?? '', 10);
+  const rawMax = parseInt(env.WA_RECONNECT_BACKFILL_MAX_MESSAGES ?? '', 10);
+  const hours = Number.isNaN(rawHours) ? 6 : rawHours;
+  const max = Number.isNaN(rawMax) ? 500 : rawMax;
+  if (hours <= 0 || max <= 0) return null;
+  return {
+    windowMs: Math.min(hours, 24) * 60 * 60 * 1000,
+    maxMessages: Math.min(max, 1000),
+    batchSize: 50,
+  };
+}
+
+/**
  * SC-1225: per-instance options. Both default to the legacy behaviour, so a
  * `new BaileysClient(path, key)` (the house connectors) is unchanged.
  */
@@ -507,6 +540,12 @@ export class BaileysClient extends EventEmitter {
   // import source; this flag lets Baileys fill whatever WhatsApp sends during
   // a fresh device link without treating those messages as live events.
   private readonly historySyncOnLogin = process.env.WA_HISTORY_SYNC_ON_LOGIN === 'true';
+  // INFRA-288: bounded backfill of the window dropped between a disconnect and
+  // the reconnect. null = feature off (a 0/negative flag). Read once at
+  // construction like the other WA_* knobs.
+  private readonly reconnectBackfillLimits = reconnectBackfillLimitsFromEnv();
+  private lastReconnectBackfillAt = 0;
+  private reconnectBackfillInFlight = false;
   // F1.7 honest voice — OFF by default. Enabled (with S3_PUBLIC_ENDPOINT) only
   // on the professional deployment: awaits the voice-note upload before the
   // NATS emit so the event carries a presigned audio URL synapse can
@@ -735,6 +774,13 @@ export class BaileysClient extends EventEmitter {
         // indicators to the dashboard. baileys auto-renews subscriptions
         // while the socket stays open.
         void this.subscribePresenceForActiveChats(200);
+        // INFRA-288: messages that arrived while the socket was down live only
+        // on the phone until we ask for them — pull the dropped window, bounded.
+        // Skipped when WA_HISTORY_SYNC_ON_LOGIN is on: Baileys already syncs
+        // history there. Fire-and-forget; must never break this handler.
+        void this.backfillReconnectWindow().catch(e =>
+          this.logger.warn(`reconnect backfill failed: ${e?.message || e}`)
+        );
         return;
       }
 
@@ -2367,6 +2413,97 @@ export class BaileysClient extends EventEmitter {
     }
 
     return { requested, candidates };
+  }
+
+  /**
+   * INFRA-288 (P1 INFRA-112): backfill the window dropped while the socket was
+   * down, triggered from the `connection.update: open` branch.
+   *
+   * Newer-first with a volume cap: for each chat the anchor is the NEWEST known
+   * message at or before the window start (`now - windowHours`); asking
+   * Baileys from that anchor replays the gap forward into
+   * `messaging-history.set`, which ingests it as `baileys_history_sync` while
+   * `historyBackfillRequestedUntil` is armed. Requests stop as soon as the
+   * total asked reaches WA_RECONNECT_BACKFILL_MAX_MESSAGES — never unbounded.
+   *
+   * Chain-reconnect safety: a 60s cooldown between bursts plus an in-flight
+   * flag, so flapping sockets ask for history once, not once per `open`.
+   */
+  async backfillReconnectWindow(): Promise<{ requested: number; chats: number }> {
+    // historySyncOnLogin ON means Baileys already syncs history on login —
+    // asking again would double-fetch the same window.
+    if (!this.sock || this.historySyncOnLogin || !this.reconnectBackfillLimits)
+      return { requested: 0, chats: 0 };
+    if (this.reconnectBackfillInFlight) return { requested: 0, chats: 0 };
+    const now = Date.now();
+    if (now - this.lastReconnectBackfillAt < 60_000) return { requested: 0, chats: 0 };
+    this.reconnectBackfillInFlight = true;
+    this.lastReconnectBackfillAt = now;
+
+    try {
+      const { windowMs, maxMessages, batchSize } = this.reconnectBackfillLimits;
+      const windowStart = now - windowMs;
+      await ensureHistoryTables();
+
+      // whatsapp_message_keys.conversation_id is stored namespaced (see
+      // accountKey); the wire contract speaks bare ids, stripped below. The
+      // table has no account column, so anchors are scoped through messages
+      // (m.account = this connector's account) — same pattern as the unread
+      // keys query in db-writer. Without it the MAX_MESSAGES budget would be
+      // spent on OTHER accounts' chats in the shared DB and this account's
+      // dropped window would stay unfilled.
+      const anchors = (
+        await getPool().query(
+          `SELECT DISTINCT ON (k.conversation_id)
+              k.conversation_id, k.wa_message_id, k.remote_jid, k.from_me,
+              k.participant_jid, k.message_timestamp_ms
+           FROM whatsapp_message_keys k
+           JOIN messages m ON m.wa_message_id = k.wa_message_id
+           WHERE k.message_timestamp_ms <= $1
+             AND m.account = $2
+           ORDER BY k.conversation_id, k.message_timestamp_ms DESC
+           LIMIT $3`,
+          [windowStart, connectorAccount(), 200]
+        )
+      ).rows;
+
+      let requested = 0;
+      let chats = 0;
+      for (const row of anchors) {
+        const remaining = maxMessages - requested;
+        if (remaining <= 0) break;
+        const bareConversationId = stripAccountKey(row.conversation_id);
+        const bareWaMessageId = stripAccountKey(row.wa_message_id);
+        const key: WAMessageKey = {
+          remoteJid: row.remote_jid,
+          id: bareWaMessageId,
+          fromMe: row.from_me,
+          participant: row.participant_jid || undefined,
+        };
+        // Arm the ingest window so messaging-history.set accepts the replay
+        // (same pattern as backfillHistory).
+        this.historyBackfillRequestedUntil = Date.now() + 5 * 60 * 1000;
+        await (this.sock as any).fetchMessageHistory(
+          Math.min(batchSize, remaining),
+          key,
+          Math.floor(Number(row.message_timestamp_ms) / 1000)
+        );
+        requested += Math.min(batchSize, remaining);
+        chats += 1;
+        await recordHistorySyncProgress({
+          conversationId: bareConversationId,
+          oldestMessageId: bareWaMessageId,
+          oldestTimestamp: new Date(Number(row.message_timestamp_ms)),
+          insertedCount: 0,
+          status: 'requested',
+        });
+      }
+      if (requested > 0)
+        this.logger.info(`reconnect backfill requested=${requested} chats=${chats}`);
+      return { requested, chats };
+    } finally {
+      this.reconnectBackfillInFlight = false;
+    }
   }
 
   async getHistorySyncStatus(limit: number = 200): Promise<HistorySyncState[]> {
