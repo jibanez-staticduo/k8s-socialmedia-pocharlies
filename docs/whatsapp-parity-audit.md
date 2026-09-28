@@ -103,7 +103,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
 | Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
-| Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
+| Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, browser Back/Forward between chat and list, reload after an open chat, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
 
 The global library's longest-first option orders by saved audio/video seconds,
 then timestamp and attachment ID for stable pagination. The connector records

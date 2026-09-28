@@ -507,7 +507,32 @@ async function proposeMessage() {
     updateControls();
   }
 }
-function selectChat(chat) { messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cameraController?.close(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.historyMode = false; historyNotice.hidden = true; state.version++; resetMessageHistory(); state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls(); return loadMessages(); }
+function mobileChatEntry() { return history.state?.socialMediaChat === true; }
+if (mobileChatEntry()) history.replaceState({...history.state, socialMediaChat: false}, '');
+function closeMobileChat() {
+  messageRenderer?.closeMediaViewer?.(); cancelRecording(); cameraController?.close();
+  document.body.classList.remove('chat-open');
+}
+function selectChat(chat, {fromHistory = false} = {}) {
+  messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cameraController?.close(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.historyMode = false; historyNotice.hidden = true; state.version++; resetMessageHistory(); state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls();
+  if (!fromHistory && matchMedia('(max-width: 760px)').matches) {
+    const entry = {...(typeof history.state === 'object' && history.state || {}), socialMediaChat: true, account: state.account, chat: state.chat};
+    if (mobileChatEntry()) history.replaceState(entry, '');
+    else history.pushState(entry, '');
+  }
+  return loadMessages();
+}
+window.addEventListener('popstate', event => {
+  const entry = event.state;
+  if (entry?.socialMediaChat === true && entry.account === state.account) {
+    if (entry.chat === state.chat) document.body.classList.add('chat-open');
+    else {
+      const chat = state.chats.find(item => item.id === entry.chat);
+      if (chat) void selectChat(chat, {fromHistory: true});
+      else closeMobileChat();
+    }
+  } else closeMobileChat();
+});
 let sidebarSearch = null;
 let uploadQualityUI = null;
 const uploadQualityReady = import('./upload-quality-ui.mjs').then(({installUploadQualityUI}) => {
@@ -530,13 +555,17 @@ const sidebarSearchReady = import('./sidebar-search.mjs').then(({installSidebarM
   },
   showError: error,
 }); return sidebarSearch; }).catch(err => { error(`No se pudo cargar la b\u00fasqueda: ${err.message}`); return null; });
-$('search').oninput = () => { renderChats(); sidebarSearch?.changed(); }; $('message').oninput = saveDraft; $('back').onclick = () => { messageRenderer?.closeMediaViewer?.(); cancelRecording(); cameraController?.close(); document.body.classList.remove('chat-open'); };
+$('search').oninput = () => { renderChats(); sidebarSearch?.changed(); }; $('message').oninput = saveDraft; $('back').onclick = () => {
+  if (mobileChatEntry()) history.back();
+  else closeMobileChat();
+};
 async function switchAccount(accountId) {
   if (!accountId || accountId === state.account || ![...$('account').options].some(option => option.value === accountId)) return;
   const settings = document.querySelector('.rail-settings');
   if (settings) settings.open = false;
   messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cameraController?.close(); cancelAttachment();
   state.account = accountId; $('account').value = accountId; accountRailTools?.markActiveAccount($('account-rail'), accountId);
+  if (mobileChatEntry()) history.replaceState({...history.state, socialMediaChat: false}, '');
   state.chat = ''; state.historyMode = false; historyNotice.hidden = true; state.selectedChat = null; state.version++; resetMessageHistory(); state.chats = []; state.signature = '';
   $('message').value = ''; resizeMessageInput(); $('chat-title').textContent = 'SocialMedia'; $('chat-subtitle').textContent = 'Selecciona un chat para empezar'; setConversationAvatar(); setAgentContext();
   $('messages').replaceChildren(node('div', 'welcome', 'Selecciona una conversación de esta cuenta.'));

@@ -121,6 +121,12 @@ try {
   await page.waitForFunction(() => document.body.classList.contains('chat-open'));
   state = await geometry('conversation');
   assert(state.conversation.width >= state.width - 1, `Expected full-width conversation: ${JSON.stringify(state)}`);
+  assert.equal(await page.evaluate(() => history.state?.socialMediaChat), true);
+  await page.goBack();
+  await page.waitForFunction(() => !document.body.classList.contains('chat-open'));
+  await page.goForward();
+  await page.waitForFunction(() => document.body.classList.contains('chat-open'));
+  assert.equal(await page.locator('#chat-title').textContent(), 'Bruno');
   await page.locator('#messages .media-image-button').tap();
   await page.getByText('1 / 1+', {exact: true}).waitFor();
   await page.getByRole('button', {name: 'Imagen anterior', exact: true}).tap();
@@ -138,6 +144,8 @@ try {
   assert(agentFont >= 16, `Agent text too small for iOS focus: ${agentFont}px`);
   await page.getByRole('button', {name: 'Cerrar Social Media Agent'}).tap();
   await page.getByRole('button', {name: 'Volver a los chats'}).tap();
+  await page.waitForFunction(() => !document.body.classList.contains('chat-open'));
+  assert.equal(await page.evaluate(() => history.state?.socialMediaChat), undefined);
   await geometry('back to list');
   await page.locator('.rail-settings summary').tap();
   assert(await page.locator('#settings-panel').isVisible());
@@ -158,9 +166,15 @@ try {
   await page.locator('#chats .chat-item').first().tap();
   const shortScreen = await geometry('short mobile viewport with long URL');
   assert(shortScreen.composer.bottom <= shortScreen.height + 1, `Composer is clipped: ${JSON.stringify(shortScreen)}`);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelectorAll('#chats .chat-item').length === 1);
+  assert.equal(await page.evaluate(() => history.state?.socialMediaChat), false, 'reload must clear a stale chat history entry');
+  await page.locator('#chats .chat-item').first().tap();
+  await page.goBack();
+  await page.waitForFunction(() => !document.body.classList.contains('chat-open'));
   assert.deepEqual(errors, []);
   await context.close();
-  console.log('PASS mobile PWA: manifest/icons, iPhone touch navigation, accounts, historical image viewer, agent, input sizing and overflow');
+  console.log('PASS mobile PWA: manifest/icons, iPhone touch and history navigation, accounts, historical image viewer, agent, input sizing and overflow');
 } finally {
   await browser.close();
   server.close();
