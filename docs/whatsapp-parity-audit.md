@@ -533,6 +533,8 @@ events while preserving ordinary one-finger scrolling; the separate image
 viewer remains zoomable. Treat real-device zoom stability and installation/login
 in standalone mode as open until checked on an actual iPhone. Keep Enter to send and Shift+Enter for
 a newline in the mobile composer as explicit acceptance criteria.
+The manifest and icon endpoints are readable before OIDC login, which lets
+Safari fetch installation metadata without making chats or scripts public.
 The check must include a fresh Keycloak login from the Home Screen app: its
 external-domain redirect may leave standalone mode on iOS, which the static
 manifest and Chromium test cannot validate.

@@ -1093,6 +1093,17 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     try {
       const url = new URL(req.url, 'http://localhost'); const path = url.pathname;
       if (path === '/health' && req.method === 'GET') return json(200, { ok: true });
+      const installAssets = {
+        '/manifest.webmanifest': 'application/manifest+json',
+        '/icon.svg': 'image/svg+xml',
+        '/icon-192.png': 'image/png',
+        '/icon-512.png': 'image/png',
+        '/apple-touch-icon.png': 'image/png',
+      };
+      if (req.method === 'GET' && Object.hasOwn(installAssets, path)) {
+        const bytes = await readFile(join(root, 'public', path.slice(1)));
+        res.setHeader('content-type', installAssets[path]); res.end(bytes); return;
+      }
       if (auth.oidcEnabled && path === '/auth/login' && req.method === 'GET') {
         const principal = auth.isAuthenticated(req);
         if (principal) return redirect(safeReturnTo(url.searchParams.get('returnTo')));
