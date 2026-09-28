@@ -1520,6 +1520,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const result = await featureConnector(a, `/chats/${encodeURIComponent(providerChat)}/presence`, { method: 'POST', body: { action: 'subscribe' } });
         return json(200, { account: a.accountId, chat, subscribed: true, ...normalizePresence(result) });
       }
+      if (req.method === 'GET' && path === '/api/contact-block') {
+        const a = accountParam(url.searchParams.get('account'));
+        const chat = safeChatId(url.searchParams.get('chat'));
+        const conversation = await conversationFor(a, chat);
+        const providerChat = providerChatId(conversation);
+        if (conversation.is_group || !/^\d+@(c\.us|s\.whatsapp\.net|lid)$/.test(providerChat)) throw fail(400, 'A direct contact is required');
+        const result = await featureConnector(a, `/chats/${encodeURIComponent(providerChat)}/block`, { method: 'GET' });
+        if (typeof result.blocked !== 'boolean' || result.confirmed !== true) throw fail(502, 'Contact block state was not confirmed');
+        return json(200, { account: a.accountId, chat, blocked: result.blocked, confirmed: true, source: 'provider' });
+      }
       if (req.method === 'POST' && (path === '/api/chat-actions' || path === '/api/chats/action' || path === '/api/chat-action' || path === '/api/chat/read' || /^\/api\/chats\/[^/]+\/action$/.test(path) || /^\/api\/chats\/[^/]+\/(?:read|unread|archive|unarchive|pin|unpin|mute|unmute)$/.test(path) || /^\/api\/chats\/(?:read|unread|archive|unarchive|pin|unpin|mute|unmute)$/.test(path))) {
         const body = await bodyJSON(req);
         const pathChat = path.match(/^\/api\/chats\/([^/]+)\/(?:action|read|unread|archive|unarchive|pin|unpin|mute|unmute)$/)?.[1];

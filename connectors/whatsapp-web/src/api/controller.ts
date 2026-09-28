@@ -1861,6 +1861,17 @@ export function createRouter(
     }
   );
 
+  router.get('/chats/:chatId/block', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const jid = contactBlockJid(req.params.chatId);
+        res.json({ ok: true, blocked: await client.contactBlocked(jid), confirmed: true });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
   router.post('/chats/:chatId/block', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {

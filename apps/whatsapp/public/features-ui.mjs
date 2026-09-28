@@ -16,11 +16,13 @@ import { createEmojiPicker } from './emoji-picker.mjs';
 
 export const FEATURE_CONTRACT = Object.freeze({
   chatInfo: { method: 'GET', path: '/api/chat-details', response: 'name, contact|group, participants, presence, avatarUrl' },
+  contactBlock: { method: 'GET', path: '/api/contact-block', response: 'blocked, confirmed, source=provider' },
   chatMedia: { method: 'GET', path: '/api/chats/media', response: 'items[] with kind, url, name, timestamp, nextCursor' },
   search: { method: 'GET', path: '/api/search', response: 'results[] with chatId, chatName, messageId, text, timestamp' },
   messageAround: { method: 'GET', path: '/api/messages/around', response: 'messages[] with targetMessageId' },
   chatRead: { method: 'POST', path: '/api/chat-actions', body: 'account, chat, action=read|unread' },
   chatAction: { method: 'POST', path: '/api/chat-actions', body: 'account, chat, action=archive|unarchive|pin|unpin|mute|unmute|favorite|unfavorite' },
+  contactBlockAction: { method: 'POST', path: '/api/chat-actions', body: 'account, chat, action=block|unblock' },
   messageReaction: { method: 'POST', path: '/api/messages/react', body: 'account, chat, messageId, emoji' },
   messageForward: { method: 'POST', path: '/api/messages/forward', body: 'account, chat, messageId, targetChat (one request per selected message)' },
   messageEdit: { method: 'POST', path: '/api/messages/edit', body: 'account, chat, messageId, text' },
@@ -640,9 +642,16 @@ export function installFeatureUI({
     if (!runtime.modal || runtime.modal.body !== modal.body) return;
     const isGroup = result.isGroup === true || runtime.selectedChat?.isGroup === true;
     let presence = result.presence || {};
-    if (!isGroup && presence.available !== true) {
-      try { presence = await request('/api/presence', undefined, { chat: runtime.chat }); } catch { /* Unknown provider presence stays unknown. */ }
+    let blockState = null;
+    if (!isGroup) {
+      const [providerPresence, providerBlock] = await Promise.all([
+        presence.available === true ? presence : request('/api/presence', undefined, { chat: runtime.chat }).catch(() => presence),
+        request('/api/contact-block', undefined, { chat: runtime.chat }).catch(() => null),
+      ]);
+      presence = providerPresence;
+      if (providerBlock?.confirmed === true && typeof providerBlock.blocked === 'boolean') blockState = providerBlock.blocked;
     }
+    if (!runtime.modal || runtime.modal.body !== modal.body) return;
     const info = { ...(runtime.selectedChat || {}), ...result, ...(result.group || {}) };
     const profile = result.contact || result.profile || info;
     const members = array(result.participants || result.members);
@@ -711,6 +720,28 @@ export function installFeatureUI({
     for (const [label, action] of chatActions) {
       const control = button(documentRef, label, 'feature-button subtle');
       control.onclick = () => { closeModal(); openChatAction(action); };
+      actions.append(control);
+    }
+    if (!isGroup && blockState !== null) {
+      const control = button(documentRef, blockState ? 'Desbloquear contacto' : 'Bloquear contacto', 'feature-button subtle');
+      control.onclick = () => {
+        const nextBlocked = !blockState;
+        const confirmation = openModal(nextBlocked ? 'Bloquear contacto' : 'Desbloquear contacto');
+        confirmation.body.append(node('p', 'feature-description', nextBlocked
+          ? 'Dejarás de recibir mensajes de este contacto.'
+          : 'Volverás a recibir mensajes de este contacto.'));
+        const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
+        cancel.onclick = closeModal;
+        const confirm = button(documentRef, nextBlocked ? 'Bloquear' : 'Desbloquear', 'feature-button primary');
+        confirm.onclick = async () => {
+          confirm.disabled = true;
+          const result = await mutate('/api/chat-actions', { action: nextBlocked ? 'block' : 'unblock' });
+          if (result) void openInfo();
+          else if (runtime.modal?.body === confirmation.body) confirm.disabled = false;
+        };
+        confirmation.body.append(node('div', 'feature-dialog-actions'));
+        confirmation.body.lastElementChild.append(cancel, confirm);
+      };
       actions.append(control);
     }
     modal.body.append(actions);

@@ -1,5 +1,5 @@
 import { parseMediaQuality, prepareImageQuality, type MediaQuality } from './media-quality';
-import { ContactBlockError, setContactBlocked } from './contact-block';
+import { ContactBlockError, readContactBlocked, setContactBlocked } from './contact-block';
 import { chatPinState } from './chat-pin-state';
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
@@ -3497,6 +3497,13 @@ export class BaileysClient extends EventEmitter {
       throw new ContactBlockError('WhatsApp is not connected', 503);
     }
     return setContactBlocked(this.sock, chatId, blocked);
+  }
+
+  async contactBlocked(chatId: string) {
+    if (!this.sock || !this.isConnected()) {
+      throw new ContactBlockError('WhatsApp is not connected', 503);
+    }
+    return readContactBlocked(this.sock, chatId);
   }
 
   async modifyChat(

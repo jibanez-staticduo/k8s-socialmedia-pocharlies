@@ -150,15 +150,18 @@ function makeMockState() {
     nextChatCounter: 0,
     avatarFails: process.env.QA_AVATAR_404_ONLY === '1',
     directPresence: 'online',
+    blockedContacts: new Map(),
   };
 }
 
 const REAL_SERVER_CONTRACT = [
   { key: 'chatInfo', method: 'GET', path: '/api/chat-details', request: 'account,chat query', response: ['contact', 'group', 'participants', 'presence'] },
+  { key: 'contactBlock', method: 'GET', path: '/api/contact-block', request: 'account,chat query', response: ['blocked', 'confirmed'] },
   { key: 'chatMedia', method: 'GET', path: '/api/chats/media', request: 'account,chat,kind query', response: ['items', 'nextCursor'] },
   { key: 'search', method: 'GET', path: '/api/search', request: 'account,q,chat query', response: ['results'] },
   { key: 'chatRead', method: 'POST', path: '/api/chat-actions', request: 'account,chat,action=read', response: ['confirmed'] },
   { key: 'chatAction', method: 'POST', path: '/api/chat-actions', request: 'account,chat,action', response: ['confirmed'] },
+  { key: 'contactBlockAction', method: 'POST', path: '/api/chat-actions', request: 'account,chat,action=block|unblock', response: ['blocked', 'confirmed'] },
   { key: 'messageReaction', method: 'POST', path: '/api/messages/react', request: 'account,chat,messageId,emoji', response: ['confirmed'] },
   { key: 'messageForward', method: 'POST', path: '/api/messages/forward', request: 'account,chat,messageId,targetChat', response: ['confirmed'] },
   { key: 'messageEdit', method: 'POST', path: '/api/messages/edit', request: 'account,chat,messageId,text', response: ['confirmed'] },
@@ -280,7 +283,10 @@ async function fulfillApi(route, state) {
     if (account !== 'alpha' || chat !== 'alpha-direct') return jsonResponse(route, responseError('Chat is not permitted', 'ACCOUNT_FORBIDDEN'), 403);
     state.dateStarted = true;
     if (state.nextDateGate) await state.nextDateGate.promise;
-    return jsonResponse(route, {account, chat, messageId: url.searchParams.get('start').startsWith('2025-01-01') ? 'old-wa' : null});
+    const start = Date.parse(url.searchParams.get('start'));
+    const end = Date.parse(url.searchParams.get('end'));
+    const historicalMessage = Date.parse('2025-01-01T12:00:00Z');
+    return jsonResponse(route, {account, chat, messageId: start <= historicalMessage && historicalMessage < end ? 'old-wa' : null});
   }
   if (pathName === '/api/messages/around' && request.method() === 'GET') {
     const chat = url.searchParams.get('chat');
@@ -386,6 +392,10 @@ async function fulfillApi(route, state) {
     const chat = url.searchParams.get('chat') || '';
     return jsonResponse(route, { account, chat, state: chat === 'alpha-direct' ? state.directPresence : 'unknown', lastSeen: null, available: chat === 'alpha-direct' && state.directPresence !== 'unknown' });
   }
+  if (pathName === '/api/contact-block' && request.method() === 'GET') {
+    const chat = url.searchParams.get('chat') || '';
+    return jsonResponse(route, {account, chat, blocked: state.blockedContacts.get(`${account}:${chat}`) === true, confirmed: true, source: 'provider'});
+  }
   if (pathName === '/api/presence/subscribe' && request.method() === 'POST') {
     return jsonResponse(route, { account, chat: body.chat, subscribed: true, state: body.chat === 'alpha-direct' ? 'online' : 'unknown', lastSeen: null, available: body.chat === 'alpha-direct' });
   }
@@ -420,6 +430,7 @@ async function fulfillApi(route, state) {
     else if (action === 'unmute') target.muted = false;
     else if (action === 'favorite') target.favorite = true;
     else if (action === 'unfavorite') target.favorite = false;
+    else if (action === 'block' || action === 'unblock') state.blockedContacts.set(`${account}:${chat}`, action === 'block');
     else if (action === 'starred') {
       const message = messageFor(state, account, chat, body.messageId);
       const current = state.starred.get(account) || [];
@@ -787,6 +798,37 @@ async function runDesktop(page, state, report) {
     await closeDialog(page);
   });
 
+  await check('contact info confirms provider block state and asks before changing it', async () => {
+    await openChat(page, 'Ana Fixture');
+    await page.locator('#feature-chat-info').click();
+    let info = await dialog(page, /Informaci.n del contacto/i);
+    await clickDialogButton(info, 'Bloquear contacto');
+    let confirm = await dialog(page, /^Bloquear contacto$/i);
+    await clickDialogButton(confirm, 'Cancelar');
+    assert.equal(state.log.filter(item => item.path === '/api/chat-actions' && item.body?.action === 'block').length, 0);
+    await page.locator('#feature-chat-info').click();
+    info = await dialog(page, /Informaci.n del contacto/i);
+    await clickDialogButton(info, 'Bloquear contacto');
+    confirm = await dialog(page, /^Bloquear contacto$/i);
+    await clickDialogButton(confirm, 'Bloquear');
+    info = await dialog(page, /Informaci.n del contacto/i);
+    await info.getByRole('button', {name:'Desbloquear contacto'}).waitFor();
+    assert.equal(state.log.filter(item => item.path === '/api/chat-actions' && item.body?.action === 'block').length, 1);
+    await clickDialogButton(info, 'Desbloquear contacto');
+    confirm = await dialog(page, /^Desbloquear contacto$/i);
+    await clickDialogButton(confirm, 'Desbloquear');
+    info = await dialog(page, /Informaci.n del contacto/i);
+    await info.getByRole('button', {name:'Bloquear contacto'}).waitFor();
+    assert.equal(state.log.filter(item => item.path === '/api/chat-actions' && item.body?.action === 'unblock').length, 1);
+    await closeDialog(page);
+    state.failNextPath = '/api/contact-block';
+    await page.locator('#feature-chat-info').click();
+    info = await dialog(page, /Informaci.n del contacto/i);
+    await info.getByRole('heading', {name:'Ana Fixture'}).waitFor();
+    assert.equal(await info.getByRole('button', {name:/Bloquear contacto|Desbloquear contacto/}).count(), 0);
+    await closeDialog(page);
+  });
+
   await check('group info exposes unknown presence and members', async () => {
     await openChat(page, 'Equipo Fixture');
     await page.locator('#feature-chat-info').click();
@@ -794,6 +836,7 @@ async function runDesktop(page, state, report) {
     await assertText(info, 'Ana Fixture');
     await assertText(info, 'Bruno Fixture');
     await assertText(info, 'Administrador');
+    assert.equal(await info.getByRole('button', {name:/Bloquear contacto|Desbloquear contacto/}).count(),0);
     await closeDialog(page);
   });
 
@@ -814,7 +857,9 @@ async function runDesktop(page, state, report) {
     await page.locator('#feature-chat-search').click();
     let search = await dialog(page, /Buscar mensajes/i);
     await search.getByLabel('Ir a la fecha', {exact:true}).fill('2025-01-02');
+    const dateResponse = page.waitForResponse(response => response.url().includes('/api/messages/by-date'));
     await search.getByRole('button', {name:'Ir',exact:true}).click();
+    assert.equal((await dateResponse).status(), 200);
     await search.getByRole('status').filter({hasText:'No hay mensajes sincronizados'}).waitFor();
     await search.getByLabel('Ir a la fecha', {exact:true}).fill('2025-01-01');
     await search.getByRole('button', {name:'Ir',exact:true}).click();

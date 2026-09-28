@@ -1618,6 +1618,7 @@ body[data-theme="light"] .ai-panel-avatar { background: #d8e0e3; color: #34464f;
 .feature-inline-settings { display: grid; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
 .feature-inline-settings select, .feature-form select, .feature-search-form select { min-height: 40px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-raised); color: var(--text); padding: 8px 10px; }
 .feature-chat-actions { padding-top: 4px; border-top: 1px solid var(--line); }
+.feature-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .feature-gallery-tabs, .feature-picker-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
 .feature-gallery-tabs .active, .feature-picker-tabs .active { border-color: var(--accent); color: var(--accent-strong); }
 .feature-gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
