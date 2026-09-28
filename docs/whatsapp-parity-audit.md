@@ -97,7 +97,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Notifications | Partial | Account-scoped message/group/sound/preview preferences deployed 8ad9dd9; reaction/status notifications and closed-tab push remain |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
 | Presence | In validation | Account/chat-scoped presence events reach the open header over authenticated SSE, with polling fallback; typing/recording indicators expire after 8 seconds and stream listeners are released on disconnect. Real-provider delivery and privacy behavior remain unverified |
-| Real-time updates | Partial | Presence has an event stream; messages still refresh by polling |
+| Real-time updates | In validation | Account-scoped message/chat change hints now use authenticated SSE with reconnect resync, bounded bursts and polling fallback. Synthetic app/browser tests pass; live delivery after deploy remains to verify |
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Partial | Account/author-scoped catalogue and viewer are available; saved contact names resolve by account. Text/image/video publishing to explicitly selected contacts passes synthetic app, connector and browser tests; real-provider delivery and complete historical coverage remain unverified |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |

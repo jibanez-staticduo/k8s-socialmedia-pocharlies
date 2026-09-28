@@ -50,6 +50,12 @@ const imageDims = (b64, mime) => page.evaluate(async ([b64, mime]) => {
   const img = new Image(); img.src = `data:${mime};base64,${b64}`; await img.decode();
   return {width: img.naturalWidth, height: img.naturalHeight};
 }, [b64, mime]);
+const stickerAlpha = b64 => page.evaluate(async b64 => {
+  const img = new Image(); img.src = `data:image/webp;base64,${b64}`; await img.decode();
+  const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 512;
+  const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0);
+  return {corner: ctx.getImageData(0, 0, 1, 1).data[3], center: ctx.getImageData(256, 256, 1, 1).data[3]};
+}, b64);
 const nonRedPixels = b64 => page.evaluate(async b64 => {
   const img = new Image(); img.src = `data:image/jpeg;base64,${b64}`; await img.decode();
   const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
@@ -280,6 +286,10 @@ try {
   await page.getByLabel('Subir sticker').setInputFiles({name:'no-imagen.txt', mimeType:'text/plain', buffer:Buffer.from('no')});
   assert.equal(await page.locator('#photo-editor-overlay').isHidden(), true, 'a non-image must not open sticker creation');
   assert.equal(await page.getByRole('button', {name:'Enviar sticker'}).isDisabled(), true);
+  await page.getByLabel('Subir sticker').setInputFiles({name:'foto-grande.png', mimeType:'image/png', buffer:Buffer.concat([red, Buffer.alloc(11 * 1024 * 1024)])});
+  await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
+  await page.locator('#photo-editor-cancel').click();
+  await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
   await page.getByLabel('Subir sticker').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
   await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
   await page.waitForFunction(() => document.querySelector('.photo-editor-stage')?.dataset.loaded === '1');
@@ -315,15 +325,16 @@ try {
       `send button escapes at ${width}px`);
   }
   const stickerResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/messages/compose');
-  await page.getByRole('button', {name:'Enviar sticker'}).click();
+  await page.evaluate(() => { const send = [...document.querySelectorAll('button')].find(button => button.textContent === 'Enviar sticker'); send.click(); send.click(); });
   await stickerResponse;
-  assert.equal(stickerSends.length, 1);
+  assert.equal(stickerSends.length, 1, 'rapid double click must send only once');
   const sticker = stickerSends[0];
   assert.equal(sticker.kind, 'sticker');
   assert.equal(sticker.mimeType, 'image/webp');
   assert.match(sticker.name, /-sticker\.webp$/);
   assert(Buffer.from(sticker.data, 'base64').length <= 100 * 1024);
   assert.deepEqual(await imageDims(sticker.data, 'image/webp'), {width:512, height:512});
+  assert.deepEqual(await stickerAlpha(sticker.data), {corner:0, center:255}, 'the sticker letterbox must retain transparency');
   assert.equal(Buffer.from(sticker.data, 'base64').toString('ascii', 0, 4), 'RIFF');
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(' | ')}`);

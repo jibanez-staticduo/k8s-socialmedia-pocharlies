@@ -26,13 +26,18 @@ import { eventDraft } from './public/event-draft.mjs';
 import { validateDayRange } from './public/message-date.mjs';
 import { MESSAGE_BY_DATE_SQL } from './lib/message-date.mjs';
 import { linkPreviewFromPayload } from './lib/link-preview.mjs';
-import { HermesStreamAccumulator, openSse } from './lib/hermes-stream.mjs';
+import { HermesStreamAccumulator, openSse, sseHeaders } from './lib/hermes-stream.mjs';
+import { createChangeBus } from './lib/change-bus.mjs';
 import { hermesApiBaseUrl, syncHermesModelLock } from './lib/hermes-model-lock.mjs';
 import { communityJid, communityCreateBody, communityActionBody, publicCommunity, publicCommunityList, publicLinkedGroups } from './lib/communities.mjs';
 const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
 const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
 const MAX_PAGE_SIZE = 200;
+// A change stream must speak before NPM's 240s read timeout closes it, and a
+// stalled browser must not grow the write queue without bound.
+const REALTIME_HEARTBEAT_MS = 15000;
+const REALTIME_MAX_QUEUE_BYTES = 256 * 1024;
 // Own-account profile limits. They mirror the connector's profile-service so a
 // request is refused with an honest 400/413 before the live account is touched.
 const PROFILE_NAME_MAX_CHARS = 25;
@@ -374,11 +379,21 @@ async function gifBytes(bytes) {
     throw fail(400, 'GIF could not be converted');
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
-export async function createApp({ env = process.env, db, fetchImpl = fetch, registry, oidc, now } = {}) {
+export async function createApp({ env = process.env, db, fetchImpl = fetch, registry, oidc, now, realtime } = {}) {
   const auth = new AppAuth({ env, fetchImpl, ...(oidc ? { oidc } : {}), ...(now ? { now } : {}) });
   const accounts = (registry || JSON.parse(await readFile(env.SOCIAL_ACCOUNTS_FILE, 'utf8'))).filter(a => a.channel === 'whatsapp' && a.enabled !== false);
   if (new Set(accounts.map(a => a.accountId)).size !== accounts.length) throw Error('Duplicate account');
   const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 10000, types: utcDatabaseTypes() });
+  // Change hints arrive over one dedicated LISTEN connection per process, not
+  // per browser tab. APP_REALTIME_ENABLED=false disables it and every client
+  // keeps its existing polling fallback.
+  const realtimeBus = realtime || createChangeBus({
+    connectionString: env.DATABASE_URL || '',
+    enabled: env.APP_REALTIME_ENABLED !== 'false',
+    log: message => console.warn(`[realtime] ${message}`),
+  });
+  const eventStreams = new Set();
+  const realtimeHeartbeatMs = boundedCacheOption(env.APP_REALTIME_HEARTBEAT_MS, REALTIME_HEARTBEAT_MS, { min: 100, max: 300000 });
   const dataDir = env.DATA_DIR || '/data';
   await auth.init(dataDir);
   const sessions = new Sessions(dataDir); await sessions.init();
@@ -1884,6 +1899,54 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         } finally { abort.abort(); }
         return;
       }
+      if (req.method === 'GET' && path === '/api/events') {
+        const a = accountParam(url.searchParams.get('account'));
+        // Disabled or missing bus: answer 503 instead of an idle stream, so the
+        // browser treats it as unavailable and keeps polling.
+        if (realtimeBus.enabled === false) throw fail(503, 'Real-time updates are disabled');
+        res.writeHead(200, sseHeaders());
+        res.flushHeaders?.();
+        const stream = { id: 0, end() { if (!res.writableEnded) res.end(); } };
+        let heartbeat = null;
+        let unsubscribe = () => {};
+        const teardown = () => {
+          if (teardown.done) return;
+          teardown.done = true;
+          if (heartbeat) clearInterval(heartbeat);
+          unsubscribe();
+          eventStreams.delete(stream);
+        };
+        const send = (name, value) => {
+          if (res.destroyed || res.writableEnded) return teardown();
+          // Dropping a socket that stopped draining costs the browser one
+          // reconnect, and every reconnect starts with a resync.
+          if (res.writableLength > REALTIME_MAX_QUEUE_BYTES) { teardown(); res.destroy(); return; }
+          stream.id += 1;
+          res.write(`id: ${stream.id}\nevent: ${name}\ndata: ${JSON.stringify(value)}\n\n`);
+        };
+        res.once('close', teardown);
+        // The hint is relayed with the subscriber's own account and identifiers
+        // only: content keeps coming from the account-scoped read API below.
+        unsubscribe = realtimeBus.subscribe(a.accountId, event => send(event.kind, {
+          account: a.accountId,
+          ...(event.conversation_id ? { conversation_id: event.conversation_id } : {}),
+          ...(event.message_id ? { message_id: event.message_id } : {}),
+          ...(event.wa_message_id ? { wa_message_id: event.wa_message_id } : {}),
+          ...(event.reason ? { reason: event.reason } : {}),
+        }));
+        eventStreams.add(stream);
+        heartbeat = setInterval(() => {
+          if (res.destroyed || res.writableEnded) return teardown();
+          // The hint queue is not durable: while the LISTEN connection is down
+          // nothing can arrive, so end the stream and let the browser poll.
+          if (realtimeBus.state?.().connected === false) { teardown(); res.end(); return; }
+          if (res.writableLength > REALTIME_MAX_QUEUE_BYTES) { teardown(); res.destroy(); return; }
+          res.write(': ping\n\n');
+        }, realtimeHeartbeatMs);
+        heartbeat.unref?.();
+        send('resync', { account: a.accountId, reason: 'connected' });
+        return;
+      }
       if (req.method === 'GET' && path === '/api/notifications') {
         const a = accountParam(url.searchParams.get('account'));
         const rows = await query(
@@ -2691,8 +2754,26 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       json(e.status || 500, { error: e.status ? e.message : 'Internal server error', ...(e.code ? { code: e.code } : {}), ...(e.details ? { details: e.details } : {}) });
     }
   });
+  // Start only after the app has initialized successfully; a failed OIDC or
+  // local-state initialization must not leave a detached PG listener behind.
+  realtimeBus.start?.();
   server.requestTimeout = 30000;
-  return { server, sessions, appState, close: async () => { await new Promise(resolve => server.close(resolve)); await appState.close(); if (!db) await pool.end(); } };
+  return {
+    server,
+    sessions,
+    appState,
+    realtime: realtimeBus,
+    close: async () => {
+      // Change streams hold their sockets open, so server.close() alone would
+      // wait out the container stop timeout on every deploy.
+      for (const stream of Array.from(eventStreams)) stream.end();
+      eventStreams.clear();
+      await new Promise(resolve => server.close(resolve));
+      await realtimeBus.close?.();
+      await appState.close();
+      if (!db) await pool.end();
+    },
+  };
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const app = await createApp(); app.server.listen(Number(process.env.PORT || 3080), '0.0.0.0');

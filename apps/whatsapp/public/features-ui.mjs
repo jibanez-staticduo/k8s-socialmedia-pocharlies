@@ -12,8 +12,10 @@ import { attachmentError } from './composer-attachment.mjs';
 /*
  * Feature UI for the selected WhatsApp Web inventory.  The module owns the
  * feature menus and dialogs while app.js remains responsible for transport,
- * account isolation, message polling, and the existing AI flow.
+ * account isolation, message refresh, and the existing AI flow.
  */
+
+const MAX_STICKER_SOURCE_BYTES = 50 * 1024 * 1024;
 
 export const FEATURE_CONTRACT = Object.freeze({
   chatInfo: { method: 'GET', path: '/api/chat-details', response: 'name, contact|group, participants, presence, avatarUrl' },
@@ -1674,7 +1676,9 @@ export function installFeatureUI({
         input.value = '';
         if (!source || !isCurrent()) return;
         if (!/^image\/(jpeg|png|webp)$/.test(source.type)) { toast('Elige una imagen JPEG, PNG o WebP.', 'error'); return; }
-        const problem = attachmentError(source);
+        const problem = sticker
+          ? source.size > MAX_STICKER_SOURCE_BYTES ? 'La imagen para el sticker supera los 50 MiB.' : ''
+          : attachmentError(source);
         if (problem) { toast(problem, 'error'); return; }
         send.disabled = true;
         selectedFile = null;
