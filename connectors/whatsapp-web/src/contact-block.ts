@@ -24,7 +24,8 @@ async function contactBlockAliases(socket: any, chat: string) {
   // in the blocklist. An unknown alias must not hide the canonical entry.
   const userAlias = typeof alias === 'string' ? alias.replace(/^(\d+):\d+@/, '$1@') : '';
   const normalizedAlias = /^\d+@(c\.us|s\.whatsapp\.net|lid)$/.test(userAlias)
-    ? contactBlockJid(userAlias) : null;
+    ? contactBlockJid(userAlias)
+    : null;
   return { jid, aliases: new Set([jid, ...(normalizedAlias ? [normalizedAlias] : [])]) };
 }
 
