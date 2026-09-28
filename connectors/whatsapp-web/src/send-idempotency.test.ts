@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 import express from 'express';
 import { createRouter } from './api/controller';
@@ -236,5 +237,201 @@ test('reserves one send per account and token across retries and rejects changed
     (pg.Pool.prototype as any).query = original;
     if (previousAccount === undefined) delete process.env.CONNECTOR_ACCOUNT;
     else process.env.CONNECTOR_ACCOUNT = previousAccount;
+  }
+});
+
+test('viewOnce joins the media fingerprint without touching normal-send hashes', async () => {
+  const original = pg.Pool.prototype.query;
+  const previousAccount = process.env.CONNECTOR_ACCOUNT;
+  const rows = new Map<string, { request_hash: string; message_id: string; status: string; sent_at: Date | null }>();
+  (pg.Pool.prototype as any).query = async (sql: string, params: string[] = []) => {
+    if (sql.includes('CREATE TABLE')) return { rowCount: 0, rows: [] };
+    const key = `${params[0]}:${params[1]}`;
+    if (sql.includes('INSERT INTO whatsapp_send_attempts')) {
+      if (rows.has(key)) return { rowCount: 0, rows: [] };
+      rows.set(key, { request_hash: params[2], message_id: params[3], status: 'prepared', sent_at: null });
+      return { rowCount: 1, rows: [{ message_id: params[3] }] };
+    }
+    if (sql.includes('SELECT request_hash')) return { rowCount: rows.has(key) ? 1 : 0, rows: rows.has(key) ? [rows.get(key)] : [] };
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  try {
+    process.env.CONNECTOR_ACCOUNT = 'personal';
+    const conversationId = '111@s.whatsapp.net';
+    const fileUrl = 'data:image/jpeg;base64,Zmlyc3Q=';
+    // The exact hash the pre-viewOnce code produced: no trailing flag element.
+    const legacyHash = createHash('sha256')
+      .update(
+        JSON.stringify([
+          'media',
+          conversationId,
+          null,
+          null,
+          false,
+          false,
+          null,
+          'image/jpeg',
+          'image/jpeg',
+        ])
+      )
+      .update('\0')
+      .update(fileUrl)
+      .digest('hex');
+    const base = { conversationId, fileUrl, asSticker: false, asGif: false };
+    const normal = await reserveMediaSend({ ...base, token: 'vo-normal' });
+    assert.equal(
+      rows.get(`personal:${createHash('sha256').update('vo-normal').digest('hex')}`)?.request_hash,
+      legacyHash,
+      'a normal media reservation keeps the byte-identical legacy hash'
+    );
+    const viewOnce = await reserveMediaSend({ ...base, token: 'vo-once', viewOnce: true });
+    const onceRow = rows.get(`personal:${createHash('sha256').update('vo-once').digest('hex')}`);
+    assert.ok(onceRow && onceRow.request_hash !== legacyHash, 'viewOnce changes the fingerprint');
+    // Reusing the one token across the two spellings is a conflict, not a replay.
+    assert.equal((await reserveMediaSend({ ...base, token: 'vo-once' })).state, 'conflict');
+    assert.equal((await reserveMediaSend({ ...base, token: 'vo-normal', viewOnce: true })).state, 'conflict');
+    // The same viewOnce bytes reserve identically on a fresh token.
+    const repeat = await reserveMediaSend({ ...base, token: 'vo-once-2', viewOnce: true });
+    assert.equal(
+      rows.get(`personal:${createHash('sha256').update('vo-once-2').digest('hex')}`)?.request_hash,
+      onceRow!.request_hash,
+      'viewOnce fingerprints deterministically'
+    );
+    assert.equal(normal.state, 'claimed');
+    assert.equal(viewOnce.state, 'claimed');
+    assert.equal(repeat.state, 'claimed');
+  } finally {
+    (pg.Pool.prototype as any).query = original;
+    if (previousAccount === undefined) delete process.env.CONNECTOR_ACCOUNT;
+    else process.env.CONNECTOR_ACCOUNT = previousAccount;
+  }
+});
+
+test('the media route validates viewOnce before spending a token and echoes it back', async () => {
+  const original = pg.Pool.prototype.query;
+  const previousAccount = process.env.CONNECTOR_ACCOUNT;
+  const previousEnabled = process.env.ENABLE_SENDING;
+  const rows = new Map<string, { request_hash: string; message_id: string; status: string; sent_at: Date | null }>();
+  let queries = 0;
+  (pg.Pool.prototype as any).query = async (sql: string, params: string[] = []) => {
+    queries++;
+    if (sql.includes('CREATE TABLE')) return { rowCount: 0, rows: [] };
+    const key = `${params[0]}:${params[1]}`;
+    if (sql.includes('INSERT INTO whatsapp_send_attempts')) {
+      if (rows.has(key)) return { rowCount: 0, rows: [] };
+      rows.set(key, { request_hash: params[2], message_id: params[3], status: 'prepared', sent_at: null });
+      return { rowCount: 1, rows: [{ message_id: params[3] }] };
+    }
+    if (sql.includes('SELECT request_hash')) return { rowCount: rows.has(key) ? 1 : 0, rows: rows.has(key) ? [rows.get(key)] : [] };
+    if (sql.includes('UPDATE whatsapp_send_attempts')) {
+      const row = rows.get(key);
+      if (!row || row.message_id !== params[2]) return { rowCount: 0, rows: [] };
+      if (sql.includes("SET status = 'pending'")) {
+        if (row.status !== 'prepared') return { rowCount: 0, rows: [] };
+        row.status = 'pending';
+        return { rowCount: 1, rows: [{ message_id: row.message_id }] };
+      }
+      if (row.status !== 'pending') return { rowCount: 0, rows: [] };
+      row.status = 'sent';
+      row.sent_at = new Date('2026-01-01T00:00:00Z');
+      return { rowCount: 1, rows: [{ sent_at: row.sent_at }] };
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  const mediaCalls: Array<{ url: string; options: any }> = [];
+  let voiceCalls = 0;
+  const app = express();
+  app.use(express.json());
+  app.use(
+    createRouter(
+      {
+        isConnected: () => true,
+        getCachedState: () => 'CONNECTED',
+        sendFile: async (_chat: string, url: string, _caption: string, options: any) => {
+          mediaCalls.push({ url, options });
+          await options.beforeSend?.();
+          return options.messageId || 'direct-media';
+        },
+        sendVoice: async () => {
+          voiceCalls++;
+          return 'voice-x';
+        },
+      } as any,
+      { getCurrentQR: () => null } as any,
+      'vo-secret'
+    )
+  );
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  try {
+    process.env.CONNECTOR_ACCOUNT = 'personal';
+    process.env.ENABLE_SENDING = 'true';
+    const address = server.address() as { port: number };
+    async function post(path: string, body: Record<string, unknown>) {
+      const timestamp = Math.floor(Date.now() / 1000);
+      return fetch(`http://127.0.0.1:${address.port}${path}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-connector-timestamp': String(timestamp),
+          'x-connector-signature': generateHMACSignature(body, timestamp, 'vo-secret'),
+        },
+        body: JSON.stringify(body),
+      });
+    }
+    const base = { conversationId: '111@s.whatsapp.net' };
+
+    const once = await post('/messages/media/send', {
+      ...base,
+      sendToken: 'vo-http-1',
+      fileUrl: 'data:image/jpeg;base64,YQ==',
+      viewOnce: true,
+    });
+    assert.equal(once.status, 200);
+    const onceBody = (await once.json()) as Record<string, unknown>;
+    assert.equal(onceBody.sent, true);
+    assert.equal(onceBody.viewOnce, true, 'the response echoes the play-once flag');
+    assert.equal(mediaCalls.at(-1)!.options.viewOnce, true);
+    assert.ok(queries > 0);
+
+    const queriesBefore = queries;
+    const mediaCallsBefore = mediaCalls.length;
+    const rejected: Array<[string, unknown]> = [
+      ['/messages/media/send', { ...base, sendToken: 'vo-http-2', fileUrl: 'data:image/jpeg;base64,YQ==', viewOnce: 'yes' }],
+      ['/messages/media/send', { ...base, sendToken: 'vo-http-3', fileUrl: 'data:image/webp;base64,YQ==', kind: 'sticker', viewOnce: true }],
+      ['/messages/media/send', { ...base, sendToken: 'vo-http-4', fileUrl: 'data:video/quicktime;base64,YQ==', kind: 'gif', viewOnce: true }],
+      ['/messages/media/send', { ...base, sendToken: 'vo-http-5', fileUrl: 'data:image/tiff;base64,YQ==', viewOnce: true }],
+      ['/messages/media/send', { ...base, sendToken: 'vo-http-6', fileUrl: 'data:video/3gpp;base64,YQ==', viewOnce: true }],
+      ['/messages/audio', { ...base, sendToken: 'vo-http-7', audioBase64: 'YQ==', viewOnce: true }],
+      ['/messages/audio', { ...base, sendToken: 'vo-http-8', audioBase64: 'YQ==', viewOnce: 1 }],
+      ['/messages/sticker', { ...base, fileUrl: 'data:image/webp;base64,YQ==', viewOnce: true }],
+      ['/messages/gif', { ...base, fileUrl: 'data:video/mp4;base64,YQ==', viewOnce: 1 }],
+    ];
+    for (const [path, body] of rejected) {
+      const response = await post(path, body as Record<string, unknown>);
+      assert.equal(response.status, 400, `${path} ${JSON.stringify(body)} must be refused`);
+      assert.match(JSON.stringify(await response.json()), /viewOnce/);
+    }
+    assert.equal(queries, queriesBefore, 'a refused play-once request never touches the token store');
+    assert.equal(mediaCalls.length, mediaCallsBefore, 'a refused play-once request never reaches sendFile');
+    assert.equal(voiceCalls, 0, 'a refused voice request never reaches sendVoice');
+
+    const plain = await post('/messages/media/send', {
+      ...base,
+      sendToken: 'vo-http-9',
+      fileUrl: 'data:image/png;base64,YQ==',
+    });
+    assert.equal(plain.status, 200);
+    assert.equal('viewOnce' in ((await plain.json()) as Record<string, unknown>), false);
+    assert.equal(mediaCalls.at(-1)!.options.viewOnce, false, 'absent viewOnce stays a plain send');
+  } finally {
+    (pg.Pool.prototype as any).query = original;
+    if (previousAccount === undefined) delete process.env.CONNECTOR_ACCOUNT;
+    else process.env.CONNECTOR_ACCOUNT = previousAccount;
+    if (previousEnabled === undefined) delete process.env.ENABLE_SENDING;
+    else process.env.ENABLE_SENDING = previousEnabled;
+    await new Promise<void>((resolve, reject) =>
+      server.close(error => (error ? reject(error) : resolve()))
+    );
   }
 });

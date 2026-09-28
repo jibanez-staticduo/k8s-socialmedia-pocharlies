@@ -729,6 +729,17 @@ export const NOVEDADES_STATUS_VIDEO_MIME_TYPES = new Set([
   'video/quicktime',
 ]);
 const NOVEDADES_STATUS_TEXT_MAX_CHARS = 4096;
+// WhatsApp offers play-once for these media kinds only; the app proxy enforces
+// the same list in front of the connector, so a direct connector call cannot
+// smuggle a MIME the provider would refuse or, worse, silently downgrade.
+export const MEDIA_VIEW_ONCE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+]);
 // Media captions are capped at the same width the app composer enforces, so a
 // direct connector call cannot smuggle a caption the UI would never allow.
 export const NOVEDADES_STATUS_CAPTION_MAX_CHARS = 1024;
@@ -2527,6 +2538,10 @@ export class BaileysClient extends EventEmitter {
       quality?: MediaQuality;
       asSticker?: boolean;
       asGif?: boolean;
+      /** Play-once media. rc13 wraps image/video payloads in viewOnceMessage
+       * (Messages.js wraps any truthy `viewOnce` content flag); WhatsApp only
+       * offers it for images and videos, so every other kind is refused. */
+      viewOnce?: boolean;
       replyToMessageId?: string;
       fileName?: string;
       messageId?: string;
@@ -2535,6 +2550,17 @@ export class BaileysClient extends EventEmitter {
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
     const quality = parseMediaQuality(options?.quality);
+    if (options?.viewOnce !== undefined && typeof options.viewOnce !== 'boolean')
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'viewOnce must be a boolean');
+    const viewOnce = options?.viewOnce === true;
+    const refuseViewOnce = () => {
+      if (viewOnce)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          'viewOnce is only supported for image and video messages'
+        );
+    };
+    if (options?.asSticker) refuseViewOnce();
     const raw = this.toRawJid(chatId);
     const ownJid = this.sock.user?.id;
     let buf: Buffer;
@@ -2570,6 +2596,7 @@ export class BaileysClient extends EventEmitter {
       }
       payload = { sticker: buf };
     } else if (options?.asGif || normalizedContentType === 'image/gif') {
+      refuseViewOnce();
       const isMp4 =
         normalizedContentType === 'video/mp4' &&
         buf.length >= 12 &&
@@ -2582,6 +2609,16 @@ export class BaileysClient extends EventEmitter {
       }
       payload = { video: buf, mimetype: 'video/mp4', gifPlayback: true, caption };
     } else if (contentType.startsWith('image/')) {
+      // Any image/* is sendable, but WhatsApp only offers play-once for the
+      // kinds below; refuse the rest before the socket instead of letting the
+      // provider downgrade them silently.
+      if (viewOnce && !MEDIA_VIEW_ONCE_MIME_TYPES.has(normalizedContentType))
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `viewOnce images must be one of ${Array.from(MEDIA_VIEW_ONCE_MIME_TYPES)
+            .filter(kind => kind.startsWith('image/'))
+            .join(', ')}, got ${normalizedContentType || 'unknown'}`
+        );
       const prepared = await prepareImageQuality(buf, contentType, quality);
       buf = prepared.bytes;
       contentType = prepared.mimeType;
@@ -2589,17 +2626,33 @@ export class BaileysClient extends EventEmitter {
         fileName =
           fileName.replace(/\.[^.]+$/, '') + (contentType === 'image/png' ? '.png' : '.jpg');
       }
-      payload = { image: buf, mimetype: contentType, caption };
-    } else if (contentType.startsWith('video/')) payload = { video: buf, caption };
-    else if (contentType.startsWith('audio/'))
+      payload = {
+        image: buf,
+        mimetype: contentType,
+        caption,
+        ...(viewOnce ? { viewOnce: true } : {}),
+      };
+    } else if (contentType.startsWith('video/')) {
+      if (viewOnce && !MEDIA_VIEW_ONCE_MIME_TYPES.has(normalizedContentType))
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `viewOnce videos must be one of ${Array.from(MEDIA_VIEW_ONCE_MIME_TYPES)
+            .filter(kind => kind.startsWith('video/'))
+            .join(', ')}, got ${normalizedContentType || 'unknown'}`
+        );
+      payload = { video: buf, caption, ...(viewOnce ? { viewOnce: true } : {}) };
+    } else if (contentType.startsWith('audio/')) {
+      refuseViewOnce();
       payload = { audio: buf, mimetype: contentType, ptt: false };
-    else
+    } else {
+      refuseViewOnce();
       payload = {
         document: buf,
         fileName,
         mimetype: contentType || 'application/octet-stream',
         caption,
       };
+    }
 
     const quoted = await this.buildQuotedFromId(options?.replyToMessageId, raw);
     if (options?.replyToMessageId && !quoted) {

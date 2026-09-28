@@ -8,6 +8,7 @@ import {
   ProfilePictureTimeoutError,
   classifyWhatsAppSendFailure,
   WhatsAppSendFailureClass,
+  MEDIA_VIEW_ONCE_MIME_TYPES,
   NOVEDADES_STATUS_CAPTION_MAX_CHARS,
   NOVEDADES_STATUS_IMAGE_MIME_TYPES,
   NOVEDADES_STATUS_MEDIA_MAX_BYTES,
@@ -1143,6 +1144,7 @@ export function createRouter(
           sendToken?: string;
           sourceDigest?: string;
           sourceMimeType?: string;
+          viewOnce?: boolean;
         };
         const { conversationId, audioBase64, mimeType, sendToken, sourceDigest, sourceMimeType } =
           body;
@@ -1150,12 +1152,22 @@ export function createRouter(
         if (
           !conversationId ||
           !audioBase64 ||
+          (body.viewOnce !== undefined && typeof body.viewOnce !== 'boolean') ||
           (sendToken !== undefined &&
             (typeof sendToken !== 'string' || !sendToken.trim() || sendToken.length > 200))
         ) {
-          res
-            .status(400)
-            .json({ error: 'Missing or invalid conversationId, audioBase64, or sendToken' });
+          res.status(400).json({
+            error:
+              'Missing or invalid conversationId, audioBase64, viewOnce (must be a boolean), or sendToken',
+          });
+          return;
+        }
+        // A voice note is a ptt audio clip; WhatsApp has no play-once voice.
+        if (body.viewOnce === true) {
+          res.status(400).json({
+            error: 'viewOnce is only supported for image and video messages',
+            failureClass: 'invalid_request',
+          });
           return;
         }
         if (
@@ -1715,6 +1727,7 @@ export function createRouter(
           sendToken,
           sourceDigest,
           sourceMimeType,
+          viewOnce,
         } = req.body as {
           conversationId?: string;
           fileUrl?: string;
@@ -1726,22 +1739,55 @@ export function createRouter(
           sendToken?: string;
           sourceDigest?: string;
           sourceMimeType?: string;
+          viewOnce?: boolean;
         };
         if (
           !conversationId ||
           !fileUrl ||
+          (viewOnce !== undefined && typeof viewOnce !== 'boolean') ||
           (sendToken !== undefined &&
             (typeof sendToken !== 'string' || !sendToken.trim() || sendToken.length > 200))
         ) {
-          res
-            .status(400)
-            .json({ error: 'Missing or invalid conversationId, fileUrl, or sendToken' });
+          res.status(400).json({
+            error:
+              'Missing or invalid conversationId, fileUrl, viewOnce (must be a boolean), or sendToken',
+          });
           return;
+        }
+        const viewOnceRequested = viewOnce === true;
+        // Sticker and GIF requests are decided by the body alone, so they are
+        // refused before any send token is spent. Audio and document bodies
+        // only reveal their type at fetch time; the client still refuses them
+        // before the socket is touched.
+        if (viewOnceRequested && (!!asSticker || kind === 'sticker' || kind === 'gif')) {
+          res.status(400).json({
+            error: 'viewOnce is only supported for image and video messages',
+            failureClass: 'invalid_request',
+          });
+          return;
+        }
+        // For a data URL the MIME is visible right here, so an unsupported
+        // play-once kind is refused before any send token is spent; the very
+        // list is enforced in sendFile before the socket, which also covers
+        // http(s) fileUrls whose type only reveals itself at fetch time.
+        if (viewOnceRequested) {
+          const dataMime = fileUrl
+            .match(/^data:([^,;]*)/i)?.[1]
+            ?.trim()
+            .toLowerCase();
+          if (dataMime && !MEDIA_VIEW_ONCE_MIME_TYPES.has(dataMime)) {
+            res.status(400).json({
+              error: `viewOnce media must be one of ${Array.from(MEDIA_VIEW_ONCE_MIME_TYPES).join(', ')}, got ${dataMime}`,
+              failureClass: 'invalid_request',
+            });
+            return;
+          }
         }
         const options = {
           quality: parseMediaQuality(req.body.quality),
           asSticker: !!asSticker || kind === 'sticker',
           asGif: kind === 'gif',
+          viewOnce: viewOnceRequested,
           replyToMessageId: optionalString(replyTo),
           fileName: optionalString(fileName),
         };
@@ -1758,6 +1804,7 @@ export function createRouter(
               quality: options.quality,
               sourceDigest,
               sourceMimeType,
+              viewOnce: viewOnceRequested,
             })
           : undefined;
         if (reservation?.state === 'conflict') {
@@ -1800,7 +1847,12 @@ export function createRouter(
         const sentAt = reservation
           ? await confirmTextSend(sendToken!, messageId!)
           : new Date().toISOString();
-        res.json({ sent: true, messageId, sentAt });
+        res.json({
+          sent: true,
+          messageId,
+          sentAt,
+          ...(viewOnceRequested ? { viewOnce: true } : {}),
+        });
       } catch (e) {
         if (e instanceof SendAlreadyClaimedError) {
           res.status(409).json({
@@ -1846,11 +1898,21 @@ export function createRouter(
             caption?: string;
             fileName?: string;
             replyTo?: string;
+            viewOnce?: boolean;
           };
           if (!body.conversationId || !body.fileUrl)
             throw new CapabilityError(
               'INVALID_CAPABILITY_INPUT',
               'conversationId and fileUrl are required'
+            );
+          if (body.viewOnce !== undefined && typeof body.viewOnce !== 'boolean')
+            throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'viewOnce must be a boolean');
+          // These routes are sticker and GIF by definition; WhatsApp offers
+          // no play-once sticker or GIF.
+          if (body.viewOnce === true)
+            throw new CapabilityError(
+              'INVALID_CAPABILITY_INPUT',
+              'viewOnce is only supported for image and video messages'
             );
           const messageId = await client.sendFile(body.conversationId, body.fileUrl, body.caption, {
             asSticker: kind === 'sticker',

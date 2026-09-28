@@ -410,3 +410,113 @@ test('expanded alpha WebP exceeding the inline limit fails before token claim or
   assert.equal(claimed, false);
   assert.equal(sent, false);
 });
+
+function viewOnceStubClient() {
+  const sent: any[] = [];
+  const client = Object.create(BaileysClient.prototype) as any;
+  client.sock = {
+    user: { id: 'owner@s.whatsapp.net' },
+    sendMessage: async (_jid: string, payload: any) => {
+      sent.push(payload);
+      return { key: { id: `receipt-${sent.length}` }, message: {} };
+    },
+  };
+  client.toRawJid = (jid: string) => jid;
+  client.buildQuotedFromId = async () => undefined;
+  client.rememberKey = () => undefined;
+  client.rememberMessageForRetry = () => undefined;
+  client.persistSentMedia = async () => undefined;
+  client.logger = { warn: () => undefined, error: () => undefined };
+  return { client, sent };
+}
+
+const VIEW_ONCE_REFUSAL = (error: unknown) =>
+  (error as any)?.code === 'INVALID_CAPABILITY_INPUT' &&
+  /viewOnce is only supported for image and video/.test((error as any)?.message || '');
+
+test('view-once travels in the Baileys payload for image and video only', async () => {
+  const image = viewOnceStubClient();
+  assert.equal(
+    await image.client.sendFile('peer@s.whatsapp.net', 'data:image/png;base64,YQ==', 'mira', {
+      viewOnce: true,
+    }),
+    'receipt-1'
+  );
+  assert.equal(image.sent[0].viewOnce, true);
+  assert.equal(image.sent[0].caption, 'mira');
+  const video = viewOnceStubClient();
+  assert.equal(
+    await video.client.sendFile('peer@s.whatsapp.net', 'data:video/mp4;base64,YQ==', undefined, {
+      viewOnce: true,
+    }),
+    'receipt-1'
+  );
+  assert.equal(video.sent[0].viewOnce, true);
+  // A plain send keeps the exact payload shape it had before view-once existed.
+  const plain = viewOnceStubClient();
+  await plain.client.sendFile('peer@s.whatsapp.net', 'data:image/png;base64,YQ==');
+  assert.equal('viewOnce' in plain.sent[0], false);
+  await plain.client.sendFile('peer@s.whatsapp.net', 'data:image/png;base64,YQ==', undefined, {
+    viewOnce: false,
+  });
+  assert.equal('viewOnce' in plain.sent[1], false);
+});
+
+test('view-once is refused for sticker, GIF, audio and document before the socket', async () => {
+  const { client, sent } = viewOnceStubClient();
+  const mp4ish = Buffer.concat([Buffer.from([0, 0, 1, 0]), Buffer.from('ftypisom')]).toString(
+    'base64'
+  );
+  const refusals: Array<[string, unknown[]]> = [
+    ['sticker', ['peer@s.whatsapp.net', 'data:image/webp;base64,YQ==', undefined, { asSticker: true, viewOnce: true }]],
+    ['gif by flag', ['peer@s.whatsapp.net', `data:video/mp4;base64,${mp4ish}`, undefined, { asGif: true, viewOnce: true }]],
+    ['gif by content', ['peer@s.whatsapp.net', 'data:image/gif;base64,YQ==', undefined, { viewOnce: true }]],
+    ['audio', ['peer@s.whatsapp.net', 'data:audio/ogg;base64,YQ==', undefined, { viewOnce: true }]],
+    ['document', ['peer@s.whatsapp.net', 'data:application/pdf;base64,YQ==', undefined, { viewOnce: true }]],
+  ];
+  for (const [, args] of refusals)
+    await assert.rejects(() => (client as any).sendFile(...args), VIEW_ONCE_REFUSAL);
+  assert.equal(sent.length, 0, 'no refused kind may reach the socket');
+  // A non-boolean flag is rejected before anything is fetched or sent.
+  await assert.rejects(
+    () =>
+      (client as any).sendFile('peer@s.whatsapp.net', 'data:image/png;base64,YQ==', undefined, {
+        viewOnce: 'true',
+      }),
+    (error: any) => error?.code === 'INVALID_CAPABILITY_INPUT' && /boolean/.test(error?.message)
+  );
+  assert.equal(sent.length, 0);
+});
+
+test('view-once accepts only the proxy-aligned MIME set before the socket', async () => {
+  const { client, sent } = viewOnceStubClient();
+  for (const fileUrl of [
+    'data:image/tiff;base64,YQ==',
+    'data:image/heic;base64,YQ==',
+    'data:video/x-msvideo;base64,YQ==',
+    'data:video/3gpp;base64,YQ==',
+  ]) {
+    await assert.rejects(
+      () => (client as any).sendFile('peer@s.whatsapp.net', fileUrl, undefined, { viewOnce: true }),
+      (error: any) =>
+        error?.code === 'INVALID_CAPABILITY_INPUT' && /viewOnce .* must be one of/.test(error?.message)
+    );
+  }
+  assert.equal(sent.length, 0, 'an unsupported play-once MIME must not reach the socket');
+  // The same bytes without play-once still send: the gate guards viewOnce only.
+  assert.equal(await client.sendFile('peer@s.whatsapp.net', 'data:image/tiff;base64,YQ=='), 'receipt-1');
+  assert.equal('viewOnce' in sent[0], false);
+  // Every proxy-allowed kind reaches the socket with the flag.
+  for (const fileUrl of [
+    'data:image/jpeg;base64,YQ==',
+    'data:image/png;base64,YQ==',
+    'data:image/webp;base64,YQ==',
+    'data:video/mp4;base64,YQ==',
+    'data:video/webm;base64,YQ==',
+    'data:video/quicktime;base64,YQ==',
+  ])
+    assert.ok(
+      await client.sendFile('peer@s.whatsapp.net', fileUrl, undefined, { viewOnce: true })
+    );
+  assert.equal(sent.filter(payload => payload.viewOnce === true).length, 6);
+});

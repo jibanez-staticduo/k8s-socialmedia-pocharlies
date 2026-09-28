@@ -17,6 +17,25 @@
 .composer-media-card .composer-attachment-label { max-width: min(38vw, 220px); }
 .composer-media-card .composer-attachment-remove { flex: 0 0 auto; }
 
+.composer-view-once {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 5px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-view-once[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #062b1b;
+}
+
+body[data-theme="light"] .composer-view-once[aria-pressed="true"] { color: #fff; }
+
 .camera-overlay {
   position: fixed;
   z-index: 1000;

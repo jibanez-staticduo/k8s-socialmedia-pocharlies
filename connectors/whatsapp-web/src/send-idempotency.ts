@@ -161,6 +161,10 @@ export async function reserveMediaSend(input: {
   replyToMessageId?: string;
   sourceDigest?: string;
   sourceMimeType?: string;
+  /** Replay protection for play-once media: the same bytes replayed without
+   * the flag (or vice versa) are a different message. The marker is appended
+   * only when true so every pre-existing fingerprint stays byte-identical. */
+  viewOnce?: boolean;
 }): Promise<SendReservation> {
   if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
     throw new Error('Invalid sourceDigest');
@@ -193,6 +197,7 @@ export async function reserveMediaSend(input: {
         sourceMimeType,
         // Preserve existing source reservations across upgrades.
         ...(quality === 'source' ? [] : [quality]),
+        ...(input.viewOnce === true ? ['viewOnce'] : []),
       ])
     )
     .update('\0')

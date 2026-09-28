@@ -173,6 +173,41 @@ test('image upload sends one media message with its caption', async t => {
   assert.equal(outbound.body.sourceMimeType, 'image/png');
   assert.equal((await response.json()).messageId, 'image-receipt');
 });
+test('view-once media is forwarded only for supported photos and videos', async t => {
+  const outbound = [];
+  const { request } = await fixture(t, { fetchImpl: async (_url, options) => {
+    outbound.push(JSON.parse(options.body));
+    return Response.json({ messageId: 'media-receipt' });
+  } });
+  const base = { account: 'personal', chat: 'personal-chat', data: 'iVBORw0KGgo=' };
+  for (const media of [
+    { name: 'photo.png', mimeType: 'image/png' },
+    { name: 'clip.mp4', mimeType: 'video/mp4' },
+  ]) {
+    assert.equal((await request('/api/upload', { ...base, ...media, viewOnce: true })).status, 200);
+    assert.equal(outbound.at(-1).viewOnce, true);
+    assert.equal((await request('/api/upload', { ...base, ...media })).status, 200);
+    assert.equal(Object.hasOwn(outbound.at(-1), 'viewOnce'), false);
+  }
+  assert.equal(outbound.length, 4);
+});
+test('view-once upload rejects invalid flags and unsupported media before dispatch', async t => {
+  const outbound = [];
+  const { request } = await fixture(t, { fetchImpl: async (_url, options) => {
+    outbound.push(JSON.parse(options.body));
+    return Response.json({ messageId: 'unexpected' });
+  } });
+  const base = { account: 'personal', chat: 'personal-chat', data: 'iVBORw0KGgo=' };
+  for (const media of [
+    { name: 'photo.png', mimeType: 'image/png', viewOnce: 'true' },
+    { name: 'document.pdf', mimeType: 'application/pdf', viewOnce: true },
+    { name: 'voice.ogg', mimeType: 'audio/ogg', voice: true, viewOnce: true },
+    { name: 'animation.gif', mimeType: 'image/gif', kind: 'gif', viewOnce: true },
+  ]) {
+    assert.equal((await request('/api/upload', { ...base, ...media })).status, 400);
+  }
+  assert.equal(outbound.length, 0);
+});
 test('audio with text is rejected before provider send', async t => {
   let calls = 0;
   const { request } = await fixture(t, { fetchImpl: async () => { calls += 1; return Response.json({ messageId: 'unwanted' }); } });

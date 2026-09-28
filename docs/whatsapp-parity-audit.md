@@ -81,7 +81,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Pinned messages and event RSVP | Partial | The pin bar works for captured events, but live storage has no pin events and Baileys exposes no current-pin query. Historical backfill is not guaranteed; real-provider write acceptance remains unverified |
 | Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names, including results across media, documents and links. Global-library multiselect supports download, delete, star and forward with synthetic QA; longest-first sorting uses stored audio/video duration where available. Older attachments without saved duration retain timestamp order after known-duration clips |
 | Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
-| Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
+| Camera, media editing and view-once | Partial | Camera capture/cleanup tested; view-once image/video sends pass synthetic app, browser and connector QA. Crop/rotate/annotation and real-provider confirmation remain |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
 | Location and live location | Partial | Received locations render; the authenticated WhatsApp Web attachment menu inspected on 28 Sep 2026 has no location-send action |
 | Link and map previews | Existing | Reference QA and failure states |
@@ -619,3 +619,13 @@ the UI can change to the categories that do not require a member editor.
 An existing `contact_blacklist` selection remains visible and unchanged until
 the owner explicitly selects a different category. Editing the excluded
 contacts and publishing a status with an explicit audience are still pending.
+
+View-once sending lets the owner mark each staged photo or video separately.
+The app preserves that choice through optimistic delivery and retry, and sends
+the flag only for supported image/video types. The proxy and connector reject
+invalid flags and unsupported media; the connector includes the flag in
+Baileys' image/video payload and in the idempotency fingerprint only when it is
+true, preserving existing normal-send fingerprints. Synthetic browser QA checks
+a mixed media/document batch and the mobile composer; app and connector suites
+pass without sending real media. Provider acceptance and how received view-once
+messages appear in historical storage still need live read-only verification.

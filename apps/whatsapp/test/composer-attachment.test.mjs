@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachmentCaptionError, attachmentError, filesFromClipboard, MAX_ATTACHMENT_BYTES, readUploadQuality, readUploadQualityPreference, uploadPayload, writeUploadQualityPreference } from '../public/composer-attachment.mjs';
+import { attachmentCaptionError, attachmentError, canViewOnce, filesFromClipboard, MAX_ATTACHMENT_BYTES, readUploadQuality, readUploadQualityPreference, uploadPayload, writeUploadQualityPreference } from '../public/composer-attachment.mjs';
 
 test('clipboard image and document items become attachments without requiring a file picker', () => {
   const image = { name: 'captura.png', type: 'image/png', size: 24 };
@@ -22,6 +22,18 @@ test('attachment and typed text form one media upload with a caption', () => {
     name: 'foto.jpg', mimeType: 'image/jpeg', data: 'AQID', voice: false, caption: 'Nos vemos', replyToMessageId: 'message-uuid',
   });
   assert.equal(attachmentError({ name: 'foto.jpg', type: 'image/jpeg', size: MAX_ATTACHMENT_BYTES + 1 }), 'El archivo supera el límite de 10 MiB.');
+});
+
+test('view once is offered only for photos and videos and travels with that upload', () => {
+  for (const type of ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime']) {
+    assert.equal(canViewOnce({type}), true, type);
+  }
+  for (const type of ['image/gif', 'audio/mpeg', 'application/pdf']) {
+    assert.equal(canViewOnce({type}), false, type);
+  }
+  const photo = {name:'private.jpg', type:'image/jpeg'};
+  assert.equal(uploadPayload(photo, 'AQID', '', '', 'source', true).viewOnce, true);
+  assert.equal('viewOnce' in uploadPayload(photo, 'AQID'), false);
 });
 
 test('unsupported files cannot be staged; document MIME must match extension', () => {

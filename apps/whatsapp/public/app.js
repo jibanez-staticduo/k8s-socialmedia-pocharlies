@@ -242,7 +242,7 @@ function persistOutbox() {
   const now = Date.now();
   const entries = [...state.outgoing.values()].flat().filter(item => now - new Date(item.timestamp).getTime() < OUTBOX_TTL_MS).slice(-20).map(item => ({
     id:item.id, account:item.account, chat:item.chat, text:item.text.slice(0, 20000), timestamp:item.timestamp,
-    state:item.state, messageId:item.messageId, replyTo:item.replyTo, sendToken:item.sendToken, retryable:item.text.length <= 20000, fileName:item.file?.name || item.fileName || '',
+    state:item.state, messageId:item.messageId, replyTo:item.replyTo, sendToken:item.sendToken, retryable:item.text.length <= 20000, fileName:item.file?.name || item.fileName || '', viewOnce:item.viewOnce === true,
   }));
   try { if (entries.length) sessionStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify({scope:outboxScope, entries})); else sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {}
 }
@@ -321,18 +321,19 @@ function renderMessages() {
     if (item.state === 'confirmed') bubble.removeAttribute('aria-label');
     else bubble.setAttribute('aria-label', item.state === 'failed' ? 'Mensaje sin confirmar' : 'Enviando mensaje');
     const meta = bubble.querySelector('.message-meta') || bubble.appendChild(node('div', 'message-meta'));
-    meta.querySelectorAll('.message-send-feedback, .message-restore, .message-reply-warning, .message-file-warning').forEach(element => element.remove());
+    meta.querySelectorAll('.message-send-feedback, .message-restore, .message-reply-warning, .message-file-warning, .message-view-once').forEach(element => element.remove());
+    if (item.viewOnce) meta.append(node('span', 'message-view-once', 'Ver una vez'));
     if (item.state !== 'confirmed') meta.append(node('span', 'message-send-feedback', item.state === 'failed' ? 'Entrega no confirmada' : 'Enviando…'));
     if (item.state === 'failed') {
       if (item.replyTo) meta.append(node('span', 'message-reply-warning', ' · La cita se recuperará al editar si sigue disponible.'));
-      if (item.fileName && !item.file) meta.append(node('span', 'message-file-warning', ' · Adjunta el archivo de nuevo.'));
+      if (item.fileName && !item.file) meta.append(node('span', 'message-file-warning', item.viewOnce ? ' · Adjunta el archivo y activa Ver una vez de nuevo.' : ' · Adjunta el archivo de nuevo.'));
       const restore = node('button', 'message-restore', 'Editar texto');
       restore.type = 'button';
       restore.onclick = () => {
         if (item.file && pendingFiles.length) { error('Retira los adjuntos actuales antes de recuperar este mensaje.'); return; }
         const composer = $('message');
         composer.value = composer.value ? `${composer.value}\n${item.text}` : item.text;
-        if (item.file && !pendingFiles.length) stageAttachment(item.file);
+        if (item.file && !pendingFiles.length) stageAttachment(item.file, item.viewOnce === true);
         if (item.fileName && !item.file) error(`Texto recuperado. Adjunta ${item.fileName} de nuevo antes de enviarlo.`);
         if (item.replyTo && !featureUI?.restoreReply?.(item.replyTo)) error('Texto recuperado. Vuelve a seleccionar la cita original antes de enviarlo.');
         saveDraft();
@@ -354,7 +355,7 @@ function renderMessages() {
           state.signature = '';
           renderMessages();
           const replyTo = item.replyTo || '';
-          if (item.file) void sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption || '', replyTo, item.quality));
+          if (item.file) void sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption || '', replyTo, item.quality, item.viewOnce));
           else void sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
         };
         meta.append(retry);
@@ -618,8 +619,10 @@ $('composer').onsubmit = event => {
   const plans = pendingFiles.length
     ? mediaTools.planAttachmentSends(pendingFiles.map(entry => entry.file), text, featurePayload.replyTo)
     : [{text, replyTo: featurePayload.replyTo}];
+  const viewOnceByFile = new Map(pendingFiles.map(entry => [entry.file, entry.viewOnce === true]));
   const items = plans.map(plan => ({id: `local-${crypto.randomUUID()}`, account: ctx.account, chat: ctx.chat, ctx,
     text: plan.text || plan.caption || '', caption: plan.caption || '', file: plan.file || null,
+    viewOnce: plan.file ? viewOnceByFile.get(plan.file) === true : false,
     quality: plan.file ? attachmentTools.readUploadQuality(safeLocalStorage(), ctx.account, plan.file) : 'source',
     replyTo: plan.replyTo || '', sendToken: crypto.randomUUID(), timestamp: new Date().toISOString(), state: 'sending', messageId: null}));
   const key = outgoingKey(ctx.account, ctx.chat);
@@ -639,7 +642,7 @@ $('composer').onsubmit = event => {
 async function sendPlannedMessages(items) {
   for (const item of items) {
     if (item.file) {
-      await sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption, item.replyTo, item.quality));
+      await sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption, item.replyTo, item.quality, item.viewOnce));
     } else {
       const replyTo = item.replyTo;
       await sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
@@ -683,6 +686,17 @@ function renderStagedFiles() {
     }
     const label = node('span', 'composer-attachment-label', `${entry.file.name || 'Imagen pegada'} · ${(entry.file.size / 1024).toFixed(0)} KB`);
     if (index === 0) label.id = 'attachment-label';
+    if (attachmentTools.canViewOnce(entry.file)) {
+      const once = node('button', 'composer-view-once', 'Ver una vez');
+      once.type = 'button';
+      once.setAttribute('aria-label', `Ver una vez: ${entry.file.name || 'imagen'}`);
+      once.setAttribute('aria-pressed', String(entry.viewOnce === true));
+      once.onclick = () => {
+        entry.viewOnce = !entry.viewOnce;
+        once.setAttribute('aria-pressed', String(entry.viewOnce));
+      };
+      card.append(once);
+    }
     const remove = node('button', 'composer-attachment-remove', 'Quitar');
     if (index === 0) remove.id = 'attachment-remove';
     remove.type = 'button';
@@ -705,16 +719,16 @@ function cancelAttachment() {
   pendingFiles = [];
   renderStagedFiles();
 }
-function stageAttachment(file) {
-  return stageSelectedFiles([file]);
+function stageAttachment(file, viewOnce = false) {
+  return stageSelectedFiles([file], viewOnce);
 }
-function stageSelectedFiles(files) {
+function stageSelectedFiles(files, viewOnce = false) {
   if (!state.chat || !state.sending || !attachmentTools || !files.length) return false;
   const rejected = [];
   for (const file of files) {
     const problem = attachmentTools.attachmentError(file);
     if (problem) { rejected.push(`${file?.name || 'Archivo'}: ${problem}`); continue; }
-    pendingFiles.push({id: crypto.randomUUID(), file,
+    pendingFiles.push({id: crypto.randomUUID(), file, viewOnce: viewOnce && attachmentTools.canViewOnce(file),
       previewUrl: file.type?.startsWith('image/') ? URL.createObjectURL(file) : ''});
   }
   renderStagedFiles();

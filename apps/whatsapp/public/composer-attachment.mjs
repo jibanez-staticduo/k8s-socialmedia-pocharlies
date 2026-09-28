@@ -34,6 +34,10 @@ export function readUploadQuality(storage, accountId, file) {
   return readUploadQualityPreference(storage, accountId);
 }
 
+export function canViewOnce(file) {
+  return /^(image\/(jpeg|png|webp)|video\/(mp4|webm|quicktime))$/.test(file?.type || '');
+}
+
 function attachmentName(file) {
   if (file.name) return file.name;
   const imageExtension = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' }[file.type];
@@ -63,7 +67,7 @@ export function attachmentCaptionError(file, caption) {
     : '';
 }
 
-export function uploadPayload(file, data, caption = '', replyToMessageId = '', quality = 'source') {
+export function uploadPayload(file, data, caption = '', replyToMessageId = '', quality = 'source', viewOnce = false) {
   return {
     name: attachmentName(file),
     mimeType: file.type || 'application/octet-stream',
@@ -71,6 +75,7 @@ export function uploadPayload(file, data, caption = '', replyToMessageId = '', q
     voice: false,
     caption: caption.trim(),
     ...(quality !== 'source' ? { quality } : {}),
+    ...(viewOnce ? { viewOnce: true } : {}),
     ...(replyToMessageId ? { replyToMessageId } : {}),
   };
 }
