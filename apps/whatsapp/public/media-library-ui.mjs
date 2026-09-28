@@ -89,6 +89,15 @@ export function normalizeMediaLibraryItem(raw, baseUrl = 'http://localhost/', ac
   };
 }
 
+export function uniqueMediaMessages(items) {
+  const messages = new Map();
+  for (const item of items) {
+    if (!item.chatId || !item.messageId) continue;
+    messages.set(JSON.stringify([item.chatId, item.messageId]), { chat: item.chatId, messageId: item.messageId });
+  }
+  return [...messages.values()];
+}
+
 export function createMediaLibraryClient({ api, getAccount, baseUrl = () => 'http://localhost/' } = {}) {
   let generation = 0;
   const isCurrent = token => token.generation === generation && token.account === getAccount();
@@ -123,6 +132,7 @@ export function installMediaLibraryUI({
   windowRef = globalThis.window,
   api,
   getAccount,
+  getChats = () => [],
   selectChat = () => {},
   onOpen = () => {},
 } = {}) {
@@ -226,8 +236,11 @@ export function installMediaLibraryUI({
   const selectionBar = make('div', 'media-library-selection-bar');
   selectionBar.hidden = true;
   const selectionCount = make('span', 'media-library-selection-count');
+  const deleteButton = control('media-library-selection-action is-subtle', 'Eliminar');
+  const starButton = control('media-library-selection-action is-subtle', 'Destacar');
   const downloadButton = control('media-library-selection-action', 'Descargar');
-  selectionBar.append(selectionCount, downloadButton);
+  const forwardButton = control('media-library-selection-action is-subtle', 'Reenviar mensajes');
+  selectionBar.append(selectionCount, deleteButton, starButton, downloadButton, forwardButton);
 
   const status = make('p', 'media-library-status');
   status.setAttribute('role', 'status');
@@ -253,7 +266,13 @@ export function installMediaLibraryUI({
   const previewBody = make('div', 'media-library-preview-body');
   const previewChat = control('media-library-preview-chat', 'Abrir chat de origen');
   preview.append(previewHeader, previewBody, previewChat);
-  panel.append(header, controls, selectionBar, status, retry, scroll, preview);
+  const actionShade = make('div', 'media-library-action-shade');
+  actionShade.hidden = true;
+  const actionDialog = make('section', 'media-library-action-dialog');
+  actionDialog.setAttribute('role', 'dialog');
+  actionDialog.setAttribute('aria-modal', 'true');
+  actionShade.append(actionDialog);
+  panel.append(header, controls, selectionBar, status, retry, scroll, preview, actionShade);
   overlay.append(panel);
   documentRef.body.append(overlay);
 
@@ -268,6 +287,9 @@ export function installMediaLibraryUI({
   let searchTimer = null;
   let requestSeq = 0;
   let selecting = false;
+  let acting = false;
+  let actionSeq = 0;
+  let actionError = false;
   const selected = new Map();
 
   const signature = () => `${getAccount()}|${tab}|${senderFilter.input.value}|${orderFilter.input.value}|${searchInput.value.trim()}`;
@@ -295,15 +317,20 @@ export function installMediaLibraryUI({
     selectButton.textContent = selecting ? 'Cancelar' : 'Seleccionar';
     selectionBar.hidden = !selecting;
     selectionCount.textContent = `${selected.size} seleccionado${selected.size === 1 ? '' : 's'}`;
-    downloadButton.disabled = !selected.size || [...selected.values()].some(item => !item.url || item.kind === 'link');
+    const chosen = [...selected.values()];
+    for (const button of [deleteButton, starButton, forwardButton]) {
+      button.disabled = !selected.size || acting || chosen.some(item => !item.chatId || !item.messageId);
+    }
+    downloadButton.disabled = !selected.size || acting || chosen.some(item => !item.url || item.kind === 'link');
+    selectButton.disabled = acting;
     if (loading) setStatus('Cargando contenido…', 'loading');
     else if (failure) setStatus(failure, 'error');
-    else if (notice) setStatus(notice, 'notice');
+    else if (notice) setStatus(notice, actionError ? 'error-action' : 'notice');
     else if (loadedSignature === signature()) setStatus(cards.length ? '' : (EMPTY_TEXT[tab] || 'Sin resultados.'), cards.length ? '' : 'empty');
     else setStatus('');
     more.hidden = !nextCursor || Boolean(failure);
-    more.disabled = loading;
-    panel.setAttribute('aria-busy', String(loading));
+    more.disabled = loading || acting;
+    panel.setAttribute('aria-busy', String(loading || acting));
   }
 
   function openPreview(item) {
@@ -398,6 +425,7 @@ export function installMediaLibraryUI({
       const chosen = selected.has(item.id);
       toggle.setAttribute('aria-label', `${chosen ? 'Deseleccionar' : 'Seleccionar'} ${titleFor(item)}`);
       toggle.setAttribute('aria-pressed', String(chosen));
+      toggle.disabled = acting;
       toggle.onclick = () => {
         if (selected.has(item.id)) selected.delete(item.id);
         else selected.set(item.id, item);
@@ -411,7 +439,7 @@ export function installMediaLibraryUI({
   }
 
   async function load({ append = false } = {}) {
-    if (!append) selected.clear();
+    if (!append) { selected.clear(); actionSeq += 1; acting = false; }
     const account = getAccount();
     if (!account) {
       requestSeq += 1;
@@ -459,9 +487,10 @@ export function installMediaLibraryUI({
     windowRef?.clearTimeout?.(searchTimer);
     client.invalidate();
     requestSeq += 1;
+    actionSeq += 1; acting = false;
     items = []; nextCursor = null; failure = ''; loading = false; loadedSignature = '';
     selecting = false; selected.clear();
-    closePreview();
+    closePreview(); actionShade.hidden = true;
     overlay.hidden = true;
     entry.setAttribute('aria-expanded', 'false');
     opener?.focus?.();
@@ -470,8 +499,9 @@ export function installMediaLibraryUI({
   function switchTab(kind) {
     if (kind === tab || !TAB_LABELS.has(kind)) return;
     tab = kind;
+    actionSeq += 1; acting = false;
     selected.clear();
-    closePreview();
+    closePreview(); actionShade.hidden = true;
     items = []; nextCursor = null; failure = '';
     void load();
   }
@@ -489,6 +519,74 @@ export function installMediaLibraryUI({
       link.remove();
     }
   };
+  const selectedMessages = () => uniqueMediaMessages(selected.values());
+  const actionCurrent = token => !overlay.hidden && token.account === getAccount() && token.seq === requestSeq && token.action === actionSeq;
+  async function runAction(path, extra, successText) {
+    const token = { account: getAccount(), seq: requestSeq, action: actionSeq + 1 };
+    const messages = selectedMessages();
+    if (!messages.length || acting || !token.account) return;
+    actionSeq = token.action;
+    acting = true; notice = ''; actionError = false; render();
+    let completed = 0;
+    let errorText = '';
+    for (const message of messages) {
+      if (!actionCurrent(token)) break;
+      try {
+        const result = await api(path, { account: token.account, ...message, ...extra });
+        if (result?.account !== token.account || result.confirmed !== true) throw new Error('La acción no fue confirmada.');
+        if (!actionCurrent(token)) break;
+        completed += 1;
+        for (const [id, item] of selected) {
+          if (item.chatId === message.chat && item.messageId === message.messageId) selected.delete(id);
+        }
+        if (path === '/api/messages/delete') items = items.filter(item => item.chatId !== message.chat || item.messageId !== message.messageId);
+      } catch (error) { errorText = error?.message || 'No se pudo completar la acción.'; break; }
+    }
+    if (!actionCurrent(token)) return;
+    acting = false;
+    actionError = Boolean(errorText);
+    const completedText = completed ? `${completed} mensaje${completed === 1 ? '' : 's'} ${successText}.` : '';
+    notice = errorText
+      ? `${completedText} ${errorText}${path === '/api/messages/forward' ? ' Comprueba el chat de destino antes de reintentar.' : ''}`.trim()
+      : completedText;
+    render();
+  }
+  function openAction(title, build) {
+    if (!selected.size || acting) return;
+    actionDialog.replaceChildren();
+    const heading = make('h3', '', title);
+    const cancel = control('media-library-selection-action is-subtle', 'Cancelar');
+    cancel.onclick = () => { actionShade.hidden = true; selectButton.focus(); };
+    actionDialog.append(heading);
+    build(actionDialog, cancel);
+    actionShade.hidden = false;
+    cancel.focus();
+  }
+  actionShade.onclick = event => { if (event.target === actionShade) { actionShade.hidden = true; selectButton.focus(); } };
+  starButton.onclick = () => void runAction('/api/chat-actions', { action: 'starred' }, 'destacado');
+  deleteButton.onclick = () => openAction('Eliminar mensajes seleccionados', (dialog, cancel) => {
+    dialog.append(make('p', '', 'Elige cómo quieres eliminarlos.'));
+    const me = control('media-library-selection-action', 'Eliminar para mí');
+    me.onclick = () => { actionShade.hidden = true; void runAction('/api/messages/delete', { scope: 'me' }, 'eliminado'); };
+    const everyone = control('media-library-selection-action is-subtle', 'Eliminar para todos');
+    everyone.disabled = [...selected.values()].some(item => !item.fromMe);
+    everyone.onclick = () => { actionShade.hidden = true; void runAction('/api/messages/delete', { scope: 'everyone' }, 'eliminado'); };
+    dialog.append(me, everyone, cancel);
+  });
+  forwardButton.onclick = () => openAction('Reenviar mensajes', (dialog, cancel) => {
+    const label = make('label', 'media-library-action-target', 'Conversación de destino');
+    const target = make('select');
+    target.setAttribute('aria-label', 'Conversación de destino');
+    const empty = make('option', '', 'Selecciona una conversación'); empty.value = ''; target.append(empty);
+    for (const chat of getChats()) {
+      const option = make('option', '', chat.name || chat.id); option.value = chat.id; target.append(option);
+    }
+    const send = control('media-library-selection-action', 'Reenviar');
+    send.disabled = true;
+    target.onchange = () => { send.disabled = !target.value; };
+    send.onclick = () => { if (!target.value) return; actionShade.hidden = true; void runAction('/api/messages/forward', { targetChat: target.value }, 'reenviado'); };
+    label.append(target); dialog.append(label, send, cancel);
+  });
   closeButton.onclick = close;
   previewClose.onclick = () => hidePreview(true);
   for (const tabButton of tabButtons) tabButton.onclick = () => switchTab(tabButton.dataset.kind);
@@ -510,9 +608,9 @@ export function installMediaLibraryUI({
   retry.onclick = () => void load();
   documentRef.addEventListener('keydown', event => {
     if (overlay.hidden || event.defaultPrevented) return;
-    if (event.key === 'Escape') { event.preventDefault(); if (preview.hidden) close(); else hidePreview(true); return; }
+    if (event.key === 'Escape') { event.preventDefault(); if (!actionShade.hidden) { actionShade.hidden = true; selectButton.focus(); } else if (preview.hidden) close(); else hidePreview(true); return; }
     if (event.key !== 'Tab') return;
-    const focusable = [...panel.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href]')]
+    const focusable = [...(actionShade.hidden ? panel : actionDialog).querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), a[href]')]
       .filter(element => !element.closest('[hidden]'));
     const first = focusable[0];
     const last = focusable.at(-1);
@@ -532,9 +630,10 @@ export function installMediaLibraryUI({
       windowRef?.clearTimeout?.(searchTimer);
       client.invalidate();
       requestSeq += 1;
+      actionSeq += 1; acting = false;
       items = []; nextCursor = null; failure = ''; loading = false; loadedSignature = ''; notice = '';
       selected.clear();
-      closePreview();
+      closePreview(); actionShade.hidden = true;
       if (overlay.hidden) render();
       else void load();
     },

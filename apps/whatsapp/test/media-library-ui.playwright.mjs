@@ -17,8 +17,8 @@ import { installMediaLibraryUI } from '/media-library-ui.mjs';
 window.__selected = [];
 window.__account = 'alpha';
 window.__opens = [];
-const api = async url => {
-  const response = await fetch(url, { credentials: 'same-origin' });
+const api = async (url, data) => {
+  const response = await fetch(url, { credentials: 'same-origin', ...(data ? {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(data)} : {}) });
   const result = await response.json().catch(() => null);
   if (!response.ok) throw new Error(result?.error || 'Error del servidor (' + response.status + ').');
   return result;
@@ -26,6 +26,7 @@ const api = async url => {
 window.__library = installMediaLibraryUI({
   api,
   getAccount: () => window.__account,
+  getChats: () => [{id: '123@s.whatsapp.net', name: 'Ana'}, {id: '456@s.whatsapp.net', name: 'Bruno'}],
   selectChat: chat => window.__selected.push(chat),
   onOpen: () => {
     window.__opens.push(document.activeElement?.getAttribute('aria-label') || String(document.activeElement?.tagName));
@@ -78,6 +79,10 @@ let slowKey = null;
 const blocked = [];
 const releaseBlocked = () => { for (const resolve of blocked.splice(0, blocked.length)) resolve(); };
 const requests = [];
+const mutations = [];
+let rejectMutation = false;
+let slowMutation = false;
+const blockedMutations = [];
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function readContrasts() {
@@ -128,6 +133,13 @@ const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 await page.route('**/api/**', async route => {
   const url = new URL(route.request().url());
+  if (route.request().method() === 'POST') {
+    const body = route.request().postDataJSON();
+    mutations.push({path: url.pathname, ...body});
+    if (slowMutation) await new Promise(resolve => blockedMutations.push(resolve));
+    if (rejectMutation) return route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'Proveedor no disponible'})});
+    return route.fulfill({contentType: 'application/json', body: JSON.stringify({account: body.account, confirmed: true})});
+  }
   if (url.pathname.startsWith('/api/media/')) return route.fulfill({ contentType: 'image/png', body: png });
   if (url.pathname !== '/api/media-library') return route.fulfill({ contentType: 'application/json', body: '{}' });
   const query = Object.fromEntries(url.searchParams);
@@ -224,6 +236,31 @@ try {
   assert.match(file.url(), /\/api\/media\/img-1\?account=alpha/);
   await list.getByRole('button', { name: 'Seleccionar pendiente.jpg' }).click();
   assert.equal(await downloadAction.isDisabled(), true, 'un archivo no disponible no inicia una descarga parcial');
+  if (process.env.UI_OUTPUT_DIR) {
+    await mkdir(process.env.UI_OUTPUT_DIR, {recursive: true});
+    await page.screenshot({path: path.join(process.env.UI_OUTPUT_DIR, 'media-library-select.png')});
+  }
+  const selectionViewport = page.viewportSize();
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'la barra de selección no desborda el móvil');
+  if (process.env.UI_OUTPUT_DIR) await page.screenshot({path: path.join(process.env.UI_OUTPUT_DIR, 'media-library-select-mobile.png')});
+  await page.setViewportSize(selectionViewport);
+  rejectMutation = true;
+  await panel.getByRole('button', { name: 'Destacar' }).click();
+  await page.waitForFunction(() => document.querySelector('.media-library-status')?.textContent.includes('Proveedor no disponible'));
+  assert.equal(await panel.locator('.media-library-selection-count').textContent(), '2 seleccionados');
+  rejectMutation = false;
+  await panel.getByRole('button', { name: 'Destacar' }).click();
+  await page.waitForFunction(() => document.querySelector('.media-library-selection-count')?.textContent === '0 seleccionados');
+  assert.deepEqual(mutations.filter(item => item.path === '/api/chat-actions').map(item => [item.account, item.chat, item.messageId, item.action]),
+    [['alpha', '123@s.whatsapp.net', 'w-img-1', 'starred'], ['alpha', '123@s.whatsapp.net', 'w-img-1', 'starred'], ['alpha', '123@s.whatsapp.net', 'w-img-2', 'starred']]);
+  await list.getByRole('button', { name: 'Seleccionar clip.mp4' }).click();
+  await panel.getByRole('button', { name: 'Reenviar mensajes' }).click();
+  await panel.getByRole('combobox', { name: 'Conversación de destino' }).selectOption('456@s.whatsapp.net');
+  await panel.getByRole('button', { name: 'Reenviar', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.media-library-selection-count')?.textContent === '0 seleccionados');
+  assert.deepEqual(mutations.filter(item => item.path === '/api/messages/forward').map(item => [item.account, item.chat, item.messageId, item.targetChat]),
+    [['alpha', '123@s.whatsapp.net', 'w-vid-1', '456@s.whatsapp.net']]);
   await panel.getByRole('button', { name: 'Cancelar' }).click();
   assert.equal(await panel.locator('.media-library-selection-bar').isHidden(), true);
   assert.equal(await list.locator('.media-library-select').count(), 0);
@@ -430,8 +467,30 @@ try {
       await page.screenshot({ path: path.join(process.env.UI_OUTPUT_DIR, `media-library-${width}-${theme}.png`) });
     }
   }
+  await panel.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+  await list.getByRole('button', { name: 'Seleccionar pendiente.jpg' }).click();
+  await panel.getByRole('button', { name: 'Eliminar', exact: true }).click();
+  assert.equal(await panel.getByRole('button', { name: 'Eliminar para todos' }).isDisabled(), true);
+  await panel.getByRole('button', { name: 'Eliminar para mí' }).click();
+  await page.waitForFunction(() => !document.querySelector('.media-library-card[data-id="img-2"]'));
+  assert.deepEqual(mutations.filter(item => item.path === '/api/messages/delete').map(item => [item.account, item.chat, item.messageId, item.scope]),
+    [['alpha', '123@s.whatsapp.net', 'w-img-2', 'me']]);
+  slowMutation = true;
+  await list.getByRole('button', { name: 'Seleccionar foto.jpg' }).click();
+  await panel.getByRole('button', { name: 'Destacar' }).click();
+  await page.waitForFunction(() => document.querySelector('#media-library-panel')?.getAttribute('aria-busy') === 'true');
+  for (let attempt = 0; attempt < 50 && !blockedMutations.length; attempt++) await wait(10);
+  assert.equal(blockedMutations.length, 1, 'la mutación anterior está realmente en vuelo');
+  await page.evaluate(() => { window.__account = 'beta'; window.__library.accountChanged(); });
+  await settle();
+  for (const release of blockedMutations.splice(0)) release();
+  slowMutation = false;
+  await wait(80);
+  assert.deepEqual(await ids(), ['beta-1'], 'el resultado antiguo no modifica la biblioteca de otra cuenta');
+  assert.equal(await panel.locator('.media-library-selection-count').textContent(), '0 seleccionados');
+  assert.equal(await status.textContent(), '');
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ status: 'passed', requests: requests.length, accounts: ['alpha', 'beta'], liveMutations: 0 }));
+  console.log(JSON.stringify({ status: 'passed', requests: requests.length, accounts: ['alpha', 'beta'], syntheticMutations: mutations.length, liveMutations: 0 }));
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

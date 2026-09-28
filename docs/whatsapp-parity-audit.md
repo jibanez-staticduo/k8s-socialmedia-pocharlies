@@ -542,9 +542,12 @@ manifest and Chromium test cannot validate.
 The global media library now has a selection mode with visible item state and
 an explicit download action for available binary files. Selection is cleared
 when the account, tab, filters or panel changes; unavailable files disable the
-download action instead of silently downloading a subset. Browser QA uses
-synthetic accounts and downloads. WhatsApp Web's remaining selection actions
-(delete, star and forward) are still pending in this global library.
+download action instead of silently downloading a subset. The same toolbar
+offers delete, star and forward, using each message's source chat and the
+active account. Delete-for-everyone is offered only for outbound selections;
+provider confirmation controls removal from the local view. Browser QA uses
+synthetic accounts, downloads and mocked provider actions, including an action
+that finishes after an account switch. No real message was changed during QA.
 
 On 28 Sep 2026, the authenticated official chat-row menu showed "Añadir a la
 lista" even when no new list had been created, with a "Nueva lista" entry.

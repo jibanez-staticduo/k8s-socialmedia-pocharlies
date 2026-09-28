@@ -4,8 +4,21 @@ import {
   createMediaLibraryClient,
   mediaAssetUrl,
   normalizeMediaLibraryItem,
+  uniqueMediaMessages,
   webLinkUrl,
 } from '../public/media-library-ui.mjs';
+
+test('bulk actions operate once per message even with multiple attachments', () => {
+  assert.deepEqual(uniqueMediaMessages([
+    {chatId: 'one', messageId: 'same'},
+    {chatId: 'one', messageId: 'same'},
+    {chatId: 'two', messageId: 'same'},
+    {chatId: 'one', messageId: ''},
+  ]), [
+    {chat: 'one', messageId: 'same'},
+    {chat: 'two', messageId: 'same'},
+  ]);
+});
 
 const BASE = 'https://wa.example.com/';
 const ASSET = id => `/api/media/${id}?account=personal&chat=123%40s.whatsapp.net`;
