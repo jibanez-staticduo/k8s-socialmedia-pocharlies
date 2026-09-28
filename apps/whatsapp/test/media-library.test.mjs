@@ -25,6 +25,23 @@ test('library scopes all surfaces by account and hides reactions and Novedades',
   assert.equal(result.nextCursor, null);
 });
 
+test('all-kind search returns media, documents and links in one account-scoped page', async () => {
+  let sql;
+  const result = await readMediaLibrary({account: 'personal', params: params({kind: 'all', q: 'report'}), query: async (statement) => {
+    sql = statement;
+    return [
+      row(1, {message_type: 'IMAGE', file_name: 'report.jpg'}),
+      row(2, {message_type: 'DOCUMENT', file_name: 'report.pdf'}),
+      row(3, {message_type: 'TEXT', attachment_id: null, content: 'https://example.com/report'}),
+    ];
+  }});
+  assert.match(sql, /m\.account=\$1/);
+  assert.match(sql, /m\.message_type IN \('IMAGE','VIDEO','AUDIO','STICKER','DOCUMENT'\) OR m\.content/);
+  assert.deepEqual(result.items.map(item => item.kind), ['image', 'document', 'link']);
+  assert.deepEqual(result.items[2].links, [{url: 'https://example.com/report'}]);
+  assert.equal(result.items[2].url, 'https://example.com/report');
+});
+
 test('cursor preserves microseconds and attachment identity across equal-time items', async () => {
   const first = await readMediaLibrary({ account: 'a', params: params({ limit: '1' }), query: async () => [row(1), row(2)] });
   let call;
@@ -63,7 +80,7 @@ test('unavailable media remains an item without an invented download URL', async
 });
 
 test('invalid filters and malformed cursors are refused before querying', async () => {
-  for (const invalid of [{ kind: 'all' }, { sender: 'any' }, { order: 'drop table' }, { limit: '0' }, { limit: '201' }, { cursor: 'nonsense' }, { q: 'x'.repeat(401) }]) {
+  for (const invalid of [{ kind: 'everything' }, { sender: 'any' }, { order: 'drop table' }, { limit: '0' }, { limit: '201' }, { cursor: 'nonsense' }, { q: 'x'.repeat(401) }]) {
     await assert.rejects(readMediaLibrary({ account: 'a', params: params(invalid), query: async () => { assert.fail('query must not execute'); } }), /Invalid|too long/);
   }
 });

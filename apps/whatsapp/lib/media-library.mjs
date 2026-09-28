@@ -9,7 +9,7 @@ function choice(params, key, fallback, values) {
 }
 
 export function mediaLibraryOptions(account, params) {
-  const kind = choice(params, 'kind', 'media', ['media', 'documents', 'links']);
+  const kind = choice(params, 'kind', 'media', ['media', 'documents', 'links', 'all']);
   const sender = choice(params, 'sender', 'all', ['all', 'me', 'others']);
   const order = choice(params, 'order', 'newest', ['newest', 'oldest']);
   const q = (params.get('q') || '').trim();
@@ -52,6 +52,7 @@ export async function readMediaLibrary({ account, params, query }) {
   const attachmentKey = isLinks ? "''::text" : "COALESCE(a.id::text, '')";
   if (isLinks) where.push("m.content ~* 'https?://[^[:space:]]+'");
   else if (options.kind === 'documents') where.push("m.message_type='DOCUMENT'");
+  else if (options.kind === 'all') where.push("(m.message_type IN ('IMAGE','VIDEO','AUDIO','STICKER','DOCUMENT') OR m.content ~* 'https?://[^[:space:]]+')");
   else where.push("m.message_type IN ('IMAGE','VIDEO','AUDIO','STICKER')");
   if (options.sender !== 'all') where.push(`m.direction ${options.sender === 'me' ? '=' : '<>'} 'OUTBOUND'`);
   if (options.q) {
@@ -78,18 +79,19 @@ export async function readMediaLibrary({ account, params, query }) {
     LIMIT $${args.length}`, args);
   const page = rows.slice(0, options.limit);
   const items = page.map(row => {
-    const links = isLinks ? publicLinks(row.content) : [];
-    const kind = isLinks ? 'link' : ({ IMAGE: 'image', VIDEO: 'video', AUDIO: 'audio', STICKER: 'image' }[row.message_type] || 'document');
+    const kind = isLinks || options.kind === 'all' && !['IMAGE', 'VIDEO', 'AUDIO', 'STICKER', 'DOCUMENT'].includes(row.message_type)
+      ? 'link' : ({ IMAGE: 'image', VIDEO: 'video', AUDIO: 'audio', STICKER: 'image' }[row.message_type] || 'document');
+    const links = kind === 'link' ? publicLinks(row.content) : [];
     return {
       id: row.attachment_id || row.id, kind,
       chatId: row.conversation_id,
       chatName: readableChatName({ id: row.conversation_id, name: row.chat_name }),
       messageId: row.id, timestamp: row.wa_timestamp, fromMe: row.direction === 'OUTBOUND',
-      name: row.file_name || (isLinks ? links[0]?.url : null), mimeType: row.mime_type || null,
+      name: row.file_name || (kind === 'link' ? links[0]?.url : null), mimeType: row.mime_type || null,
       size: row.file_size || null, text: row.content || '',
-      url: isLinks ? links[0]?.url || null : row.attachment_id
+      url: kind === 'link' ? links[0]?.url || null : row.attachment_id
         ? `/api/media/${encodeURIComponent(row.attachment_id)}?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(row.conversation_id)}` : null,
-      ...(isLinks ? { links } : {}),
+      ...(kind === 'link' ? { links } : {}),
     };
   });
   const last = page.at(-1);

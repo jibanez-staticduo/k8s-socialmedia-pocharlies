@@ -39,6 +39,10 @@ The audit is ongoing; this document is not a claim of complete parity.
   On desktop it is a centered modal occupying 80% of the viewport, rather
   than a narrow side drawer; the reference header combines tabs with search,
   ordering, selection and close controls.
+- In the authenticated reference on September 28, tapping Search hid the three
+  tabs and opened a field labelled "Search by sender or caption". A no-match
+  query displayed a recent-results empty state with a 14-day notice. No private
+  search result was used as a test fixture.
 - The authenticated Windows reference session was reconnected and inspected
   through Agent Jake on September 28. New chat searches name, number or
   username and exposes New group,
@@ -75,7 +79,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
 | Pinned messages and event RSVP | Partial | The pin bar works for captured events, but live storage has no pin events and Baileys exposes no current-pin query. Historical backfill is not guaranteed; real-provider write acceptance remains unverified |
-| Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names. Global-library multiselect supports download, delete, star and forward with synthetic QA; cross-tab search and duration ordering remain |
+| Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names, including results across media, documents and links. Global-library multiselect supports download, delete, star and forward with synthetic QA; duration ordering remains |
 | Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |

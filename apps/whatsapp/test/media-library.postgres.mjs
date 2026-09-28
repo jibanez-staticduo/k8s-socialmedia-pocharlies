@@ -13,7 +13,8 @@ const fixtures = `WITH messages(id, wa_message_id, conversation_id, account, pla
   ('${id(3)}'::uuid,'three','chat-b','b','whatsapp',false,'Other account','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL),
   ('${id(4)}'::uuid,'four','1@newsletter','a','whatsapp',false,'Channel','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL),
   ('${id(5)}'::uuid,'five','chat-a','a','whatsapp',false,'PDF','OUTBOUND','DOCUMENT','2026-09-27 11:00:00+00'::timestamptz,NULL),
-  ('${id(6)}'::uuid,'six','chat-a','a','whatsapp',true,'Deleted','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL)
+  ('${id(6)}'::uuid,'six','chat-a','a','whatsapp',true,'Deleted','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL),
+  ('${id(7)}'::uuid,'seven','chat-a','a','whatsapp',false,'Report https://example.org/report','INBOUND','TEXT','2026-09-27 12:00:00+00'::timestamptz,'sender-a')
 ), conversations(id,account,name) AS (
   VALUES ('chat-a','a','Alpha'),('chat-b','b','Beta'),('1@newsletter','a','Channel')
 ), participants(id,account,name,push_name) AS (
@@ -48,8 +49,18 @@ const docs = await readMediaLibrary({ account: 'a', query, params: new URLSearch
 assert.equal(docs.items.length, 1);
 assert.equal(docs.items[0].name, 'doc.pdf');
 const links = await readMediaLibrary({ account: 'a', query, params: new URLSearchParams({ kind: 'links' }) });
-assert.equal(links.items.length, 1);
-assert.equal(links.items[0].url, 'https://example.com/');
+assert.deepEqual(links.items.map(item => item.url), ['https://example.org/report', 'https://example.com/']);
+const combined = await readMediaLibrary({ account: 'a', query, params: new URLSearchParams({ kind: 'all' }) });
+assert.deepEqual(combined.items.map(item => item.kind), ['link', 'document', 'image', 'image', 'image']);
+assert(combined.items.every(item => item.chatId === 'chat-a'));
+const combinedIds = [];
+let combinedCursor;
+do {
+  const page = await readMediaLibrary({account: 'a', query, params: new URLSearchParams({kind: 'all', limit: '2', ...(combinedCursor ? {cursor: combinedCursor} : {})})});
+  combinedIds.push(...page.items.map(item => item.id));
+  combinedCursor = page.nextCursor;
+} while (combinedCursor);
+assert.deepEqual(combinedIds, combined.items.map(item => item.id));
 for (const name of ['Remitente objetivo', 'Apodo buscable']) {
   const found = await readMediaLibrary({ account: 'a', query, params: new URLSearchParams({ q: name }) });
   assert.deepEqual(found.items.map(item => item.id), [id(2)]);

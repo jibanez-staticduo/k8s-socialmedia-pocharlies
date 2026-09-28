@@ -147,7 +147,9 @@ await page.route('**/api/**', async route => {
   requests.push(query);
   if (slowKey === key) await new Promise(resolve => { blocked.push(resolve); });
   if (brokenKey === key) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'El servidor no respondió.' }) });
-  const all = catalog[query.account]?.[query.kind] || [];
+  const all = query.kind === 'all'
+    ? Object.values(catalog[query.account] || {}).flat()
+    : catalog[query.account]?.[query.kind] || [];
   const haystack = entry => [entry.name, entry.text, ...(entry.links ?? []).map(link => `${link.title ?? ''} ${link.url}`)]
     .filter(Boolean).join(' ').toLowerCase();
   const matching = all.filter(entry => (query.sender === 'me' ? entry.fromMe === true : query.sender === 'others' ? entry.fromMe !== true : true)
@@ -325,9 +327,25 @@ try {
   await settle();
   assert.equal(lastRequest().order, 'oldest');
   assert.deepEqual(await ids(), ['link-2', 'link-1'], 'el orden inverso se aplica a la lista');
+  await panel.getByRole('button', {name: 'Buscar', exact: true}).click();
+  assert.equal(await panel.getByRole('tab', {name: 'Enlaces'}).isHidden(), true);
+  await page.getByLabel('Buscar contenido multimedia').fill('guia');
+  await wait(420);
+  await settle();
+  assert.deepEqual(await ids(), ['doc-5', 'doc-4', 'doc-3', 'doc-2', 'doc-1'], 'buscar desde Enlaces también encuentra Documentos');
+  const searchViewport = page.viewportSize();
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'la búsqueda global no desborda el móvil');
+  if (process.env.UI_OUTPUT_DIR) await page.screenshot({path: path.join(process.env.UI_OUTPUT_DIR, 'media-library-search-mobile.png')});
+  await page.setViewportSize(searchViewport);
+  await page.getByLabel('Buscar contenido multimedia').fill('foto');
+  await wait(420);
+  await settle();
+  assert.deepEqual(await ids(), ['img-1'], 'buscar desde Enlaces también encuentra multimedia');
   await page.getByLabel('Buscar contenido multimedia').fill('tres');
   await wait(420);
   await settle();
+  assert.equal(lastRequest().kind, 'all', 'la búsqueda no queda limitada a la pestaña previa');
   assert.equal(lastRequest().q, 'tres');
   assert.deepEqual(await ids(), ['link-2']);
   await page.getByLabel('Buscar contenido multimedia').fill('nada-de-esto');
@@ -335,11 +353,15 @@ try {
   await settle();
   assert.deepEqual(await ids(), []);
   assert.equal(await status.getAttribute('data-kind'), 'empty');
-  assert.match(await status.textContent(), /Todavía no hay enlaces/);
+  assert.match(await status.textContent(), /No hay resultados/);
   assert.equal(await more.isHidden(), true);
   await page.getByLabel('Buscar contenido multimedia').fill('');
   await wait(420);
   await settle();
+  assert.equal(lastRequest().kind, 'links', 'sin término se conserva la pestaña de origen');
+  await panel.getByRole('button', {name: 'Cerrar búsqueda'}).click();
+  await settle();
+  assert.equal(await panel.getByRole('tab', {name: 'Enlaces'}).isVisible(), true);
   await page.getByLabel('Ordenar').selectOption('newest');
   await settle();
   assert.deepEqual(await ids(), ['link-1', 'link-2']);

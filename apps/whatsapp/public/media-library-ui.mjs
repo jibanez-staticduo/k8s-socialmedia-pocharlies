@@ -207,14 +207,21 @@ export function installMediaLibraryUI({
     return tabButton;
   });
   tabs.append(...tabButtons);
-  const search = make('label', 'media-library-search');
+  const searchToggle = control('media-library-search-toggle');
+  searchToggle.setAttribute('aria-label', 'Buscar');
+  searchToggle.append(icon(['m20 20-4.2-4.2', 'M10.8 17a6.2 6.2 0 1 0 0-12.4 6.2 6.2 0 0 0 0 12.4Z']));
+  const search = make('div', 'media-library-search');
+  search.hidden = true;
+  const searchClose = control('media-library-search-close');
+  searchClose.setAttribute('aria-label', 'Cerrar búsqueda');
+  searchClose.append(icon(['m15 5-7 7 7 7', 'M8 12h12']));
   const searchIcon = make('span', 'search-icon');
   searchIcon.setAttribute('aria-hidden', 'true');
   const searchInput = make('input');
   searchInput.type = 'search';
-  searchInput.placeholder = 'Buscar por nombre o texto';
+  searchInput.placeholder = 'Buscar por remitente o comentario';
   searchInput.setAttribute('aria-label', 'Buscar contenido multimedia');
-  search.append(searchIcon, searchInput);
+  search.append(searchClose, searchIcon, searchInput);
   const select = (label, options) => {
     const wrapper = make('label', 'media-library-filter');
     wrapper.append(make('span', 'media-library-filter-label', label));
@@ -231,7 +238,7 @@ export function installMediaLibraryUI({
   const senderFilter = select('Filtrar por autor', SENDERS);
   const orderFilter = select('Ordenar', ORDERS);
   controls.append(senderFilter.wrapper, orderFilter.wrapper);
-  headerTabs.append(tabs, search);
+  headerTabs.append(tabs, searchToggle, search);
 
   const selectionBar = make('div', 'media-library-selection-bar');
   selectionBar.hidden = true;
@@ -287,13 +294,15 @@ export function installMediaLibraryUI({
   let searchTimer = null;
   let requestSeq = 0;
   let selecting = false;
+  let searching = false;
   let acting = false;
   let actionSeq = 0;
   let actionError = false;
   const selected = new Map();
 
-  const signature = () => `${getAccount()}|${tab}|${senderFilter.input.value}|${orderFilter.input.value}|${searchInput.value.trim()}`;
-  const requested = () => ({ kind: tab, sender: senderFilter.input.value, order: orderFilter.input.value, q: searchInput.value.trim() });
+  const queryKind = () => searching && searchInput.value.trim() ? 'all' : tab;
+  const signature = () => `${getAccount()}|${queryKind()}|${tab}|${senderFilter.input.value}|${orderFilter.input.value}|${searchInput.value.trim()}`;
+  const requested = () => ({ kind: queryKind(), sender: senderFilter.input.value, order: orderFilter.input.value, q: searchInput.value.trim() });
   const formatDate = value => value ? new Date(value).toLocaleString('es-ES', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   const titleFor = item => item.name || item.text.trim() || (item.kind === 'link' ? item.links[0]?.title || item.links[0]?.url : '') || KIND_LABEL[item.kind];
 
@@ -310,8 +319,12 @@ export function installMediaLibraryUI({
       tabButton.setAttribute('aria-selected', String(active));
       tabButton.tabIndex = active ? 0 : -1;
     }
-    list.setAttribute('aria-label', TAB_LABELS.get(tab) || 'Contenido multimedia');
-    list.dataset.kind = tab;
+    tabs.hidden = searching;
+    searchToggle.hidden = searching;
+    search.hidden = !searching;
+    headerTabs.classList.toggle('is-searching', searching);
+    list.setAttribute('aria-label', queryKind() === 'all' ? 'Resultados de búsqueda' : TAB_LABELS.get(tab) || 'Contenido multimedia');
+    list.dataset.kind = queryKind();
     const cards = items.map(card);
     list.replaceChildren(...cards);
     selectButton.textContent = selecting ? 'Cancelar' : 'Seleccionar';
@@ -326,7 +339,7 @@ export function installMediaLibraryUI({
     if (loading) setStatus('Cargando contenido…', 'loading');
     else if (failure) setStatus(failure, 'error');
     else if (notice) setStatus(notice, actionError ? 'error-action' : 'notice');
-    else if (loadedSignature === signature()) setStatus(cards.length ? '' : (EMPTY_TEXT[tab] || 'Sin resultados.'), cards.length ? '' : 'empty');
+    else if (loadedSignature === signature()) setStatus(cards.length ? '' : (queryKind() === 'all' ? 'No hay resultados.' : EMPTY_TEXT[tab] || 'Sin resultados.'), cards.length ? '' : 'empty');
     else setStatus('');
     more.hidden = !nextCursor || Boolean(failure);
     more.disabled = loading || acting;
@@ -490,6 +503,7 @@ export function installMediaLibraryUI({
     actionSeq += 1; acting = false;
     items = []; nextCursor = null; failure = ''; loading = false; loadedSignature = '';
     selecting = false; selected.clear();
+    searching = false; searchInput.value = '';
     closePreview(); actionShade.hidden = true;
     overlay.hidden = true;
     entry.setAttribute('aria-expanded', 'false');
@@ -507,6 +521,8 @@ export function installMediaLibraryUI({
   }
 
   entry.onclick = () => (overlay.hidden ? open() : close());
+  searchToggle.onclick = () => { searching = true; closePreview(); render(); searchInput.focus(); };
+  searchClose.onclick = () => { windowRef?.clearTimeout?.(searchTimer); searching = false; searchInput.value = ''; items = []; nextCursor = null; void load(); tabs.querySelector('[aria-selected="true"]')?.focus(); };
   selectButton.onclick = () => { selecting = !selecting; selected.clear(); closePreview(); render(); };
   downloadButton.onclick = () => {
     if (downloadButton.disabled) return;
