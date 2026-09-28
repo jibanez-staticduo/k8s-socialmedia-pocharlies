@@ -68,7 +68,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | --- | --- | --- |
 | Accounts, independent chat identity, Hermes sessions | Existing | Regression coverage across account changes |
 | Chat filters, archived, favorites and lists | Partial | Bulk archive/mute/read deployed 8ad9dd9; provider synchronization of lists remains |
-| Pinned ordering, pin and mute markers | In validation | Baileys numeric pin timestamps and provider app-state snapshot now feed the persisted chat state; live UI verification pending |
+| Pinned ordering, pin and mute markers | Verified | Deployed b46056b: personal snapshot reports three pins and all three render first with icons; secondary reports none. Historical pinned messages are a separate limitation |
 | Full available message history | Verified | Cursor paging, scroll preservation and concurrent polling covered |
 | More than 500 chats | Verified | Deployed 0e7762c: 243 Node 22 tests, 41 browser checks, 650 active/50 archived PG fixture; both accounts pass read-only live QA |
 | Quote reply, edit, delete, forward and selection | Existing | Official menu details and limits |
@@ -505,11 +505,13 @@ state directly. A history backfill may help but cannot guarantee the event or
 original message will be available.
 
 Chat pinning is separate from pinned messages. The connector previously
-discarded Baileys' numeric pin timestamp and null unpin event; the current
-candidate reads those updates and pin actions from a complete read-only app
-state snapshot. It restores account-scoped chat state without overwriting
-events newer than the snapshot start. Provider and browser verification remain
-required before calling this fix deployed.
+discarded Baileys' numeric pin timestamp and null unpin event; b46056b reads
+those updates and pin actions from a complete read-only app-state snapshot.
+It restores account-scoped chat state without overwriting events newer than
+the snapshot start. After deployment, the personal provider snapshot reported
+three pinned chats, PostgreSQL held three for that account, and authenticated
+Chrome rendered their markers in the first three rows; secondary reported zero.
+This does not recover historical pinned-message events absent from storage.
 
 Saved WhatsApp contact names now take precedence over chat titles, including
 Unicode and emoji names, and history contacts are ingested per account. A
