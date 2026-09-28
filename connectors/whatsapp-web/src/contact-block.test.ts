@@ -15,6 +15,9 @@ test('provider block state is verified and repeated requests are idempotent acro
   assert.deepEqual(await setContactBlocked(socket,'123@c.us',true),{blocked:true,changed:true,confirmed:true});
   assert.equal(await readContactBlocked(socket,'123@c.us'),true);
   assert.equal(await readContactBlocked({ ...socket, signalRepository:{lidMapping:{getPNForLID:async()=> '123@s.whatsapp.net'}} },'777@lid'),true);
+  assert.equal(await readContactBlocked({ ...socket, signalRepository:{lidMapping:{getPNForLID:async()=> '123:0@s.whatsapp.net'}} },'777@lid'),true);
+  assert.equal(await readContactBlocked({ ...socket, fetchBlocklist:async()=>['123@s.whatsapp.net'], signalRepository:{lidMapping:{getPNForLID:async()=> '123:0@s.whatsapp.net'}} },'777@lid'),true);
+  assert.equal(await readContactBlocked({ ...socket, signalRepository:{lidMapping:{getPNForLID:async()=> 'unexpected-alias'}} },'777@lid'),true);
   assert.equal((await setContactBlocked(socket,'123@s.whatsapp.net',true)).changed,false);
   assert.equal(calls.length,1);
   await setContactBlocked(socket,'123@c.us',false);

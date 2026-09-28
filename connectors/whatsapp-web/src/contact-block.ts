@@ -20,7 +20,12 @@ async function contactBlockAliases(socket: any, chat: string) {
   const alias = jid.endsWith('@lid')
     ? await mapping?.getPNForLID(jid)
     : await mapping?.getLIDForPN(jid);
-  return { jid, aliases: new Set([jid, ...(alias ? [contactBlockJid(alias)] : [])]) };
+  // Signal mappings may use a device-specific JID; only the user JID appears
+  // in the blocklist. An unknown alias must not hide the canonical entry.
+  const userAlias = typeof alias === 'string' ? alias.replace(/^(\d+):\d+@/, '$1@') : '';
+  const normalizedAlias = /^\d+@(c\.us|s\.whatsapp\.net|lid)$/.test(userAlias)
+    ? contactBlockJid(userAlias) : null;
+  return { jid, aliases: new Set([jid, ...(normalizedAlias ? [normalizedAlias] : [])]) };
 }
 
 export async function readContactBlocked(socket: any, chat: string): Promise<boolean> {
