@@ -16,6 +16,8 @@ test('library scopes all surfaces by account and hides reactions and Novedades',
   assert.match(call.sql, /@newsletter/);
   assert.match(call.sql, /status@broadcast/);
   assert.match(call.sql, /m\.direction = 'OUTBOUND'/);
+  assert.match(call.sql, /sender\.id=m\.sender_wa_id AND sender\.account=m\.account/);
+  assert.match(call.sql, /sender\.name ILIKE \$2 OR sender\.push_name ILIKE \$2/);
   assert.deepEqual(call.args, ['secondary', '%a\\%\\_b%', 51]);
   assert.equal(result.account, 'secondary');
   assert.equal(result.items[0].kind, 'image');

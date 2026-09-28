@@ -56,7 +56,8 @@ export async function readMediaLibrary({ account, params, query }) {
   if (options.sender !== 'all') where.push(`m.direction ${options.sender === 'me' ? '=' : '<>'} 'OUTBOUND'`);
   if (options.q) {
     args.push(`%${options.q.replace(/[\\%_]/g, '\\$&')}%`);
-    where.push(`(m.content ILIKE $${args.length} OR c.name ILIKE $${args.length}${isLinks ? '' : ` OR a.file_name ILIKE $${args.length}`})`);
+    where.push(`(m.content ILIKE $${args.length} OR c.name ILIKE $${args.length}
+      OR sender.name ILIKE $${args.length} OR sender.push_name ILIKE $${args.length}${isLinks ? '' : ` OR a.file_name ILIKE $${args.length}`})`);
   }
   const direction = options.order === 'newest' ? 'DESC' : 'ASC';
   if (options.cursor) {
@@ -70,6 +71,7 @@ export async function readMediaLibrary({ account, params, query }) {
       c.name AS chat_name, ${attachmentKey} AS attachment_id
       ${isLinks ? '' : ', a.mime_type, a.file_name, a.file_size'}
     FROM messages m JOIN conversations c ON c.id=m.conversation_id AND c.account=m.account
+    ${options.q ? 'LEFT JOIN participants sender ON sender.id=m.sender_wa_id AND sender.account=m.account' : ''}
     ${isLinks ? '' : 'LEFT JOIN attachments a ON a.message_id=m.id'}
     WHERE ${where.join(' AND ')}
     ORDER BY m.wa_timestamp ${direction}, m.id::text ${direction}, ${attachmentKey} ${direction}

@@ -6,16 +6,19 @@ const container = process.env.POSTGRES_QA_CONTAINER;
 if (!container) throw new Error('Set POSTGRES_QA_CONTAINER to a PostgreSQL test container');
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const literal = value => value == null ? 'NULL' : typeof value === 'number' ? String(value) : `'${String(value).replaceAll("'", "''")}'`;
-const fixtures = `WITH messages(id, wa_message_id, conversation_id, account, platform, is_deleted, content, direction, message_type, wa_timestamp) AS (
+const fixtures = `WITH messages(id, wa_message_id, conversation_id, account, platform, is_deleted, content, direction, message_type, wa_timestamp, sender_wa_id) AS (
   VALUES
-  ('${id(1)}'::uuid,'one','chat-a','a','whatsapp',false,'One https://example.com','OUTBOUND','IMAGE','2026-09-27 10:00:00.123456'::timestamp),
-  ('${id(2)}'::uuid,'two','chat-a','a','whatsapp',false,'Two','INBOUND','IMAGE','2026-09-27 10:00:00.123456+00'::timestamptz),
-  ('${id(3)}'::uuid,'three','chat-b','b','whatsapp',false,'Other account','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz),
-  ('${id(4)}'::uuid,'four','1@newsletter','a','whatsapp',false,'Channel','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz),
-  ('${id(5)}'::uuid,'five','chat-a','a','whatsapp',false,'PDF','OUTBOUND','DOCUMENT','2026-09-27 11:00:00+00'::timestamptz),
-  ('${id(6)}'::uuid,'six','chat-a','a','whatsapp',true,'Deleted','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz)
+  ('${id(1)}'::uuid,'one','chat-a','a','whatsapp',false,'One https://example.com','OUTBOUND','IMAGE','2026-09-27 10:00:00.123456'::timestamp,NULL),
+  ('${id(2)}'::uuid,'two','chat-a','a','whatsapp',false,'Two','INBOUND','IMAGE','2026-09-27 10:00:00.123456+00'::timestamptz,'sender-a'),
+  ('${id(3)}'::uuid,'three','chat-b','b','whatsapp',false,'Other account','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL),
+  ('${id(4)}'::uuid,'four','1@newsletter','a','whatsapp',false,'Channel','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL),
+  ('${id(5)}'::uuid,'five','chat-a','a','whatsapp',false,'PDF','OUTBOUND','DOCUMENT','2026-09-27 11:00:00+00'::timestamptz,NULL),
+  ('${id(6)}'::uuid,'six','chat-a','a','whatsapp',true,'Deleted','OUTBOUND','IMAGE','2026-09-27 11:00:00+00'::timestamptz,NULL)
 ), conversations(id,account,name) AS (
   VALUES ('chat-a','a','Alpha'),('chat-b','b','Beta'),('1@newsletter','a','Channel')
+), participants(id,account,name,push_name) AS (
+  VALUES ('sender-a','a','Remitente objetivo','Apodo buscable'),
+         ('sender-a','b','Nombre de otra cuenta','Otro apodo')
 ), attachments(id,message_id,mime_type,file_name,file_size) AS (
   VALUES ('${id(101)}'::uuid,'${id(1)}'::uuid,'image/jpeg','first.jpg',123),
          ('${id(102)}'::uuid,'${id(1)}'::uuid,'image/jpeg','second.jpg',456),
@@ -47,4 +50,10 @@ assert.equal(docs.items[0].name, 'doc.pdf');
 const links = await readMediaLibrary({ account: 'a', query, params: new URLSearchParams({ kind: 'links' }) });
 assert.equal(links.items.length, 1);
 assert.equal(links.items[0].url, 'https://example.com/');
+for (const name of ['Remitente objetivo', 'Apodo buscable']) {
+  const found = await readMediaLibrary({ account: 'a', query, params: new URLSearchParams({ q: name }) });
+  assert.deepEqual(found.items.map(item => item.id), [id(2)]);
+}
+const otherAccountName = await readMediaLibrary({ account: 'a', query, params: new URLSearchParams({ q: 'Nombre de otra cuenta' }) });
+assert.deepEqual(otherAccountName.items, []);
 console.log(JSON.stringify({ status: 'passed', dataSource: 'synthetic CTEs', transaction: 'READ ONLY', paginationOrders: 2 }));
