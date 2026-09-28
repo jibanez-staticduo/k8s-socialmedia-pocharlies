@@ -210,6 +210,24 @@ try {
   assert.equal(await list.locator('.media-library-card[data-id="img-2"]').getByText('Aún no disponible').count(), 1);
   assert.equal(await list.locator('.media-library-card[data-id="img-3"] img').count(), 0);
 
+  await panel.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+  const downloadAction = panel.getByRole('button', { name: 'Descargar' });
+  assert.equal(await downloadAction.isDisabled(), true);
+  await list.getByRole('button', { name: 'Seleccionar foto.jpg' }).click();
+  assert.equal(await panel.locator('.media-library-selection-count').textContent(), '1 seleccionado');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Deseleccionar foto.jpg');
+  assert.equal(await downloadAction.isEnabled(), true);
+  const downloaded = page.waitForEvent('download');
+  await downloadAction.click();
+  const file = await downloaded;
+  assert.equal(file.suggestedFilename(), 'foto.jpg');
+  assert.match(file.url(), /\/api\/media\/img-1\?account=alpha/);
+  await list.getByRole('button', { name: 'Seleccionar pendiente.jpg' }).click();
+  assert.equal(await downloadAction.isDisabled(), true, 'un archivo no disponible no inicia una descarga parcial');
+  await panel.getByRole('button', { name: 'Cancelar' }).click();
+  assert.equal(await panel.locator('.media-library-selection-bar').isHidden(), true);
+  assert.equal(await list.locator('.media-library-select').count(), 0);
+
   await list.locator('.media-library-card[data-id="vid-1"] .media-library-tile').click();
   const previewMedia = panel.locator('.media-library-preview video');
   assert.equal(await previewMedia.evaluate(node => node.controls && node.preload === 'none'), true);
@@ -352,6 +370,13 @@ try {
   await page.getByRole('tab', { name: 'Archivos multimedia' }).click();
   await settle();
   assert.deepEqual(await ids(), ['beta-1']);
+  await panel.getByRole('button', { name: 'Seleccionar', exact: true }).click();
+  await list.getByRole('button', { name: 'Seleccionar cuenta-beta.jpg' }).click();
+  assert.equal(await panel.locator('.media-library-selection-count').textContent(), '1 seleccionado');
+  await page.evaluate(() => { window.__account = 'alpha'; window.__library.accountChanged(); });
+  await settle();
+  assert.equal(await panel.locator('.media-library-selection-count').textContent(), '0 seleccionados');
+  await panel.getByRole('button', { name: 'Cancelar' }).click();
   await noProviderLeak();
 
   for (const [width, height, theme] of [[1280, 800, 'light'], [1280, 800, 'dark'], [390, 844, 'light'], [390, 844, 'dark']]) {

@@ -1,6 +1,6 @@
 /**
  * Panel global "Contenido multimedia": archivos, documentos y enlaces de todos
- * los chats. Solo lectura: nunca envía, borra ni descarga automáticamente.
+ * los chats. La descarga requiere una selección explícita del usuario.
  */
 
 export const MEDIA_LIBRARY_LIMIT = 50;
@@ -178,7 +178,9 @@ export function installMediaLibraryUI({
   const closeButton = control('media-library-close');
   closeButton.setAttribute('aria-label', 'Cerrar contenido multimedia');
   closeButton.append(icon(['m6 6 12 12M18 6 6 18']));
-  headerTop.append(make('h2', 'media-library-title', 'Contenido multimedia'), closeButton);
+  const title = make('h2', 'media-library-title', 'Contenido multimedia');
+  const selectButton = control('media-library-select-toggle', 'Seleccionar');
+  headerTop.append(title, selectButton, closeButton);
   const headerTabs = make('div', 'media-library-header-tabs');
   header.append(headerTop, headerTabs);
 
@@ -221,6 +223,12 @@ export function installMediaLibraryUI({
   controls.append(senderFilter.wrapper, orderFilter.wrapper);
   headerTabs.append(tabs, search);
 
+  const selectionBar = make('div', 'media-library-selection-bar');
+  selectionBar.hidden = true;
+  const selectionCount = make('span', 'media-library-selection-count');
+  const downloadButton = control('media-library-selection-action', 'Descargar');
+  selectionBar.append(selectionCount, downloadButton);
+
   const status = make('p', 'media-library-status');
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
@@ -245,7 +253,7 @@ export function installMediaLibraryUI({
   const previewBody = make('div', 'media-library-preview-body');
   const previewChat = control('media-library-preview-chat', 'Abrir chat de origen');
   preview.append(previewHeader, previewBody, previewChat);
-  panel.append(header, controls, status, retry, scroll, preview);
+  panel.append(header, controls, selectionBar, status, retry, scroll, preview);
   overlay.append(panel);
   documentRef.body.append(overlay);
 
@@ -259,6 +267,8 @@ export function installMediaLibraryUI({
   let opener = null;
   let searchTimer = null;
   let requestSeq = 0;
+  let selecting = false;
+  const selected = new Map();
 
   const signature = () => `${getAccount()}|${tab}|${senderFilter.input.value}|${orderFilter.input.value}|${searchInput.value.trim()}`;
   const requested = () => ({ kind: tab, sender: senderFilter.input.value, order: orderFilter.input.value, q: searchInput.value.trim() });
@@ -282,6 +292,10 @@ export function installMediaLibraryUI({
     list.dataset.kind = tab;
     const cards = items.map(card);
     list.replaceChildren(...cards);
+    selectButton.textContent = selecting ? 'Cancelar' : 'Seleccionar';
+    selectionBar.hidden = !selecting;
+    selectionCount.textContent = `${selected.size} seleccionado${selected.size === 1 ? '' : 's'}`;
+    downloadButton.disabled = !selected.size || [...selected.values()].some(item => !item.url || item.kind === 'link');
     if (loading) setStatus('Cargando contenido…', 'loading');
     else if (failure) setStatus(failure, 'error');
     else if (notice) setStatus(notice, 'notice');
@@ -378,10 +392,26 @@ export function installMediaLibraryUI({
     }
     copy.append(actions);
     element.append(copy);
+    if (selecting) {
+      for (const child of element.children) child.inert = true;
+      const toggle = control('media-library-select');
+      const chosen = selected.has(item.id);
+      toggle.setAttribute('aria-label', `${chosen ? 'Deseleccionar' : 'Seleccionar'} ${titleFor(item)}`);
+      toggle.setAttribute('aria-pressed', String(chosen));
+      toggle.onclick = () => {
+        if (selected.has(item.id)) selected.delete(item.id);
+        else selected.set(item.id, item);
+        render();
+        [...list.children].find(card => card.dataset.id === item.id)?.querySelector('.media-library-select')?.focus();
+      };
+      element.classList.add('is-selecting');
+      element.append(toggle);
+    }
     return element;
   }
 
   async function load({ append = false } = {}) {
+    if (!append) selected.clear();
     const account = getAccount();
     if (!account) {
       requestSeq += 1;
@@ -430,6 +460,7 @@ export function installMediaLibraryUI({
     client.invalidate();
     requestSeq += 1;
     items = []; nextCursor = null; failure = ''; loading = false; loadedSignature = '';
+    selecting = false; selected.clear();
     closePreview();
     overlay.hidden = true;
     entry.setAttribute('aria-expanded', 'false');
@@ -439,12 +470,25 @@ export function installMediaLibraryUI({
   function switchTab(kind) {
     if (kind === tab || !TAB_LABELS.has(kind)) return;
     tab = kind;
+    selected.clear();
     closePreview();
     items = []; nextCursor = null; failure = '';
     void load();
   }
 
   entry.onclick = () => (overlay.hidden ? open() : close());
+  selectButton.onclick = () => { selecting = !selecting; selected.clear(); closePreview(); render(); };
+  downloadButton.onclick = () => {
+    if (downloadButton.disabled) return;
+    for (const item of selected.values()) {
+      const link = make('a');
+      link.href = item.url;
+      link.download = item.name || `${item.kind}-${item.messageId}`;
+      documentRef.body.append(link);
+      link.click();
+      link.remove();
+    }
+  };
   closeButton.onclick = close;
   previewClose.onclick = () => hidePreview(true);
   for (const tabButton of tabButtons) tabButton.onclick = () => switchTab(tabButton.dataset.kind);
@@ -489,6 +533,7 @@ export function installMediaLibraryUI({
       client.invalidate();
       requestSeq += 1;
       items = []; nextCursor = null; failure = ''; loading = false; loadedSignature = ''; notice = '';
+      selected.clear();
       closePreview();
       if (overlay.hidden) render();
       else void load();

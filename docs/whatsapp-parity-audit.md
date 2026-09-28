@@ -539,6 +539,13 @@ The check must include a fresh Keycloak login from the Home Screen app: its
 external-domain redirect may leave standalone mode on iOS, which the static
 manifest and Chromium test cannot validate.
 
+The global media library now has a selection mode with visible item state and
+an explicit download action for available binary files. Selection is cleared
+when the account, tab, filters or panel changes; unavailable files disable the
+download action instead of silently downloading a subset. Browser QA uses
+synthetic accounts and downloads. WhatsApp Web's remaining selection actions
+(delete, star and forward) are still pending in this global library.
+
 On 28 Sep 2026, the authenticated official chat-row menu showed "Añadir a la
 lista" even when no new list had been created, with a "Nueva lista" entry.
 That route opened a create-list drawer with the chosen chat preselected.
