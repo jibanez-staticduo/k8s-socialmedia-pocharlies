@@ -719,6 +719,49 @@ function isUnavailableProfilePicture(error: unknown): boolean {
   return error instanceof Boom && [403, 404].includes(error.output.statusCode);
 }
 
+/** Hard cap for one status media payload once decoded from base64: 10 MiB. */
+export const NOVEDADES_STATUS_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+export const NOVEDADES_STATUS_RECIPIENTS_MAX = 256;
+export const NOVEDADES_STATUS_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+export const NOVEDADES_STATUS_VIDEO_MIME_TYPES = new Set([
+  'video/mp4',
+  'video/3gpp',
+  'video/quicktime',
+]);
+const NOVEDADES_STATUS_TEXT_MAX_CHARS = 4096;
+// Media captions are capped at the same width the app composer enforces, so a
+// direct connector call cannot smuggle a caption the UI would never allow.
+export const NOVEDADES_STATUS_CAPTION_MAX_CHARS = 1024;
+// rc13 exposes the font as a bare number; the WhatsApp text-status fonts are 1..5.
+export const NOVEDADES_STATUS_FONT_MIN = 1;
+export const NOVEDADES_STATUS_FONT_MAX = 5;
+
+export type NovedadesStatusType = 'text' | 'image' | 'video';
+
+export interface NovedadesStatusPublishInput {
+  type: NovedadesStatusType;
+  text?: string;
+  data?: Buffer;
+  mimeType?: string;
+  recipients: string[];
+  backgroundColor?: string;
+  font?: number;
+}
+
+/**
+ * WhatsApp answered a status send without a message id. The connector cannot
+ * claim success, and the route must not retry automatically: the original
+ * dispatch may already have reached the audience.
+ */
+export class StatusSendUncertainError extends Error {
+  constructor() {
+    super(
+      'WhatsApp returned no message id for the status send; the outcome is uncertain and will not be retried automatically'
+    );
+    this.name = 'StatusSendUncertainError';
+  }
+}
+
 export class BaileysClient extends EventEmitter {
   private sock: WASocket | null = null;
   private archiveSnapshotSync: {
@@ -2668,6 +2711,174 @@ export class BaileysClient extends EventEmitter {
       );
     }
     return messageId || undefined;
+  }
+
+  /**
+   * Publish a WhatsApp status to an explicit audience. In the installed rc13
+   * the audience is driven solely by `statusJidList`: messages-send.js appends
+   * it to the relay participants whenever the destination is
+   * `status@broadcast`. The `broadcast: true` option is part of the documented
+   * API but rc13 never reads it on the dispatch path, so it changes nothing in
+   * the recipient routing and is passed only to match the documented usage.
+   * `backgroundColor`/`font` ride on the send options for text statuses.
+   *
+   * Every invalid input throws `CapabilityError` before the socket is touched,
+   * the socket is called at most once (no automatic retry, even on uncertain
+   * outcomes), and a resolved send without a provider id raises
+   * `StatusSendUncertainError` instead of a fake success.
+   */
+  async publishStatus(input: NovedadesStatusPublishInput): Promise<string> {
+    if (!this.sock) throw new Error('Client not initialized');
+    if (!this.isConnected())
+      throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
+    const sock = this.sock;
+
+    if (input.type !== 'text' && input.type !== 'image' && input.type !== 'video')
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        "type must be one of 'text', 'image' or 'video'"
+      );
+    const recipients = this.validateStatusRecipients(input.recipients);
+    const backgroundColor = this.validateStatusBackgroundColor(input.backgroundColor);
+    const font = this.validateStatusFont(input.font);
+    const caption = typeof input.text === 'string' && input.text.trim() ? input.text : undefined;
+
+    let payload: AnyMessageContent;
+    if (input.type === 'text') {
+      if (input.data !== undefined || input.mimeType !== undefined)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          'data and mimeType only apply to image or video statuses'
+        );
+      if (!caption)
+        throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'text is required for a text status');
+      if (caption.length > NOVEDADES_STATUS_TEXT_MAX_CHARS)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `text must not exceed ${NOVEDADES_STATUS_TEXT_MAX_CHARS} characters`
+        );
+      payload = { text: caption };
+    } else {
+      if (!Buffer.isBuffer(input.data) || input.data.length === 0)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `data is required for a ${input.type} status`
+        );
+      if (input.data.length > NOVEDADES_STATUS_MEDIA_MAX_BYTES)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `status media must not exceed ${NOVEDADES_STATUS_MEDIA_MAX_BYTES} decoded bytes`
+        );
+      const mimeType =
+        typeof input.mimeType === 'string'
+          ? input.mimeType.split(';', 1)[0].trim().toLowerCase()
+          : '';
+      const allowed =
+        input.type === 'image'
+          ? NOVEDADES_STATUS_IMAGE_MIME_TYPES
+          : NOVEDADES_STATUS_VIDEO_MIME_TYPES;
+      if (!allowed.has(mimeType))
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `mimeType must be one of ${Array.from(allowed).join(', ')} for a ${input.type} status`
+        );
+      if (caption && caption.length > NOVEDADES_STATUS_CAPTION_MAX_CHARS)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `text caption must not exceed ${NOVEDADES_STATUS_CAPTION_MAX_CHARS} characters`
+        );
+      payload =
+        input.type === 'image'
+          ? { image: input.data, mimetype: mimeType, ...(caption ? { caption } : {}) }
+          : { video: input.data, mimetype: mimeType, ...(caption ? { caption } : {}) };
+    }
+
+    // Background and font only style text statuses in rc13 (the media upload
+    // path applies them for PTT audio only); drop them for image/video.
+    const options: Parameters<WASocket['sendMessage']>[2] & {
+      broadcast?: boolean;
+      statusJidList?: string[];
+      backgroundColor?: string;
+      font?: number;
+    } = { broadcast: true, statusJidList: recipients };
+    if (input.type === 'text') {
+      if (backgroundColor) options.backgroundColor = backgroundColor;
+      if (font) options.font = font;
+    }
+
+    const ownJid = sock.user?.id;
+    const started = Date.now();
+    const sent = await sock.sendMessage('status@broadcast', payload, options);
+    const messageId = sent?.key?.id;
+    this.logger.info(
+      `Novedades status dispatch finished id=${messageId || 'missing'} recipients=${recipients.length} type=${input.type} elapsedMs=${Date.now() - started}`
+    );
+    if (!messageId) throw new StatusSendUncertainError();
+    await this.persistSentNovedades(sent, ownJid);
+    return messageId;
+  }
+
+  private validateStatusRecipients(recipients: unknown): string[] {
+    if (!Array.isArray(recipients) || recipients.length === 0)
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'recipients must be a non-empty array of direct WhatsApp JIDs'
+      );
+    if (recipients.length > NOVEDADES_STATUS_RECIPIENTS_MAX)
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        `recipients must not exceed ${NOVEDADES_STATUS_RECIPIENTS_MAX} entries`
+      );
+    // A `:device` suffix names one handset, not the contact: the status
+    // audience must carry the bare user JID (jidNormalizedUser strips the
+    // device and maps @c.us), and spellings of the same person are deduped in
+    // first-occurrence order so the relay list says exactly who is addressed.
+    const canonical = new Set<string>();
+    for (const value of recipients) {
+      if (typeof value !== 'string')
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          'recipients must contain WhatsApp JID strings'
+        );
+      const raw = this.toRawJid(value.trim());
+      if (!/^\d{1,20}(?::\d{1,3})?@(?:s\.whatsapp\.net|lid|hosted|hosted\.lid)$/.test(raw))
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `recipients must be direct WhatsApp JIDs, got ${value}`
+        );
+      const bare = jidNormalizedUser(raw);
+      if (!bare)
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          `recipients must be direct WhatsApp JIDs, got ${value}`
+        );
+      canonical.add(bare);
+    }
+    return Array.from(canonical);
+  }
+
+  private validateStatusBackgroundColor(value: string | undefined): string | undefined {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !/^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(value.trim()))
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'backgroundColor must be a 6 or 8 digit hex color'
+      );
+    return value.trim();
+  }
+
+  private validateStatusFont(value: number | undefined): number | undefined {
+    if (value === undefined) return undefined;
+    if (
+      !Number.isInteger(value) ||
+      value < NOVEDADES_STATUS_FONT_MIN ||
+      value > NOVEDADES_STATUS_FONT_MAX
+    )
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        `font must be an integer between ${NOVEDADES_STATUS_FONT_MIN} and ${NOVEDADES_STATUS_FONT_MAX}`
+      );
+    return value;
   }
 
   async reactToMessage(chatId: string, messageId: string, emoji: string): Promise<void> {

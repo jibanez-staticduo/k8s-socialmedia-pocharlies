@@ -8,6 +8,15 @@ import {
   ProfilePictureTimeoutError,
   classifyWhatsAppSendFailure,
   WhatsAppSendFailureClass,
+  NOVEDADES_STATUS_CAPTION_MAX_CHARS,
+  NOVEDADES_STATUS_IMAGE_MIME_TYPES,
+  NOVEDADES_STATUS_MEDIA_MAX_BYTES,
+  NOVEDADES_STATUS_RECIPIENTS_MAX,
+  NOVEDADES_STATUS_FONT_MIN,
+  NOVEDADES_STATUS_FONT_MAX,
+  NOVEDADES_STATUS_VIDEO_MIME_TYPES,
+  StatusSendUncertainError,
+  type NovedadesStatusPublishInput,
 } from '../baileys-client';
 import { QRHandler } from '../qr-handler';
 import { createHMACAuth, AuthenticatedRequest } from './auth';
@@ -19,6 +28,7 @@ import {
   updateWhatsAppManualOpenRequestStatus,
   upsertWhatsAppCustomerAllowlist,
   WhatsAppManualOpenStatus,
+  stripAccountKey,
 } from '../db-writer';
 import {
   appendCompanyToDisplayName,
@@ -246,6 +256,156 @@ function novedadesRawMedia(
   }
   res.setHeader('Content-Length', String(size));
   res.status(200).send(media.bytes);
+}
+
+/* --------------------------------------------------------------------------
+ * Novedades status publishing: HTTP contract validation. Every rejection
+ * happens before the client is called, so an invalid body never reaches the
+ * WhatsApp socket; the client repeats the checks as defense in depth.
+ * ------------------------------------------------------------------------ */
+
+/** Direct-message JIDs only: no groups, channels, broadcasts or malformed ids. */
+const novedadesStatusDirectJid = /^\d{1,20}(?::\d{1,3})?@(?:s\.whatsapp\.net|c\.us|lid)$/;
+
+/**
+ * Canonical addressing of a person, not of one handset: the `:device` suffix
+ * and the `@c.us` spelling are stripped or mapped, and spellings of the same
+ * contact collapse in first-occurrence order. The client re-canonicalizes
+ * before `statusJidList`, so this keeps the forwarded list and the echoed
+ * count equal to the audience that will actually be addressed.
+ */
+function parseNovedadesStatusRecipients(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      'recipients must be a non-empty array of direct WhatsApp JIDs'
+    );
+  if (value.length > NOVEDADES_STATUS_RECIPIENTS_MAX)
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      `recipients must not exceed ${NOVEDADES_STATUS_RECIPIENTS_MAX} entries`
+    );
+  const canonical = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== 'string')
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'recipients must contain WhatsApp JID strings'
+      );
+    const bare = stripAccountKey(entry.trim());
+    if (!novedadesStatusDirectJid.test(bare))
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        `recipients must be direct WhatsApp JIDs, got ${entry}`
+      );
+    canonical.add(bare.replace(/:\d+@/, '@').replace(/@c\.us$/, '@s.whatsapp.net'));
+  }
+  return Array.from(canonical);
+}
+
+function decodeNovedadesStatusData(value: unknown): Buffer {
+  if (typeof value !== 'string')
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'data must be a base64 string');
+  const compact = value.replace(/\s/g, '');
+  if (
+    !compact ||
+    compact.length % 4 !== 0 ||
+    // A group-repetition regex blows V8's stack on ten-megabyte payloads, so
+    // the shape gate is linear; the canonical round trip below is the real
+    // correctness check (it rejects stray bits and misplaced padding).
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(compact)
+  )
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'data must be valid base64');
+  const bytes = Buffer.from(compact, 'base64');
+  // A canonical round trip rejects non-canonical payloads (stray bits in the
+  // last quantum) that a lenient decode would silently accept.
+  if (bytes.length === 0 || bytes.toString('base64') !== compact)
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'data must be valid base64');
+  if (bytes.length > NOVEDADES_STATUS_MEDIA_MAX_BYTES)
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      `status media must not exceed ${NOVEDADES_STATUS_MEDIA_MAX_BYTES} decoded bytes`
+    );
+  return bytes;
+}
+
+function parseNovedadesStatusInput(body: Record<string, unknown>): NovedadesStatusPublishInput {
+  const type = body.type;
+  if (type !== 'text' && type !== 'image' && type !== 'video')
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      "type must be one of 'text', 'image' or 'video'"
+    );
+  const recipients = parseNovedadesStatusRecipients(body.recipients);
+
+  if (body.text !== undefined && typeof body.text !== 'string')
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'text must be a string');
+  const text = typeof body.text === 'string' && body.text.trim() ? body.text : undefined;
+
+  let backgroundColor: string | undefined;
+  if (body.backgroundColor !== undefined && body.backgroundColor !== null) {
+    if (
+      typeof body.backgroundColor !== 'string' ||
+      !/^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(body.backgroundColor.trim())
+    )
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'backgroundColor must be a 6 or 8 digit hex color'
+      );
+    backgroundColor = body.backgroundColor.trim();
+  }
+
+  let font: number | undefined;
+  if (body.font !== undefined && body.font !== null) {
+    if (
+      typeof body.font !== 'number' ||
+      !Number.isInteger(body.font) ||
+      body.font < NOVEDADES_STATUS_FONT_MIN ||
+      body.font > NOVEDADES_STATUS_FONT_MAX
+    )
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        `font must be an integer between ${NOVEDADES_STATUS_FONT_MIN} and ${NOVEDADES_STATUS_FONT_MAX}`
+      );
+    font = body.font;
+  }
+
+  const textStyle = {
+    ...(backgroundColor ? { backgroundColor } : {}),
+    ...(font ? { font } : {}),
+  };
+
+  if (type === 'text') {
+    if (body.data !== undefined || body.mimeType !== undefined)
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        'data and mimeType only apply to image or video statuses'
+      );
+    if (!text)
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'text is required for a text status');
+    return { type, text, recipients, ...textStyle };
+  }
+
+  // Media captions are capped at the width the app composer enforces, so a
+  // direct connector call cannot carry a caption the UI would never allow.
+  if (text && text.length > NOVEDADES_STATUS_CAPTION_MAX_CHARS)
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      `text caption must not exceed ${NOVEDADES_STATUS_CAPTION_MAX_CHARS} characters`
+    );
+  if (body.data === undefined || body.data === null)
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', `data is required for a ${type} status`);
+  const data = decodeNovedadesStatusData(body.data);
+  const mimeType =
+    typeof body.mimeType === 'string' ? body.mimeType.split(';', 1)[0].trim().toLowerCase() : '';
+  const allowed =
+    type === 'image' ? NOVEDADES_STATUS_IMAGE_MIME_TYPES : NOVEDADES_STATUS_VIDEO_MIME_TYPES;
+  if (!allowed.has(mimeType))
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      `mimeType must be one of ${Array.from(allowed).join(', ')} for a ${type} status`
+    );
+  return { type, data, mimeType, ...(text ? { text } : {}), recipients };
 }
 
 function statusForSendFailure(
@@ -2621,6 +2781,57 @@ export function createRouter(
         });
       } catch (error) {
         novedadesFailure(res, error);
+      }
+    })();
+  });
+
+  /* Novedades write route. Publishing to an explicit audience goes over the
+   * live socket, so it is gated by ENABLE_SENDING like every other send path.
+   * The client calls the socket at most once: an uncertain outcome is reported
+   * honestly (502 + outcomeUncertain) instead of retried or claimed as sent. */
+  router.post('/novedades/status', auth, (req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        if (
+          process.env.ENABLE_SENDING !== 'true' ||
+          process.env.EMERGENCY_DISABLE_SENDING === 'true'
+        ) {
+          res.status(403).json({
+            ok: false,
+            error: { code: 'SENDING_DISABLED', message: 'Sending is disabled' },
+          });
+          return;
+        }
+        const input = parseNovedadesStatusInput((req.body || {}) as Record<string, unknown>);
+        const messageId = await client.publishStatus(input);
+        if (typeof messageId !== 'string' || messageId.length === 0) {
+          res.status(502).json({
+            ok: false,
+            error: {
+              code: 'STATUS_SEND_UNCERTAIN',
+              message: 'WhatsApp returned no message id for the status send',
+            },
+            outcomeUncertain: true,
+          });
+          return;
+        }
+        res.json({
+          ok: true,
+          account: connectorAccount(),
+          messageId,
+          kind: input.type,
+          recipients: input.recipients.length,
+        });
+      } catch (error) {
+        if (error instanceof StatusSendUncertainError) {
+          res.status(502).json({
+            ok: false,
+            error: { code: 'STATUS_SEND_UNCERTAIN', message: error.message },
+            outcomeUncertain: true,
+          });
+          return;
+        }
+        capabilityErrorResponse(res, error);
       }
     })();
   });

@@ -33,6 +33,7 @@ const routes = {
   }),
   '/api/profile': url => ({ account: url.searchParams.get('account'), profile }),
   '/api/contacts': url => ({ account: url.searchParams.get('account'), contacts: [], sendingEnabled: true, nextCursor: null }),
+  '/api/lists': () => ({ lists: [] }),
   '/api/presence': () => ({ presence: {} }),
   '/api/presence/subscribe': () => ({ confirmed: true }),
 };

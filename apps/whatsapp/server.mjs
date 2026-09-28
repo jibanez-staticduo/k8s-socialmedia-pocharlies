@@ -51,6 +51,53 @@ const PROFILE_UNCONFIRMED_REASONS = /^(READBACK_UNAVAILABLE|IDENTITY_UNKNOWN)/;
 // belongs to. The connector returns the raw socket JID, so a device suffix is
 // normal (`34600123456:8@s.whatsapp.net`) and @c.us is equally valid.
 const PROFILE_OWN_JID = /^[A-Za-z0-9_.\-+:]{2,320}@[A-Za-z0-9.\-]{2,128}$/;
+// Status publishing mirrors the connector's POST /novedades/status contract so an
+// unusable request is refused with an honest 400/413 before the live account is
+// touched. The connector stays the authority for what WhatsApp accepts.
+const STATUS_TYPES = ['text', 'image', 'video'];
+// WhatsApp's own composer limits, not transport limits. The connector only refuses
+// a text card above 4096 characters and puts no cap on a media caption at all, so
+// the wider number says what can be carried, not what a status can show. The app
+// and the browser composer agree on these two numbers instead.
+const STATUS_TEXT_MAX_CHARS = 700;
+const STATUS_CAPTION_MAX_CHARS = 1024;
+const STATUS_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
+// Base64 for the media cap never needs more characters than this, so an oversized
+// payload is refused before Buffer.from allocates another ten megabytes.
+const STATUS_MEDIA_MAX_BASE64_CHARS = Math.ceil(STATUS_MEDIA_MAX_BYTES / 3) * 4;
+// The same media types the connector will hand to WhatsApp.
+const STATUS_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const STATUS_VIDEO_MIME_TYPES = ['video/mp4', 'video/3gpp', 'video/quicktime'];
+// The audience is always spelled out. Only a direct address can be an audience
+// member: a group or a channel is not a contact, and an empty list must never be
+// read as "everyone". `@c.us` and a `:device` suffix are other spellings of the
+// same person, so they collapse into the canonical `@s.whatsapp.net` address.
+const STATUS_RECIPIENTS_MAX = 256;
+const STATUS_RECIPIENT = /^\d{1,20}(?::\d{1,3})?@(?:s\.whatsapp\.net|c\.us|lid)$/;
+const STATUS_RECIPIENT_DOMAINS = { 's.whatsapp.net': 's.whatsapp.net', 'c.us': 's.whatsapp.net', lid: 'lid' };
+// Text-card options are accepted in exactly the shape the connector parses: an
+// optional `#` with 6 or 8 hex digits, and a font index inside its enum range.
+const STATUS_BACKGROUND_COLOR = /^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const STATUS_FONT_MIN = 1;
+const STATUS_FONT_MAX = 5;
+// An uncertain publish has to say two things in the same breath: the audience may
+// already hold the status, and the caller must not send it again. The phrasing is
+// the one the app already uses for an unconfirmed delivery, so a caller reading
+// either path gets the same instruction.
+const STATUS_UNCERTAIN_MESSAGE = 'Estado de entrega desconocido; el estado puede haberse publicado. No reintentar automáticamente.';
+// Published for the contract test, which checks these bounds against the
+// connector's own constants instead of trusting two copies of the same numbers.
+export const STATUS_PUBLISH_LIMITS = Object.freeze({
+  textMaxChars: STATUS_TEXT_MAX_CHARS,
+  captionMaxChars: STATUS_CAPTION_MAX_CHARS,
+  mediaMaxBytes: STATUS_MEDIA_MAX_BYTES,
+  imageMimeTypes: Object.freeze([...STATUS_IMAGE_MIME_TYPES]),
+  videoMimeTypes: Object.freeze([...STATUS_VIDEO_MIME_TYPES]),
+  recipientsMax: STATUS_RECIPIENTS_MAX,
+  fontMin: STATUS_FONT_MIN,
+  fontMax: STATUS_FONT_MAX,
+  recipientPattern: STATUS_RECIPIENT.source,
+});
 const FEATURE_TIMEOUT_MS = 30000;
 const FEATURE_SEND_TIMEOUT_MS = 90000;
 const HERMES_TURN_TIMEOUT_MS = 180000;
@@ -1189,6 +1236,101 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     }
     return { imageBase64: data, mimeType };
   }
+  // The audience arrives as an explicit list of direct JIDs. Duplicates and the
+  // aliases of one identity collapse to a single entry, so the connector counts
+  // real recipients instead of spellings of the same one.
+  function statusPublishRecipients(value) {
+    if (!Array.isArray(value) || !value.length) throw fail(400, 'recipients must name at least one contact');
+    if (value.length > STATUS_RECIPIENTS_MAX) throw fail(400, `recipients must not exceed ${STATUS_RECIPIENTS_MAX}`);
+    const audience = new Set();
+    for (const item of value) {
+      if (typeof item !== 'string' || !STATUS_RECIPIENT.test(item)) {
+        throw featureError(400, 'INVALID_RECIPIENT', 'recipients must be direct WhatsApp JIDs');
+      }
+      const [user, domain] = item.split('@');
+      audience.add(`${user.split(':')[0]}@${STATUS_RECIPIENT_DOMAINS[domain]}`);
+    }
+    return [...audience];
+  }
+  // `text` is the whole status for type=text and a caption for a media status.
+  // WhatsApp allows far fewer characters in a text card than under a photo, so the
+  // two limits are separate rather than one generous cap.
+  function statusPublishText(value, type) {
+    if (value === undefined || value === null) {
+      if (type === 'text') throw fail(400, 'A text status requires text');
+      return null;
+    }
+    if (typeof value !== 'string') throw fail(400, 'Invalid text');
+    const text = value.trim();
+    const max = type === 'text' ? STATUS_TEXT_MAX_CHARS : STATUS_CAPTION_MAX_CHARS;
+    if (text.length > max) throw fail(400, `text must not exceed ${max} characters`);
+    if (!text && type === 'text') throw fail(400, 'A text status requires text');
+    return text || null;
+  }
+  // A pasted or captured asset often arrives as a data URL, and the connector only
+  // accepts bare base64, so the prefix is stripped here. An explicit `mimeType`
+  // wins over the one embedded in the URL because the caller declared it.
+  function statusPublishMedia(value, mimeType, type) {
+    if (typeof value !== 'string' || !value.trim()) throw fail(400, `A ${type} status requires base64 data`);
+    const raw = value.trim();
+    const dataUrl = raw.match(/^data:([a-z0-9.+-]+\/[a-z0-9.+-]+)?;base64,([\s\S]*)$/i);
+    // Line breaks inside a base64 body are formatting, not content: the connector
+    // drops them the same way before it decodes.
+    const data = (dataUrl ? dataUrl[2] : raw).replace(/\s/g, '');
+    if (data.length > STATUS_MEDIA_MAX_BASE64_CHARS) {
+      throw featureError(413, 'MEDIA_TOO_LARGE', `Status media exceeds ${STATUS_MEDIA_MAX_BYTES / (1024 * 1024)} MB`);
+    }
+    if (!isBase64(data)) throw fail(400, 'Invalid base64 media');
+    const bytes = Buffer.from(data, 'base64');
+    if (!bytes.length) throw fail(400, 'Status media is empty');
+    // The connector demands canonical base64 and refuses a payload with stray bits
+    // in its last quantum. Refusing the same bytes here keeps a body the provider
+    // would never accept away from a live WhatsApp socket.
+    if (bytes.toString('base64') !== data) throw fail(400, 'Invalid base64 media');
+    if (bytes.length > STATUS_MEDIA_MAX_BYTES) {
+      throw featureError(413, 'MEDIA_TOO_LARGE', `Status media exceeds ${STATUS_MEDIA_MAX_BYTES / (1024 * 1024)} MB`);
+    }
+    const allowed = type === 'image' ? STATUS_IMAGE_MIME_TYPES : STATUS_VIDEO_MIME_TYPES;
+    const declared = typeof mimeType === 'string' ? mimeType.split(';')[0].trim().toLowerCase() : '';
+    const resolved = declared || dataUrl?.[1]?.toLowerCase() || '';
+    if (!allowed.includes(resolved)) throw fail(400, `mimeType must be ${allowed.join(' or ')}`);
+    return { data, mimeType: resolved };
+  }
+  // Background and font are properties of a text card. They are dropped for a
+  // media status exactly as the connector ignores them, so the forwarded body only
+  // carries what the provider can actually use. The font travels as the connector's
+  // own integer index; a JSON body from a form can carry it as `"3"`, which is the
+  // same choice, so it is normalized instead of being refused and retried.
+  function statusPublishTextOptions(body, type) {
+    if (type !== 'text') return {};
+    const options = {};
+    if (body.backgroundColor !== undefined && body.backgroundColor !== null) {
+      const color = typeof body.backgroundColor === 'string' ? body.backgroundColor.trim() : '';
+      if (!STATUS_BACKGROUND_COLOR.test(color)) throw fail(400, 'Invalid backgroundColor');
+      options.backgroundColor = color;
+    }
+    if (body.font !== undefined && body.font !== null) {
+      const font = typeof body.font === 'string' && /^\d+$/.test(body.font.trim()) ? Number(body.font.trim()) : body.font;
+      if (!Number.isInteger(font) || font < STATUS_FONT_MIN || font > STATUS_FONT_MAX) {
+        throw fail(400, `font must be an integer between ${STATUS_FONT_MIN} and ${STATUS_FONT_MAX}`);
+      }
+      options.font = font;
+    }
+    return options;
+  }
+  // The forwarded body is exactly the fields the connector documents. `account`
+  // stays behind: a connector only ever speaks for its own account, and repeating
+  // it would let a stale field disagree with the credential that is signing.
+  function statusPublishPayload(body) {
+    const type = required(body.type, 'type', 16);
+    if (!STATUS_TYPES.includes(type)) throw fail(400, "type must be 'text', 'image' or 'video'");
+    const payload = { type, recipients: statusPublishRecipients(body.recipients) };
+    const text = statusPublishText(body.text, type);
+    if (text !== null) payload.text = text;
+    if (type === 'text') Object.assign(payload, statusPublishTextOptions(body, type));
+    else Object.assign(payload, statusPublishMedia(body.data, body.mimeType, type));
+    return payload;
+  }
   async function profileResponse(account, outcomes) {
     const view = {
       account: account.accountId,
@@ -1286,6 +1428,60 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const output = novedadesMediaResponse(result.media, req.headers['if-range'] ? null : req.headers.range);
         res.writeHead(output.status, output.headers);
         return res.end(output.bytes);
+      }
+      // Publishing a status is a send to an audience the caller chose. The whole
+      // request is validated locally first, then one attempt reaches the connector:
+      // a status has no idempotency token, so retrying here could publish it twice.
+      if (req.method === 'POST' && path === '/api/novedades/status') {
+        const body = await bodyJSON(req); const a = accountParam(body.account);
+        const payload = statusPublishPayload(body);
+        // The same two gates a message send passes. They are checked here as well as
+        // inside the connector call so a refusal that provably happened before the
+        // request left the app can never be mistaken for an unanswered dispatch.
+        if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+        if (!env[a.secretEnv]) throw fail(503, 'Connector credentials unavailable');
+        let result;
+        try {
+          result = await featureConnector(a, '/novedades/status', {
+            method: 'POST', body: payload, requireSending: true, timeout: FEATURE_SEND_TIMEOUT_MS,
+          });
+        } catch (error) {
+          // A refusal and a lost answer are different facts and must not share a label.
+          // The connector's 4xx proves its own rejection reached the dispatch, so the
+          // publish did not happen and the caller can safely keep editing the draft.
+          // Anything after that — a 5xx, an unreachable connector, an answer that
+          // cannot be read — leaves the audience possibly holding the status already.
+          // `remote` discards a non-OK body, so only the HTTP status is quoted here and
+          // never the connector's text. Nothing is retried in either case.
+          const upstreamStatus = error?.upstreamStatus;
+          if (upstreamStatus && upstreamStatus < 500) {
+            throw featureError(400, 'STATUS_PUBLISH_REJECTED',
+              `WhatsApp connector refused the status publish (HTTP ${upstreamStatus})`, { upstreamStatus });
+          }
+          // 404/405/501 is the connector saying it has no such route: that verdict is
+          // already honest and carries its own code, so it travels untouched.
+          if (error?.code === 'UNSUPPORTED_UPSTREAM') throw error;
+          // The reason names which kind of silence this was, because the operator
+          // response differs: an unreachable connector is a deployment fault, while an
+          // unreadable answer means the publish may be sitting in a half-written reply.
+          const reason = upstreamStatus ? undefined
+            : error?.code === 'UPSTREAM_INVALID' ? 'connector_answer_unreadable' : 'connector_unreachable';
+          throw featureError(502, 'DELIVERY_UNCONFIRMED', STATUS_UNCERTAIN_MESSAGE, {
+            path: '/novedades/status',
+            ...(upstreamStatus ? { upstreamStatus } : { reason }),
+            ...(error?.code ? { connectorCode: error.code } : {}),
+          });
+        }
+        // The connector confirms a publish with the provider message ID. Without one
+        // there is nothing to point at, so the app must not claim the status is live.
+        // Same label and same wording as an unanswered dispatch: from here the caller
+        // cannot tell a silent success from a silent failure, and must not retry.
+        const messageId = cleanProviderValue(result.messageId ?? result.data?.messageId, 512);
+        if (!messageId) {
+          throw featureError(502, 'DELIVERY_UNCONFIRMED', STATUS_UNCERTAIN_MESSAGE,
+            { path: '/novedades/status', reason: 'no_message_id' });
+        }
+        return json(200, { account: a.accountId, confirmed: true, type: payload.type, recipients: payload.recipients, messageId });
       }
       if (req.method === 'GET' && path === '/api/media-library') {
         const a = accountParam(url.searchParams.get('account'));

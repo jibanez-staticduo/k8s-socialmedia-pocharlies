@@ -99,7 +99,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Presence | Partial | Composing/recording labels in validation; live event delivery remains |
 | Real-time updates | Partial | Authenticated events; current message/presence polling remains |
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
-| Status | Partial | Account/author-scoped read-only catalogue and viewer are available; saved contact names resolve by account, including legacy phone aliases. Publishing with an explicit audience and complete historical coverage remain |
+| Status | Partial | Account/author-scoped catalogue and viewer are available; saved contact names resolve by account. Text/image/video publishing to explicitly selected contacts passes synthetic app, connector and browser tests; real-provider delivery and complete historical coverage remain unverified |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
 | Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
@@ -564,6 +564,32 @@ Safari fetch installation metadata without making chats or scripts public.
 The check must include a fresh Keycloak login from the Home Screen app: its
 external-domain redirect may leave standalone mode on iOS, which the static
 manifest and Chromium test cannot validate.
+On 2026-09-28 the mobile Playwright fixture passed at iPhone dimensions and
+320/375/430px widths, including account switching, chat/history navigation,
+safe-area layout, input sizing, and pinch-gesture cancellation outside the
+image viewer. The deployed `whatsapp-app` container's mobile CSS, gesture
+handler, manifest, and HTML match the source hashes; the public manifest and
+Apple touch icon return HTTP 200. These checks do not replace the outstanding
+real-iPhone Home Screen installation and Keycloak return-flow test.
+
+## Publishing WhatsApp statuses
+
+The Novedades editor supports text, image and video statuses for an explicit,
+account-scoped selection of direct contacts. It previews the content and chosen
+audience before a final send. An empty audience is rejected rather than treated
+as all contacts. Text cards are limited to 700 characters, media captions to
+1024 characters, and media to 10 MiB. The connector makes one Baileys
+`status@broadcast` attempt and reports an uncertain result without automatic
+retry if WhatsApp returns no message ID. The app only clears the draft when the
+response confirms the message ID for the same account; changing account during
+an in-flight request cannot claim that result for the new account.
+
+The app suite (433 tests), connector suite (including status-publishing tests),
+TypeScript, and browser publication flow pass with synthetic providers. Browser
+QA covers the recipient picker, confirmation, errors, account switch and mobile
+layout. No real status was published. The contact directory may be incomplete,
+so this editor cannot yet offer WhatsApp's full-audience privacy modes; a live
+send and visibility readback are still required to verify provider behavior.
 
 The global media library now has a selection mode with visible item state and
 an explicit download action for available binary files. Selection is cleared

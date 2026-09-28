@@ -81,7 +81,9 @@ function resetMessageHistory() {
 function error(message = '') { $('error').textContent = message; $('error').hidden = !message; }
 async function api(path, data, onEvent, requestSignal) {
   const signal = requestSignal || (onEvent ? AbortSignal.timeout(240000) : undefined);
-  const timeoutError = () => new Error('Se agotó el tiempo de espera del agente. Comprueba el chat antes de repetir una acción.');
+  const timeoutError = () => new Error(path === '/api/novedades/status'
+    ? 'Se agotó el tiempo de espera del estado. Comprueba si se publicó antes de reintentar.'
+    : 'Se agotó el tiempo de espera del agente. Comprueba el chat antes de repetir una acción.');
   const response = await fetch(path, {
     credentials: 'same-origin',
     signal,
@@ -101,7 +103,13 @@ async function api(path, data, onEvent, requestSignal) {
     if (location.pathname !== '/auth/login') location.assign(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
     throw new Error('La sesión ha expirado. Redirigiendo al inicio de sesión…');
   }
-  if (!response.ok) throw new Error(typeof result.error === 'string' ? result.error : result.error?.message || result.message || `Error del servidor (${response.status}).`);
+  if (!response.ok) {
+    const failure = new Error(typeof result.error === 'string' ? result.error : result.error?.message || result.message || `Error del servidor (${response.status}).`);
+    failure.code = typeof result.code === 'string' ? result.code : typeof result.error?.code === 'string' ? result.error.code : '';
+    failure.status = response.status;
+    failure.outcomeUncertain = result.outcomeUncertain === true;
+    throw failure;
+  }
   return result;
 }
 function query(path, extra = {}) { return `${path}?${new URLSearchParams({account: state.account, ...extra})}`; }
@@ -827,6 +835,9 @@ const novedadesReady = import('./novedades-ui.mjs').then(({installNovedadesUI}) 
     loadStatuses: (author, {cursor} = {}) => read('/api/novedades/status', {author, cursor}),
     loadChannels: ({cursor} = {}) => read('/api/novedades/channels', {cursor}),
     loadPosts: (channel, {cursor} = {}) => read(`/api/novedades/channels/${encodeURIComponent(channel)}/posts`, {cursor}),
+    loadContacts: ({q, cursor} = {}) => read('/api/contacts', {q, cursor, limit: '50'}),
+    publishStatus: payload => api('/api/novedades/status', {...payload, account: state.account}, undefined, AbortSignal.timeout(90000)),
+    canPublish: () => state.sending,
     onOpen: () => closeRailPanels(['novedades']),
   });
   for (const [id, tab] of [['statuses-open', 'statuses'], ['channels-open', 'channels']]) {
