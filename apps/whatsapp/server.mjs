@@ -202,6 +202,20 @@ function providerChatId(conversation) {
   return stored || id;
 }
 
+export function providerChatStateMap(rows, accountId, now = Date.now()) {
+  const state = new Map();
+  for (const row of rows) {
+    const value = {
+      pinned: row.pinned === true,
+      muted: row.mute_until ? new Date(row.mute_until).getTime() > now : false,
+    };
+    state.set(row.chat_id, value);
+    const prefix = `${accountId}:`;
+    if (row.chat_id.startsWith(prefix)) state.set(row.chat_id.slice(prefix.length), value);
+  }
+  return state;
+}
+
 function safeImageType(value) {
   return typeof value === 'string' && /^image\/(?:jpeg|png|gif|webp)$/.test(value)
     ? value
@@ -850,10 +864,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
            FROM whatsapp_chat_state WHERE account=$1`,
         [account.accountId]
       );
-      return new Map(rows.map(row => [row.chat_id, {
-        pinned: row.pinned === true,
-        muted: row.mute_until ? new Date(row.mute_until).getTime() > Date.now() : false,
-      }]));
+      return providerChatStateMap(rows, account.accountId);
     } catch {
       // Older deployments do not have the connector state table yet. Local
       // app actions remain available until the provider migration lands.

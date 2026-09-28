@@ -18,6 +18,8 @@ test('archive bootstrap requests a read-only snapshot and keeps current archive 
       first: { index: ['archive', '123@g.us'], syncAction: { value: { archiveChatAction: { archived: true } } } },
       second: { index: ['archive', '456@s.whatsapp.net'], syncAction: { value: { archiveChatAction: { archived: false } } } },
       ignored: { index: ['archive', 'status@broadcast'], syncAction: { value: { archiveChatAction: { archived: true } } } },
+      pinned: { index: ['pin_v1', '789@s.whatsapp.net'], syncAction: { value: { pinAction: { pinned: true } } } },
+      unpinned: { index: ['pin_v1', '987@g.us'], syncAction: { value: { pinAction: { pinned: false } } } },
     } }),
   } as unknown as Parameters<typeof readArchiveSnapshot>[1];
 
@@ -28,7 +30,10 @@ test('archive bootstrap requests a read-only snapshot and keeps current archive 
   assert.deepEqual([...result.states], [
     ['123@g.us', true], ['456@s.whatsapp.net', false],
   ]);
-  assert.equal(result.records, 3);
+  assert.deepEqual([...result.pinnedStates], [
+    ['789@s.whatsapp.net', true], ['987@g.us', false],
+  ]);
+  assert.equal(result.records, 5);
   assert.equal(setCalled, false);
 });
 

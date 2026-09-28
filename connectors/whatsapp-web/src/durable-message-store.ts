@@ -325,6 +325,49 @@ export async function upsertChatState(chatId: string, patch: ChatStatePatch): Pr
   );
 }
 
+/** Restore pin actions from a complete provider snapshot without replacing newer events. */
+export async function applyPinnedChatSnapshot(
+  states: Map<string, boolean>,
+  startedAt: Date
+): Promise<number> {
+  if (!Number.isFinite(startedAt.getTime())) throw new Error('Invalid pin snapshot time');
+  const account = connectorAccount();
+  const resolved = new Map<string, boolean>();
+  for (const [jid, pinned] of states) {
+    if (!/^\d+(?:\.\d+)?@(?:g\.us|c\.us|s\.whatsapp\.net|lid)$/.test(jid)) {
+      throw new Error('Invalid pin snapshot chat');
+    }
+    const chatId = accountKey(await canonicalConversationId(storageConversationId(jid)));
+    if (resolved.has(chatId) && resolved.get(chatId) !== pinned) {
+      throw new Error('Conflicting pin snapshot aliases');
+    }
+    resolved.set(chatId, pinned);
+  }
+  if (!resolved.size) return 0;
+  const db = await pool().connect();
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock(hashtext($1), $2)', [account, 20260928]);
+    for (const [chatId, pinned] of resolved) {
+      await db.query(
+        `INSERT INTO whatsapp_chat_state (account, chat_id, pinned)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (account, chat_id) DO UPDATE SET
+           pinned = EXCLUDED.pinned, updated_at = now()
+         WHERE whatsapp_chat_state.updated_at <= $4`,
+        [account, chatId, pinned, startedAt]
+      );
+    }
+    await db.query('COMMIT');
+  } catch (error) {
+    await db.query('ROLLBACK');
+    throw error;
+  } finally {
+    db.release();
+  }
+  return resolved.size;
+}
+
 export interface StoredContact {
   jid: string;
   phone?: string | null;

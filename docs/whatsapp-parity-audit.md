@@ -68,7 +68,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | --- | --- | --- |
 | Accounts, independent chat identity, Hermes sessions | Existing | Regression coverage across account changes |
 | Chat filters, archived, favorites and lists | Partial | Bulk archive/mute/read deployed 8ad9dd9; provider synchronization of lists remains |
-| Pinned ordering, pin and mute markers | In validation | Synthetic browser QA passes; pending deployment |
+| Pinned ordering, pin and mute markers | In validation | Baileys numeric pin timestamps and provider app-state snapshot now feed the persisted chat state; live UI verification pending |
 | Full available message history | Verified | Cursor paging, scroll preservation and concurrent polling covered |
 | More than 500 chats | Verified | Deployed 0e7762c: 243 Node 22 tests, 41 browser checks, 650 active/50 archived PG fixture; both accounts pass read-only live QA |
 | Quote reply, edit, delete, forward and selection | Existing | Official menu details and limits |
@@ -97,7 +97,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Partial | Account/author-scoped persistence and expiry deployed b727ce6; catalogue/viewer and explicit publishing audience remain |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
-| Chat list options and contact names | Partial | Official context-menu actions and saved-name precedence under correction; current live contact name lacks the official saved Unicode/emoji value |
+| Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Remaining options need provider support |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
 | Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
 
@@ -494,7 +494,7 @@ above remain open; this does not establish full WhatsApp parity.
 
 ## Follow-up: chat controls, saved names, and mobile install
 
-The next candidate adds a contextual menu to each chat row for supported
+Commit 9b3056c adds a contextual menu to each chat row for supported
 archive, mute, pin, unread, favorite, and list actions. Blocking a direct
 contact has a provider-confirmed, account-scoped backend; no real contact was
 blocked in QA. Clear/delete cannot be offered safely until provider changes
@@ -503,6 +503,13 @@ chat-lock operation. Existing pinned-message UI is data-limited: the live
 database has no captured pin events, and Baileys cannot query the current pin
 state directly. A history backfill may help but cannot guarantee the event or
 original message will be available.
+
+Chat pinning is separate from pinned messages. The connector previously
+discarded Baileys' numeric pin timestamp and null unpin event; the current
+candidate reads those updates and pin actions from a complete read-only app
+state snapshot. It restores account-scoped chat state without overwriting
+events newer than the snapshot start. Provider and browser verification remain
+required before calling this fix deployed.
 
 Saved WhatsApp contact names now take precedence over chat titles, including
 Unicode and emoji names, and history contacts are ingested per account. A

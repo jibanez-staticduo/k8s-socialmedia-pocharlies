@@ -1,5 +1,6 @@
 import { parseMediaQuality, prepareImageQuality, type MediaQuality } from './media-quality';
 import { ContactBlockError, setContactBlocked } from './contact-block';
+import { chatPinState } from './chat-pin-state';
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
 import {
@@ -94,6 +95,7 @@ import {
 } from './db-writer';
 import {
   ensureDurableTables,
+  applyPinnedChatSnapshot,
   getMessageKeysForChat,
   getRawWAMessage,
   getRawWAMessagesByIds,
@@ -1034,6 +1036,7 @@ export class BaileysClient extends EventEmitter {
         if (novedadesKind({ remoteJid: c.id })) continue;
         const isGroup = !!isJidGroup(c.id);
         const norm = this.normalizeJid(c.id);
+        const pinned = chatPinState(c);
         this.chatStore.set(norm, {
           id: norm,
           rawJid: c.id,
@@ -1042,6 +1045,7 @@ export class BaileysClient extends EventEmitter {
           unreadCount: c.unreadCount || 0,
           timestamp: Number(c.conversationTimestamp || 0),
           archived: typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined,
+          pinned,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
           chatNameWrites.push(
@@ -1055,6 +1059,7 @@ export class BaileysClient extends EventEmitter {
         void setConversationState(norm, c.unreadCount || 0, archived).catch(() => {});
         void upsertChatState(norm, {
           ...(archived === undefined ? {} : { archived }),
+          ...(pinned === undefined ? {} : { pinned }),
           unreadCount: c.unreadCount || 0,
         }).catch(() => {});
       }
@@ -1108,12 +1113,13 @@ export class BaileysClient extends EventEmitter {
         if (!u.id) continue;
         if (novedadesKind({ remoteJid: u.id })) continue;
         const norm = this.normalizeJid(u.id);
+        const pinned = chatPinState(u);
         const prev = this.chatStore.get(norm);
         if (prev) {
           if (typeof u.unreadCount === 'number') prev.unreadCount = u.unreadCount;
           if (u.conversationTimestamp) prev.timestamp = Number(u.conversationTimestamp);
           if (typeof (u as any).archived === 'boolean') prev.archived = (u as any).archived;
-          if (typeof (u as any).pinned === 'boolean') prev.pinned = (u as any).pinned;
+          if (pinned !== undefined) prev.pinned = pinned;
           if (typeof (u as any).mute === 'number') prev.muteUntil = Number((u as any).mute);
           if ((u as any).name) {
             prev.name = !prev.isGroup
@@ -1138,7 +1144,7 @@ export class BaileysClient extends EventEmitter {
         void upsertChatState(norm, {
           ...(arch === undefined ? {} : { archived: arch }),
           ...(typeof u.unreadCount === 'number' ? { unreadCount: uc } : {}),
-          ...(typeof (u as any).pinned === 'boolean' ? { pinned: (u as any).pinned } : {}),
+          ...(pinned === undefined ? {} : { pinned }),
           ...(typeof (u as any).mute === 'number' ? { muteUntil: Number((u as any).mute) } : {}),
         }).catch(() => {});
       }
@@ -1149,6 +1155,7 @@ export class BaileysClient extends EventEmitter {
         if (!c.id) continue;
         if (novedadesKind({ remoteJid: c.id })) continue;
         const norm = this.normalizeJid(c.id);
+        const pinned = chatPinState(c);
         this.chatStore.set(norm, {
           id: norm,
           rawJid: c.id,
@@ -1159,6 +1166,7 @@ export class BaileysClient extends EventEmitter {
           unreadCount: c.unreadCount || 0,
           timestamp: Number(c.conversationTimestamp || 0),
           archived: typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined,
+          pinned,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
           void setConversationName(norm, this.savedContactNameFor(c.id, norm) || c.name, {
@@ -1170,6 +1178,7 @@ export class BaileysClient extends EventEmitter {
         void setConversationState(norm, c.unreadCount || 0, archived).catch(() => {});
         void upsertChatState(norm, {
           ...(archived === undefined ? {} : { archived }),
+          ...(pinned === undefined ? {} : { pinned }),
           unreadCount: c.unreadCount || 0,
         }).catch(() => {});
         // Subscribe to presence so we get typing updates for this chat.
@@ -4000,6 +4009,7 @@ export class BaileysClient extends EventEmitter {
     records: number;
     chats: number;
     archived: number;
+    pinned: number;
   }> {
     if (!this.sock || !this.isConnected()) throw new Error('Client not connected');
     const snapshot = await readArchiveSnapshot(this.sock);
@@ -4008,6 +4018,7 @@ export class BaileysClient extends EventEmitter {
       records: snapshot.records,
       chats: snapshot.states.size,
       archived: [...snapshot.states.values()].filter(Boolean).length,
+      pinned: [...snapshot.pinnedStates.values()].filter(Boolean).length,
     };
   }
 
@@ -4075,6 +4086,7 @@ export class BaileysClient extends EventEmitter {
       throw new Error('WhatsApp socket changed during archive name lookup');
     }
     const applied = await applyArchiveSnapshot(chats, startedAt);
+    await applyPinnedChatSnapshot(snapshot.pinnedStates, startedAt);
     for (const chat of chats) {
       const cached = this.chatStore.get(chat.jid);
       if (cached) cached.archived = chat.archived;

@@ -22,13 +22,19 @@ const defaultDeps: SnapshotDeps = {
 export async function readArchiveSnapshot(
   socket: ArchiveSocket,
   deps: SnapshotDeps = defaultDeps
-): Promise<{ version: number; records: number; states: Map<string, boolean> }> {
+): Promise<{
+  version: number;
+  records: number;
+  states: Map<string, boolean>;
+  pinnedStates: Map<string, boolean>;
+}> {
   // A version-zero snapshot reads the current archive state without changing
   // the linked device's saved app-state versions or replaying its events.
   const getKey = async (id: string) =>
     (await socket.authState.keys.get('app-state-sync-key', [id]))[id];
   let state = newLTHashState();
   const states = new Map<string, boolean>();
+  const pinnedStates = new Map<string, boolean>();
   let records = 0;
   let more = true;
   let sawSnapshot = false;
@@ -113,13 +119,17 @@ export async function readArchiveSnapshot(
       const action = mutation.syncAction.value?.archiveChatAction;
       if (action?.archived != null) states.set(jid, action.archived === true);
       else if (type === 'archive' || type === 'unarchive') states.set(jid, type === 'archive');
+      const pin = mutation.syncAction.value?.pinAction;
+      if (type === 'pin_v1' && typeof pin?.pinned === 'boolean') {
+        pinnedStates.set(jid, pin.pinned);
+      }
     }
     records += mutations.length;
     more = collection.hasMorePatches;
   }
   if (!sawSnapshot || more || decodeWarnings)
     throw new Error('Complete WhatsApp archive snapshot is unavailable');
-  return { version: state.version, records, states };
+  return { version: state.version, records, states, pinnedStates };
 }
 
 export async function readCurrentArchiveSnapshot(
