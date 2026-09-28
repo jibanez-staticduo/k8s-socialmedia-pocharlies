@@ -5,10 +5,102 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../server.mjs';
 import { AppState } from '../lib/app-state.mjs';
-import { publicMessageMetadata, publicPollResults } from '../lib/message-projection.mjs';
+import { publicMessageMetadata, publicPollResults, publicEventResults } from '../lib/message-projection.mjs';
 import { MESSAGE_VISIBLE_SQL } from '../lib/chat-names.mjs';
 
 const auth = `Basic ${Buffer.from('operator:password').toString('base64')}`;
+
+test('pinned message reads resolve stored targets inside the selected account and reject malformed provider data', async t => {
+  const upstream = [];
+  const pin = {messageId: 'wa-secondary-1', timestampMs: Date.now(), expiresAtMs: Date.now()+86400000, secret: 'never-public'};
+  const {request} = await fixture(t, {env: {APP_ENABLE_SENDING: 'false'}, fetchImpl: async (url, options) => {
+    upstream.push({url,body:JSON.parse(options.body)});
+    return Response.json({ok:true,items:[pin]});
+  }});
+  const url='/api/messages/pins?account=secondary&chat=secondary-chat';
+  assert.equal((await request('/api/messages/pins?account=personal&chat=secondary-chat')).status,404);
+  assert.equal(upstream.length,0);
+  const response=await request(url);
+  assert.equal(response.status,200);
+  const data=await response.json();
+  assert.equal(data.items[0].id,'22222222-2222-2222-2222-222222222222');
+  assert.equal(data.items[0].text,'other');
+  assert(!JSON.stringify(data).includes('never-public'));
+  assert.deepEqual(upstream,[{url:'http://secondary-connector/api/v1/messages/pins',body:{conversationId:'secondary-chat'}}]);
+  pin.messageId='wa-personal-1';
+  assert.deepEqual((await (await request(url)).json()).items,[]);
+  pin.expiresAtMs='invalid';
+  assert.equal((await request(url)).status,502);
+});
+
+test('pin writes bind the stored message and account, validate duration/token and require same origin', async t => {
+  const calls=[];
+  const {request}=await fixture(t,{fetchImpl:async(url,options)=>{
+    calls.push({url,body:JSON.parse(options.body)});return Response.json({ok:true,sent:true,messageId:'pin-action'});
+  }});
+  const body={account:'secondary',chat:'secondary-chat',messageId:'22222222-2222-2222-2222-222222222222',pinned:true,duration:604800,sendToken:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'};
+  const endpoint='/api/messages/pin';
+  assert.equal((await request(endpoint,{...body,account:'personal'})).status,404);
+  assert.equal((await request(endpoint,{...body,duration:60})).status,400);
+  assert.equal((await request(endpoint,{...body,pinned:false})).status,400);
+  assert.equal((await request(endpoint,{...body,sendToken:undefined})).status,400);
+  assert.equal((await request(endpoint,body,{origin:'https://other.invalid'})).status,403);
+  assert.equal(calls.length,0);
+  assert.equal((await request(endpoint,body)).status,200);
+  assert.deepEqual(calls,[{url:'http://secondary-connector/api/v1/messages/pin',body:{conversationId:'secondary-chat',messageId:'wa-secondary-1',pinned:true,duration:604800,sendToken:body.sendToken}}]);
+});
+
+test('event result projection never exposes responder identities or private provider fields', () => {
+  const source = {available: true, counts: {going: 2, not_going: 1, maybe: 0}, extraGuests: 0, capturedResponders: 3,
+    selectedByMe: 'going', messageSecret: 'private', responders: ['private'], reason: 'private'};
+  const projected = publicEventResults(source);
+  assert.equal(projected.availability, 'local_partial');
+  assert.equal(projected.reason, null);
+  assert(!JSON.stringify(projected).includes('private'));
+  assert.equal(publicEventResults({...source, counts: {...source.counts, going: -1}}), null);
+  assert.equal(publicEventResults({...source, counts: {...source.counts, going: '2'}}), null);
+});
+
+test('event results use the selected account and stored message identity through the real app route', async t => {
+  const upstream = [];
+  const result = {eventMessageId: 'wa-secondary-1', available: true, counts: {going: 1, not_going: 0, maybe: 0}, extraGuests: 0, capturedResponders: 1};
+  const {request, database} = await fixture(t, {env: {APP_ENABLE_SENDING: 'false'}, fetchImpl: async (url, options) => {
+    upstream.push({url, body: JSON.parse(options.body)});
+    return Response.json({ok: true, events: [result]});
+  }});
+  database.messages['secondary-chat'][0].message_type = 'EVENT';
+  const suffix = '&chat=secondary-chat&messageId=22222222-2222-2222-2222-222222222222';
+  assert.equal((await request(`/api/messages/event/results?account=personal${suffix}`)).status, 404);
+  assert.equal(upstream.length, 0);
+  const response = await request(`/api/messages/event/results?account=secondary${suffix}`);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).results.counts.going, 1);
+  assert.deepEqual(upstream, [{url: 'http://secondary-connector/api/v1/messages/event/results', body: {conversationId: 'secondary-chat', eventMessageIds: ['wa-secondary-1']}}]);
+  result.eventMessageId = 'wrong-event';
+  assert.equal((await request(`/api/messages/event/results?account=secondary${suffix}`)).status, 502);
+});
+
+test('event response resolves its stored target, requires a stable token and preserves account isolation', async t => {
+  const upstream = [];
+  const {request, database} = await fixture(t, {fetchImpl: async (url, options) => {
+    upstream.push({url, body: JSON.parse(options.body)});
+    return Response.json({ok: true, sent: true, messageId: 'response-id'});
+  }});
+  database.messages['secondary-chat'][0].message_type = 'EVENT';
+  const body = {account: 'secondary', chat: 'secondary-chat', messageId: '22222222-2222-2222-2222-222222222222',
+    attendance: 'going', sendToken: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'};
+  const endpoint = '/api/messages/event/respond';
+  assert.equal((await request(endpoint, {...body, account: 'personal'})).status, 404);
+  assert.equal((await request(endpoint, {...body, sendToken: undefined})).status, 400);
+  assert.equal((await request(endpoint, {...body, attendance: 'toString'})).status, 400);
+  assert.equal((await request(endpoint, {...body, attendance: 'maybe', extraGuestCount: 2})).status, 400);
+  assert.equal((await request(endpoint, body, {origin: 'https://other.invalid'})).status, 403);
+  assert.equal(upstream.length, 0);
+  assert.equal((await request(endpoint, body)).status, 200);
+  assert.deepEqual(upstream, [{url: 'http://secondary-connector/api/v1/messages/event/respond', body: {
+    conversationId: 'secondary-chat', eventMessageId: 'wa-secondary-1', attendance: 'going', extraGuestCount: 0, sendToken: body.sendToken,
+  }}]);
+});
 
 function fixtureDatabase(calls) {
   const conversations = {
@@ -569,7 +661,7 @@ test('messages endpoint projects reply, edit, reactions and safe content metadat
   assert.match(messageQuery.sql, /target\.conversation_id = ANY\(\$2::text\[\]\)/);
   assert.match(messageQuery.sql, /m\.account \|\| ':' \|\| m\.reply_to_message_id/);
   assert.match(messageQuery.sql, /regexp_replace\(m\.reply_to_message_id, '\^\[\^:\]\+:', ''\)/);
-  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'REACTION'\)/);
+  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION'\)/);
 });
 
 test('missing quoted message has an explicit unavailable preview on paginated reads', async t => {
@@ -593,7 +685,7 @@ test('missing quoted message has an explicit unavailable preview on paginated re
     { type: null, text: '', senderName: null, available: false });
   const sql = calls.find(call => /reply\.message_type AS "replyType"/.test(call.sql)).sql;
   assert.match(sql, /LEFT JOIN LATERAL/);
-  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'REACTION'\)/);
+  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION'\)/);
 });
 
 test('group details retain provider permissions and account-scoped saved member names', async t => {

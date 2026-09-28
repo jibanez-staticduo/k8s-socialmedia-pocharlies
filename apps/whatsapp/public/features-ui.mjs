@@ -400,6 +400,8 @@ export function installFeatureUI({
   setChat = () => {},
   showError = () => {},
   openCamera = () => {},
+  isMessagePinned = () => false,
+  onPinsChange = async () => {},
   onOpen = () => {},
 } = {}) {
   if (!documentRef || !state || typeof api !== 'function' || typeof query !== 'function') return null;
@@ -1040,6 +1042,33 @@ export function installFeatureUI({
     }
   }
 
+  function openPinMessage(message) {
+    const pinned = !isMessagePinned(message.id);
+    const modal = openModal(pinned ? 'Fijar mensaje' : 'Desfijar mensaje', {opener: documentRef.activeElement});
+    const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
+    const current = () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation;
+    const duration = documentRef.createElement('select');
+    duration.setAttribute('aria-label', 'Duracion del mensaje fijado');
+    duration.append(option(documentRef, '24 horas', '86400'), option(documentRef, '7 dias', '604800'), option(documentRef, '30 dias', '2592000'));
+    duration.value = '604800';
+    if (pinned) modal.body.append(duration);
+    modal.body.append(node('p', '', pinned ? 'El mensaje quedara fijado para todos los participantes.' : 'El mensaje dejara de estar fijado para todos los participantes.'));
+    const confirm = button(documentRef, pinned ? 'Fijar' : 'Desfijar', 'feature-button');
+    const tokens = new Map();
+    confirm.disabled = !state.sending;
+    confirm.onclick = async () => {
+      if (!current() || confirm.disabled || !state.sending) return;
+      const seconds = pinned ? Number(duration.value) : 0;
+      const sendToken = tokens.get(seconds) || windowRef.crypto.randomUUID(); tokens.set(seconds, sendToken);
+      confirm.disabled = true; duration.disabled = true;
+      try {
+        const result = await mutate('/api/messages/pin', {messageId: message.id, pinned, duration: seconds, sendToken}, {success: pinned ? 'Mensaje fijado.' : 'Mensaje desfijado.'});
+        if (result && current()) {closeModal(); await onPinsChange();}
+      } finally {if (current()) {confirm.disabled = !state.sending; duration.disabled = false;}}
+    };
+    modal.body.append(confirm);
+  }
+
   function openMessageActions(message) {
     const modal = openModal('Acciones del mensaje', { opener: documentRef.activeElement, variant: 'menu' });
     const actions = node('div', 'feature-action-grid');
@@ -1057,6 +1086,7 @@ export function installFeatureUI({
     add('Reaccionar', item => { closeModal(); openReactionPicker(item); });
     add('Reenviar', item => { closeModal(); openForwardPicker([text(item.id)]); });
     add('Seleccionar', item => { closeModal(); toggleMessageSelected(item.id, true); });
+    add(isMessagePinned(message.id) ? 'Desfijar mensaje' : 'Fijar mensaje', item => {closeModal(); openPinMessage(item);});
     add(prefs().starredMessages.includes(text(message.id)) ? 'Quitar destacado' : 'Destacar', item => starMessage(item, !prefs().starredMessages.includes(text(item.id))));
     if (message.fromMe === true) {
       add('Editar', item => { closeModal(); openEdit(item); });

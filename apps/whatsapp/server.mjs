@@ -19,7 +19,7 @@ import { readContactDirectory } from './lib/contact-directory.mjs';
 import { Sessions } from './lib/sessions.mjs';
 import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
-import { publicMessageMetadata, publicPollResults } from './lib/message-projection.mjs';
+import { publicMessageMetadata, publicPollResults, publicEventResults } from './lib/message-projection.mjs';
 import { linkPreviewFromPayload } from './lib/link-preview.mjs';
 import { HermesStreamAccumulator, openSse } from './lib/hermes-stream.mjs';
 import { hermesApiBaseUrl, syncHermesModelLock } from './lib/hermes-model-lock.mjs';
@@ -1555,6 +1555,71 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           }
         }
         return json(200, { account: a.accountId, chat, action, confirmed: true, ...result });
+      }
+      if (req.method === 'POST' && path === '/api/messages/pin') {
+        const body = await bodyJSON(req);
+        const a = accountParam(body.account); const chat = safeChatId(body.chat);
+        if (body.sendToken === undefined) throw fail(400, 'sendToken is required');
+        const token = sendToken(body);
+        if (typeof body.pinned !== 'boolean' || (body.pinned ? ![86400,604800,2592000].includes(body.duration) : body.duration !== 0)) throw fail(400, 'Invalid pin duration');
+        const target = await actionMessage(a, chat, body);
+        const result = await featureConnector(a, '/messages/pin', {body: {conversationId: target.providerChat,
+          messageId: providerMessageId(target.message), pinned: body.pinned, duration: body.duration, sendToken: token},
+          requireSending: true, requireMessageId: true});
+        return json(200, {account: a.accountId, chat, confirmed: true, messageId: result.messageId});
+      }
+      if (req.method === 'GET' && path === '/api/messages/pins') {
+        const a = accountParam(url.searchParams.get('account'));
+        const chat = safeChatId(url.searchParams.get('chat'));
+        const conversation = await conversationFor(a, chat);
+        const result = await featureConnector(a, '/messages/pins', {body: {conversationId: providerChatId(conversation)}});
+        if (!Array.isArray(result.items) || result.items.length > 3 || result.items.some(item =>
+          !item || typeof item.messageId !== 'string' || !item.messageId || item.messageId.length > 512 ||
+          !Number.isSafeInteger(item.timestampMs) || item.timestampMs <= 0 ||
+          !Number.isSafeInteger(item.expiresAtMs) || item.expiresAtMs <= item.timestampMs || item.expiresAtMs > 8640000000000000)) {
+          throw fail(502, 'Invalid pinned message response');
+        }
+        const items = [];
+        for (const pin of result.items) {
+          if (pin.expiresAtMs <= Date.now()) continue;
+          try {
+            const target = await actionMessage(a, chat, {messageId: pin.messageId});
+            items.push({id: target.message.id, text: String(target.message.content || '').slice(0, 500),
+              type: target.message.message_type, timestampMs: pin.timestampMs, expiresAtMs: pin.expiresAtMs});
+          } catch (error) { if (![404, 409].includes(error.status)) throw error; }
+        }
+        return json(200, {account: a.accountId, chat, availability: 'local_partial', items});
+      }
+      if (req.method === 'GET' && path === '/api/messages/event/results') {
+        const a = accountParam(url.searchParams.get('account'));
+        const chat = safeChatId(url.searchParams.get('chat'));
+        const target = await actionMessage(a, chat, {messageId: url.searchParams.get('messageId')});
+        if (target.message.message_type !== 'EVENT') throw fail(400, 'Message is not an event');
+        const eventId = providerMessageId(target.message);
+        const result = await featureConnector(a, '/messages/event/results', {
+          body: {conversationId: target.providerChat, eventMessageIds: [eventId]},
+        });
+        const entry = Array.isArray(result.events) ? result.events.find(event => event?.eventMessageId === eventId) : null;
+        const results = publicEventResults(entry);
+        if (!results) throw fail(502, 'Invalid event results response');
+        return json(200, {account: a.accountId, chat, results});
+      }
+      if (req.method === 'POST' && path === '/api/messages/event/respond') {
+        const body = await bodyJSON(req);
+        const a = accountParam(body.account); const chat = safeChatId(body.chat);
+        if (body.sendToken === undefined) throw fail(400, 'sendToken is required');
+        const token = sendToken(body);
+        if (!['going', 'not_going', 'maybe'].includes(body.attendance)) throw fail(400, 'Invalid attendance');
+        const guests = body.extraGuestCount ?? 0;
+        if (!Number.isSafeInteger(guests) || guests < 0 || guests > 2147483647 || (body.attendance !== 'going' && guests !== 0)) throw fail(400, 'Invalid extra guests');
+        const target = await actionMessage(a, chat, body);
+        if (target.message.message_type !== 'EVENT') throw fail(400, 'Message is not an event');
+        const result = await featureConnector(a, '/messages/event/respond', {
+          body: {conversationId: target.providerChat, eventMessageId: providerMessageId(target.message),
+            attendance: body.attendance, extraGuestCount: guests, sendToken: token},
+          requireSending: true, requireMessageId: true,
+        });
+        return json(200, {account: a.accountId, chat, confirmed: true, messageId: result.messageId});
       }
       if (req.method === 'POST' && path === '/api/messages/poll/vote') {
         const body = await bodyJSON(req);

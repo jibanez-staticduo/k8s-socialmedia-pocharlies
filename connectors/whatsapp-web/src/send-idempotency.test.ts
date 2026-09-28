@@ -4,7 +4,7 @@ import pg from 'pg';
 import express from 'express';
 import { createRouter } from './api/controller';
 import { generateHMACSignature } from './api/auth';
-import { claimSendAttempt, confirmTextSend, reserveMediaSend, reserveTextSend, reserveVoiceSend, SendAlreadyClaimedError } from './send-idempotency';
+import { claimSendAttempt, confirmTextSend, reserveMediaSend, reserveTextSend, reserveVoiceSend, reserveEventResponseSend, reservePinSend, SendAlreadyClaimedError } from './send-idempotency';
 
 test('reserves one send per account and token across retries and rejects changed payloads', async () => {
   const original = pg.Pool.prototype.query;
@@ -55,6 +55,24 @@ test('reserves one send per account and token across retries and rejects changed
 
     process.env.CONNECTOR_ACCOUNT = 'personal';
     const sourceA = 'a'.repeat(64);
+    const eventResponse = {token: 'event-response', conversationId: '123@g.us', eventMessageId: 'event', attendance: 'going', extraGuestCount: 0};
+    assert.equal((await reserveEventResponseSend(eventResponse)).state, 'claimed');
+    assert.equal((await reserveEventResponseSend(eventResponse)).state, 'prepared');
+    for (const change of [{attendance: 'maybe'}, {eventMessageId: 'other'}, {conversationId: '999@g.us'}, {extraGuestCount: 1}]) {
+      assert.equal((await reserveEventResponseSend({...eventResponse, ...change})).state, 'conflict');
+    }
+    const pin = {token:'pin-token',conversationId:'123@g.us',targetMessageId:'target',pinned:true,duration:86400};
+    const firstPin = await reservePinSend(pin);
+    assert.equal(firstPin.state,'claimed');
+    assert.equal((await reservePinSend(pin)).state,'prepared');
+    for (const change of [{targetMessageId:'other'},{conversationId:'999@g.us'},{pinned:false,duration:0},{duration:604800}]) {
+      assert.equal((await reservePinSend({...pin,...change})).state,'conflict');
+    }
+    assert.equal((await reserveEventResponseSend({...eventResponse,token:pin.token})).state,'conflict');
+    process.env.CONNECTOR_ACCOUNT='professional';
+    const secondAccountPin=await reservePinSend(pin);
+    assert.equal(secondAccountPin.state,'claimed');assert.notEqual(secondAccountPin.messageId,firstPin.messageId);
+    process.env.CONNECTOR_ACCOUNT='personal';
     const sourceB = 'b'.repeat(64);
     const convertedMedia = { token: 'transcoded-gif', conversationId: '111@s.whatsapp.net',
       fileUrl: 'data:video/mp4;base64,Zmlyc3Q=', fileName: 'animation.mp4',

@@ -66,7 +66,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Area | Current state | Remaining work / verification |
 | --- | --- | --- |
 | Accounts, independent chat identity, Hermes sessions | Existing | Regression coverage across account changes |
-| Chat filters, archived, favorites and lists | Existing | Bulk select/read actions; provider synchronization of lists |
+| Chat filters, archived, favorites and lists | Partial | Bulk archive/mute/read deployed 8ad9dd9; provider synchronization of lists remains |
 | Pinned ordering and mute marker | Verified | Synthetic browser QA; deployed |
 | Full available message history | Verified | Cursor paging, scroll preservation and concurrent polling covered |
 | More than 500 chats | Verified | Deployed 0e7762c: 243 Node 22 tests, 41 browser checks, 650 active/50 archived PG fixture; both accounts pass read-only live QA |
@@ -74,20 +74,20 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
 | Pinned messages and event RSVP | Pending | Provider contracts, ingestion and UI |
-| Search and media/link/document gallery per chat | Existing | Date/sender/type filters; global media browser in validation |
+| Search and media/link/document gallery per chat | Partial | Global media browser deployed 8ad9dd9; advanced message-search filters and media multiselect/duration ordering remain |
 | Composer optimistic sends, paste and voice recording | Verified | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | Partial | Full picker/search, sticker creation and packs |
 | Location and live location | Partial | Received locations render; sending not implemented |
 | Link and map previews | Existing | Reference QA and failure states |
-| New chats / contact creation | In validation | Account-scoped searchable/paginated directory; synthetic drawer QA pending before deployment |
+| New chats / contact creation | Verified | Directory deployed 8ad9dd9; both accounts pass read-only authenticated browser QA; extended drawer scenarios remain in development |
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
 | Settings drawer / wallpaper / spellcheck / Enter preference | Verified | Desktop/mobile, light/dark, persistence |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
-| Privacy and disappearing messages | Partial | Online/group-add fields in validation; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
-| Notifications | Partial | Per-type preferences, sound, preview, title count; closed-tab push |
+| Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
+| Notifications | Partial | Account-scoped message/group/sound/preview preferences deployed 8ad9dd9; reaction/status notifications and closed-tab push remain |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
 | Presence | Partial | Composing/recording labels in validation; live event delivery remains |
 | Real-time updates | Partial | Authenticated events; current message/presence polling remains |
@@ -123,14 +123,81 @@ not assumptions about the newest documentation, determines the contract.
   options. Its protobuf enum uses `PIN_FOR_ALL=1`, `UNPIN_FOR_ALL=2`; the
   public README example suggesting `0` for unpin must not be copied. Allowed
   durations are 24 hours, 7 days and 30 days. Pin persistence/UI is still pending.
+  The working-tree adapter and durable reader pass nine tests plus TypeScript against the
+  installed generator and protobuf: flat send contract, correct unpin enum,
+  wrapped payloads, latest-action expiry, deterministic unpin precedence and
+  chat isolation, legacy group IDs, all-page reduction and pagination failures.
+  The reader reconstructs pins from durable raw payloads within the selected
+  account/chat and reports local-partial coverage. It is not yet wired to the
+  UI and is excluded from the RSVP release candidate. The authenticated
+  connector `/messages/pins` and app `/api/messages/pins` now expose scoped
+  reads. The app resolves provider IDs to locally stored messages, omits
+  deleted/unavailable targets, filters expired entries and rejects malformed
+  results. Ten focused connector tests and 33 app API tests pass; no real pin
+  action was sent. A working-tree visual bar now cycles between up to three
+  pins and opens the original message, clears on account/chat changes, discards
+  late responses and removes expired pins without waiting for polling. Synthetic
+  browser tests cover navigation, concurrent reads, expiry and four layouts.
+  Pin/unpin controls now use the official duration choices and stable tokens;
+  the connector claims before relay and refuses uncertain/conflicting retries.
+  Pin protocol envelopes stay outside the conversation message list. The full
+  selected-feature browser suite passes 43 checks including pin, bar refresh
+  and unpin; 14 focused connector tests, 34 app API tests and TypeScript pass.
+  Independent review, complete regression, publication and deployment remain
+  pending. No real WhatsApp pin or unpin was sent during QA.
+  The isolated combined events/pins candidate builds both images and passes
+  317 app tests, 268 connector tests, TypeScript, the 43-check feature browser
+  suite and dedicated event/pin browser suites. Subsequent review corrected
+  outgoing-pin storage to use canonical LID/phone resolution; its new direct
+  client regression passes. Verified LID/phone aliases now also resolve during
+  pin reads and sending without admitting other contacts. The refreshed
+  connector image passes all 270 tests and TypeScript. Independent review and
+  publication remain pending; live acceptance remains unverified.
+  A disposable PostgreSQL 17 fixture now traverses 1,201 direct/wrapped pin
+  actions without duplication or account/chat leakage and returns the latest
+  three active targets. The fixture exits successfully and its temporary
+  container is stopped. Dedicated browser screenshots were inspected for light
+  mobile and dark desktop; the bar retains readable contrast and bounded text.
+  Forced post-mutation pin refreshes supersede pending older reads; a browser
+  regression verifies that an older empty response cannot undo the newly
+  confirmed bar. Pin reservation tests also verify payload, operation-kind and
+  account isolation. Both focused suites pass.
 - Event RSVP needs a version-specific adapter. In installed rc13,
   `process-message.js` emits `eventResponses` entries with `response` and
   `senderTimestampMs`, whereas the protobuf declares `eventResponseMessage`
   and `timestampMs`; the aggregation helper reads another field,
   `eventResponse`. Do not copy the current documentation's aggregation or
   decryption signatures without normalizing the installed runtime shape.
-  Sending, persistence and RSVP controls remain unfinished.
-
+  A local normalization/aggregation adapter now passes ten tests against rc13
+  (including a protobuf encode/decode round trip), plus TypeScript. It keeps
+  PN/LID identities distinct, ignores malformed replies and selects the latest
+  captured attendance per responder. A synthetic encrypted RSVP round trip uses
+  the installed decryptor and verifies binding to the event and responder; this
+  does not prove live WhatsApp acceptance. A regression also rejects inherited
+  object-property names as attendance values before encryption. The adapter is not yet wired into ingest;
+  RSVP controls and sending now exist in the working tree but remain undeployed.
+  Captured ciphertext can now be decrypted with account-local LID-to-PN
+  resolution, while rejecting different event/chat scopes. The durable reader
+  pages encrypted replies by stable message ID instead of truncating the first
+  window. Its disposable PostgreSQL 17 fixture traverses 1,201 direct/wrapped
+  responses with no duplicates, missing rows or cross-account/chat/event rows;
+  the durable-store unit suite passes 13 tests. A read service now resolves
+  missing keys/identities explicitly and combines latest responses across pages.
+  The connector exposes authenticated `/messages/event/results`; the app's
+  `/api/messages/event/results` resolves the stored message inside the selected
+  account/chat and projects only counts and the owner's attendance. The read
+  endpoint is independent of sending permissions and does not slow the initial
+  chat history request. The event card opens results on demand and supports
+  going/not-going/maybe and permitted extra guests. Pending responses disable
+  duplicate actions; failed retries reuse the same token. Connector reservations
+  bind the token to account/chat/event/attendance/guests, claim before relay and
+  retain uncertain outcomes without automatic replay. Incoming ciphertext stays
+  outside chat messages; old raw response types are excluded from visible queries.
+  Validation: 252 connector tests, 325 app tests and TypeScript pass. Synthetic
+  Playwright checks reading, immediate send feedback, retry-token reuse, account
+  switching and four light/dark desktop/mobile layouts. Visual inspection improved
+  title placement and browser-local date formatting. Independent review and exact
+  release validation remain pending. No real RSVP was sent.
 
 ## Validation and release
 
@@ -322,10 +389,34 @@ The goal remains open until the matrix is resolved with implemented/verified
 behavior or a concrete documented provider limitation. Calls/video calls are
 the only product area excluded by the owner.
 
-## Interface release candidate
+## Interface deployment (`8ad9dd9`)
 
-This batch adds the global media library, contact directory, bulk chat selection,
-account-scoped notification preferences and privacy controls. Local validation
-includes 42 selected-feature browser checks, 29 panel-exclusion checks, 13 privacy
-checks and 38 media-library requests across mobile/desktop and both themes.
-Production verification and CI for the new commit remain pending.
+The exact committed Node 22 image passes 312 tests; synthetic browser checks
+pass for 42 selected features, 29 panel interactions and 13 privacy scenarios.
+The app and both account connectors are healthy. Authenticated read-only QA
+opens the contact directory and all three media-library tabs on both accounts,
+with zero writes and page errors. The fork main and upstream PR74 point to this
+commit; fork CI `36356628284` and upstream PR CI `36356631847` both pass
+on the exact `8ad9dd9` head. Novedades API/UI and RSVP are not
+part of this release.
+
+## Event attendance candidate (not deployed)
+
+Event cards now expose on-demand synchronized attendance and controls for
+going, not going, maybe and allowed companions. The current user's companion
+count is preserved when reopening the card. Results explicitly describe the
+locally captured history as partial; missing encryption keys or identity are
+reported as unavailable, not as zero confirmed attendees.
+
+The connector decrypts captured replies in account/chat/event scope, paginates
+all stored replies and keeps each participant's latest response. Encrypted
+response envelopes do not appear as standalone chat messages. Sending binds
+the idempotency token to the response payload and claims it before transport;
+an uncertain outcome cannot silently trigger another relay with the same token.
+
+The isolated RSVP candidate passes 315 app tests, 252 connector tests and
+TypeScript validation. Synthetic Playwright checks cover reading, sending
+feedback, retry-token reuse, account switching during a request and four
+theme/viewport layouts. No real attendance response was sent during QA.
+Independent review, publication and authenticated deployment checks are still
+pending. The unfinished Novedades reader/UI is excluded from this candidate.

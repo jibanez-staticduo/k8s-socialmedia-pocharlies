@@ -444,6 +444,16 @@ async function fulfillApi(route, state) {
     chatFor(state, account, body.targetChat);
     return jsonResponse(route, { account, chat: body.chat, targetChat: body.targetChat, messageIds: ids, confirmed: true });
   }
+  if (pathName === '/api/messages/pins' && request.method() === 'GET') {
+    const chat=url.searchParams.get('chat');
+    return jsonResponse(route,{account,chat,items:state.pins?.[`${account}:${chat}`]||[]});
+  }
+  if (pathName === '/api/messages/pin' && request.method() === 'POST') {
+    const message=messageFor(state,account,body.chat,body.messageId);
+    state.pins ||= {};
+    state.pins[`${account}:${body.chat}`]=body.pinned?[{id:message.id,text:message.text,expiresAtMs:Date.now()+body.duration*1000}]:[];
+    return jsonResponse(route,{account,chat:body.chat,confirmed:true,messageId:'pin-action'});
+  }
   if (pathName === '/api/messages/edit' && request.method() === 'POST') {
     const message = messageFor(state, account, body.chat, body.messageId);
     message.text = String(body.text || '');
@@ -968,6 +978,22 @@ async function runDesktop(page, state, report) {
     const picker = await dialog(page, /Reaccionar/i);
     await picker.locator('button[aria-label^="Reaccionar con"]').first().click();
     await waitForCondition(() => state.log.some(item => item.path === '/api/messages/react' && item.body?.messageId === 'alpha-direct-outgoing'), 'reaction request missing');
+  });
+
+  await check('pin and unpin use selected duration, refresh the bar and preserve message scope', async () => {
+    await page.locator('[data-message-id="alpha-direct-outgoing"] .feature-message-action').click();
+    await clickDialogButton(await dialog(page,/Acciones del mensaje/i),'Fijar mensaje');
+    let pin=await dialog(page,/Fijar mensaje/i);
+    await pin.locator('select').selectOption('2592000');
+    await clickDialogButton(pin,'Fijar');
+    await page.locator('.pinned-message-link').waitFor();
+    const sent=state.log.filter(item=>item.path==='/api/messages/pin').at(-1).body;
+    assert.equal(sent.duration,2592000);assert.equal(sent.account,'alpha');assert.equal(sent.messageId,'alpha-direct-outgoing');assert(sent.sendToken);
+    await page.locator('[data-message-id="alpha-direct-outgoing"] .feature-message-action').click();
+    await clickDialogButton(await dialog(page,/Acciones del mensaje/i),'Desfijar mensaje');
+    pin=await dialog(page,/Desfijar mensaje/i);await clickDialogButton(pin,'Desfijar');
+    await page.locator('.pinned-message-bar').waitFor({state:'hidden'});
+    assert.equal(state.log.filter(item=>item.path==='/api/messages/pin').at(-1).body.duration,0);
   });
 
   await check('message forward posts selected ids and destination', async () => {

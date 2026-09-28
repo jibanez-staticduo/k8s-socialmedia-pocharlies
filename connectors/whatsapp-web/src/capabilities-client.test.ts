@@ -317,6 +317,7 @@ test('received capability metadata is structured without raw provider payloads',
         startTime: 1_700_000_000,
         endTime: 1_700_003_600,
         isCanceled: true,
+        extraGuestsAllowed: true,
         location: { degreesLatitude: 40.4, degreesLongitude: -3.7, name: 'Madrid' },
       },
     },
@@ -328,6 +329,7 @@ test('received capability metadata is structured without raw provider payloads',
     endTime: 1_700_003_600,
     location: { degreesLatitude: 40.4, degreesLongitude: -3.7, name: 'Madrid' },
     isCancelled: true,
+    extraGuestsAllowed: true,
   });
 
   const contact = client.convertMessage({

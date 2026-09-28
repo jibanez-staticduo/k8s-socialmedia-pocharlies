@@ -49,6 +49,24 @@ export async function reserveTextSend(input: {
   return reserveSend(input.token, requestHash);
 }
 
+export async function reservePinSend(input: {
+  token: string; conversationId: string; targetMessageId: string; pinned: boolean; duration: number;
+}): Promise<SendReservation> {
+  const hash = createHash('sha256').update(JSON.stringify([
+    'pin-message', input.conversationId, input.targetMessageId, input.pinned, input.duration,
+  ])).digest('hex');
+  return reserveSend(input.token, hash);
+}
+
+export async function reserveEventResponseSend(input: {
+  token: string; conversationId: string; eventMessageId: string; attendance: string; extraGuestCount: number;
+}): Promise<SendReservation> {
+  const hash = createHash('sha256').update(JSON.stringify([
+    'event-response', input.conversationId, input.eventMessageId, input.attendance, input.extraGuestCount,
+  ])).digest('hex');
+  return reserveSend(input.token, hash);
+}
+
 export async function reserveMediaSend(input: {
   token: string;
   conversationId: string;

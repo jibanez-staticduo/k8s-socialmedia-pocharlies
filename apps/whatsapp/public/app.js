@@ -44,6 +44,7 @@ let featureUI = null;
 let communitiesUI = null;
 let profileUI = null;
 let mediaLibraryUI = null;
+let pinnedUI = null;
 const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, historyCursor: null, historyInitialized: false, loadingOlder: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
@@ -68,6 +69,7 @@ function updateOlderControl() {
   loadOlderButton.textContent = state.loadingOlder ? 'Cargando mensajes anteriores…' : 'Cargar mensajes anteriores';
 }
 function resetMessageHistory() {
+  void pinnedUI?.refresh();
   state.messages = [];
   state.historyCursor = null;
   state.historyInitialized = false;
@@ -685,12 +687,18 @@ $('record').onclick = async () => {
 $('recording-stop').onclick = () => { if (state.recorder?.state === 'recording') state.recorder.stop(); }; $('recording-cancel').onclick = cancelRecording; $('recording-send').onclick = async () => { if (!state.blob || state.busy || !state.sending) return; const ctx = context(); const blob = state.blob; const token = state.recordingToken; state.recordingSendToken ||= crypto.randomUUID(); try { const data = await base64(blob); if (!current(ctx) || token !== state.recordingToken) return; await sendPayload('/api/upload', {name:`nota-de-voz.${blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'}`,mimeType:blob.type,data,voice:true,sendToken:state.recordingSendToken}, cancelRecording); } catch (err) { if (current(ctx)) error(err.message); } };
 function toggleAI(open) { $('ai-panel').hidden = !open; $('ai-toggle').setAttribute('aria-expanded', String(open)); if (open) closeRailPanels(['ai']); assistant?.setOpen(open); if (!open) $('ai-toggle').focus(); }
 $('ai-toggle').onclick = () => toggleAI($('ai-panel').hidden); $('ai-close').onclick = () => toggleAI(false); document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('ai-panel').hidden) toggleAI(false); });
-const featureReady = Promise.all([historyReady, mediaReady]).then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error, openCamera: () => state.sending ? cameraController?.open() : error('El envío está desactivado.'), onOpen: () => closeRailPanels(['features', 'settings'])}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
+const featureReady = Promise.all([historyReady, mediaReady]).then(() => import('./features-ui.mjs')).then(({installFeatureUI}) => { featureUI = installFeatureUI({state, api, query, renderChats, loadChats, loadMessages, showHistoricalMessage, selectChat, getMessages: () => state.messages, getChats: () => state.chats, showError: error, isMessagePinned: id => pinnedUI?.has(id) === true, onPinsChange: () => pinnedUI?.refresh({force: true}), openCamera: () => state.sending ? cameraController?.open() : error('El envío está desactivado.'), onOpen: () => closeRailPanels(['features', 'settings'])}); return featureUI; }).catch(err => { error(`No se pudo cargar la interfaz de funciones: ${err.message}`); return null; });
 const chatSelectionReady = featureReady.then(() => import('./chat-selection.mjs')).then(({installChatSelection}) => installChatSelection({
   getScope: () => JSON.stringify([state.account, state.version, featureUI?.isFeatureView?.()]),
   getAccount: () => state.account, getChats: () => state.chats, canModify: () => state.sending,
   request: api, refresh: loadChats,
 })).catch(err => { error(`No se pudo cargar la selección de chats: ${err.message}`); return null; });
+const eventReady = import('./event-ui.mjs').then(({installEventUI}) => installEventUI({
+  container: $('messages'), getContext: context, api, canSend: () => state.sending,
+})).catch(err => { error(`No se pudieron cargar las respuestas a eventos: ${err.message}`); });
+const pinnedReady = import('./pinned-ui.mjs').then(({installPinnedUI}) => {
+  pinnedUI = installPinnedUI({messages: $('messages'), getContext: context, api, openMessage: showHistoricalMessage});
+}).catch(err => { error(`No se pudieron cargar los mensajes fijados: ${err.message}`); });
 // Los paneles del rail comparten viewport, foco y la tecla Escape: abrir uno debe cerrar los demás.
 // `except` admite uno o varios nombres; los modales de features dejan abierto el popover de
 // ajustes porque sus disparadores viven dentro, y cerrarlo dejaría el foco huérfano al volver.
@@ -721,8 +729,8 @@ const mediaLibraryReady = import('./media-library-ui.mjs').then(({installMediaLi
   }, onOpen: () => closeRailPanels(['library']) });
   return mediaLibraryUI;
 }).catch(err => { error(`No se pudo cargar el contenido multimedia: ${err.message}`); return null; });
-async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await chatSelectionReady; await communitiesReady; await profileReady; await mediaLibraryReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
-let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await Promise.all([loadChats({background: true}), document.hidden ? null : loadMessages()]); } finally { polling = false; } }, 10000);
+async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await Promise.all([loadChats({background: true}), document.hidden ? null : loadMessages(), document.hidden ? null : pinnedUI?.refresh()]); } finally { polling = false; } }, 10000);
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
 window.addEventListener('pagehide', () => { cancelRecording(); cameraController?.close(); cancelAttachment(); });

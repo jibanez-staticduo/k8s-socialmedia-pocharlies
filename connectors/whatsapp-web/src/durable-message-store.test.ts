@@ -11,6 +11,7 @@ import {
   storeMessageReaction,
   storeRawWAMessage,
   getRawWAMessage,
+  listCapturedEventResponses,
   upsertChatState,
 } from './durable-message-store';
 
@@ -235,4 +236,40 @@ test('reactions use an account-scoped target and explicit removal state', async 
   } finally {
     restore();
   }
+});
+
+test('RSVP ciphertext pages bind account, event and canonical chat with an explicit continuation', async () => {
+  const previous = process.env.CONNECTOR_ACCOUNT;
+  process.env.CONNECTOR_ACCOUNT = 'professional';
+  const {calls, restore} = stubPool(['one', 'two', 'three'].map(id => ({
+    wa_message_id: `professional:${id}`,
+    message_key: JSON.stringify({id, remoteJid: '123@g.us'}),
+    message_payload: JSON.stringify({encEventResponseMessage: {eventCreationMessageKey: {id: 'event'}}}),
+  })));
+  try {
+    const result = await listCapturedEventResponses('event', '123@g.us', {cursor: 'before', limit: 2});
+    assert.equal(result.items.length, 2);
+    assert.equal(result.nextCursor, 'two');
+    const query = calls.at(-1)!;
+    assert.deepEqual(query.params, ['professional', 'event', 'professional:123@g.us', 'professional:before', 3]);
+    assert.match(query.sql, /account = \$1 AND conversation_id = \$3/);
+    assert.match(query.sql, /jsonb_path_exists/);
+    assert.match(query.sql, /ORDER BY wa_message_id COLLATE "C" ASC/);
+  } finally {
+    restore();
+    if (previous === undefined) delete process.env.CONNECTOR_ACCOUNT;
+    else process.env.CONNECTOR_ACCOUNT = previous;
+  }
+});
+
+test('RSVP ciphertext empty pages terminate and invalid limits do not silently truncate', async () => {
+  const {calls, restore} = stubPool();
+  try {
+    assert.deepEqual(await listCapturedEventResponses('event', '123@g.us'), {items: [], nextCursor: null});
+    const before = calls.length;
+    for (const limit of [0, 501, NaN, 1.5]) {
+      await assert.rejects(listCapturedEventResponses('event', '123@g.us', {limit}), /Invalid event response page/);
+    }
+    assert.equal(calls.length, before);
+  } finally { restore(); }
 });

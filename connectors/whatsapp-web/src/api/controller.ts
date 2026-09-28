@@ -29,6 +29,8 @@ import {
 import { CapabilityError } from '../whatsapp-capabilities';
 import { ProfileError } from '../profile-service';
 import { CommunityError } from '../novedades-communities';
+import { EventSendError, sendEventResponseOnce, type EventSendInput } from '../event-send';
+import { PinSendError, sendPinOnce } from '../pinned-send';
 import {
   claimSendAttempt,
   confirmTextSend,
@@ -58,6 +60,10 @@ function errorMessage(error: unknown): string {
 }
 
 function capabilityErrorResponse(res: Response, error: unknown): void {
+  if (error instanceof EventSendError || error instanceof PinSendError) {
+    res.status(error.status).json({ok: false, error: {code: error.code, message: error.message}});
+    return;
+  }
   if (error instanceof CommunityError) {
     res
       .status(error.status)
@@ -1958,6 +1964,66 @@ export function createRouter(
       } catch (error) {
         capabilityErrorResponse(res, error);
       }
+    })();
+  });
+
+  router.post('/messages/event/respond', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        if (process.env.ENABLE_SENDING !== 'true' || process.env.EMERGENCY_DISABLE_SENDING === 'true') {
+          res.status(403).json({ok: false, error: {code: 'SENDING_DISABLED', message: 'Sending is disabled'}});
+          return;
+        }
+        const body = (req.body || {}) as Record<string, unknown>;
+        const result = await sendEventResponseOnce({
+          token: body.sendToken as string, conversationId: body.conversationId as string,
+          eventMessageId: body.eventMessageId as string, attendance: body.attendance as EventSendInput['attendance'],
+          extraGuestCount: body.extraGuestCount === undefined ? 0 : body.extraGuestCount as number,
+        }, {send: (input, id, beforeSend) => client.sendEventResponse(input, id, beforeSend)});
+        res.json({ok: true, sent: true, ...result});
+      } catch (error) { capabilityErrorResponse(res, error); }
+    })();
+  });
+
+  router.post('/messages/pin', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        if (process.env.ENABLE_SENDING !== 'true' || process.env.EMERGENCY_DISABLE_SENDING === 'true') {
+          res.status(403).json({ok: false, error: {code: 'SENDING_DISABLED', message: 'Sending is disabled'}}); return;
+        }
+        const body = req.body || {};
+        const result = await sendPinOnce({token: body.sendToken, conversationId: body.conversationId,
+          targetMessageId: body.messageId, pinned: body.pinned, duration: body.duration},
+          {send: (input, id, claim) => client.sendPin(input, id, claim)});
+        res.json({ok: true, sent: true, ...result});
+      } catch (error) { capabilityErrorResponse(res, error); }
+    })();
+  });
+
+  router.post('/messages/pins', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const chatId = req.body?.conversationId;
+        if (typeof chatId !== 'string' || !/^\d+(?:-\d+)?@(?:g\.us|s\.whatsapp\.net|c\.us|lid)$/.test(chatId)) {
+          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'A valid conversationId is required');
+        }
+        res.json({ok: true, ...await client.getPinnedMessages(chatId)});
+      } catch (error) { capabilityErrorResponse(res, error); }
+    })();
+  });
+
+  router.post('/messages/event/results', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const body = (req.body || {}) as Record<string, unknown>;
+        const chatId = optionalString(body.conversationId || body.chatId);
+        if (!chatId || !Array.isArray(body.eventMessageIds) || !body.eventMessageIds.length || body.eventMessageIds.length > 50 ||
+            body.eventMessageIds.some(id => typeof id !== 'string' || !id.trim() || id.length > 512)) {
+          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'conversationId and 1 to 50 eventMessageIds are required');
+        }
+        const events = await client.getEventResults(chatId, body.eventMessageIds);
+        res.json({ok: true, events});
+      } catch (error) { capabilityErrorResponse(res, error); }
     })();
   });
 

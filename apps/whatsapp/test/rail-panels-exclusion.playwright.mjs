@@ -22,6 +22,7 @@ const routes = {
   '/api/accounts': () => ({ accounts: [{ id: 'alpha', label: 'Alpha' }], sendingEnabled: true, outboxScope: 'alpha' }),
   '/api/chats': () => ({ chats: [{ id: '123@s.whatsapp.net', name: 'Ana Fixture', preview: 'Hola', unread: 0, isGroup: false }] }),
   '/api/messages': () => ({ messages: [] }),
+  '/api/messages/pins': url => ({ account: url.searchParams.get('account'), chat: url.searchParams.get('chat'), items: [] }),
   '/api/communities': () => ({ account: 'alpha', communities: [] }),
   '/api/media-library': url => ({
     account: url.searchParams.get('account'),

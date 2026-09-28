@@ -458,3 +458,30 @@ export async function listCapturedPollUpdates(
   );
   return toStoredRawRows(result.rows);
 }
+
+/** Page captured RSVP ciphertext in one account/chat, including wrapped messages. */
+export async function listCapturedEventResponses(
+  eventMessageId: string,
+  chatId: string,
+  {cursor = null, limit = 200}: {cursor?: string | null; limit?: number} = {}
+): Promise<{items: StoredRawMessageRow[]; nextCursor: string | null}> {
+  if (!eventMessageId || !chatId || !Number.isInteger(limit) || limit < 1 || limit > 500 ||
+      (cursor !== null && (typeof cursor !== 'string' || !cursor || cursor.length > 512))) {
+    throw new Error('Invalid event response page');
+  }
+  const result = await pool().query(
+    `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
+       FROM whatsapp_message_payloads
+      WHERE account = $1 AND conversation_id = $3
+        AND ($4::text IS NULL OR wa_message_id COLLATE "C" > $4::text COLLATE "C")
+        AND jsonb_path_exists(message_payload,
+          '$.**.encEventResponseMessage.eventCreationMessageKey.id ? (@ == $eventId)',
+          jsonb_build_object('eventId', $2::text))
+      ORDER BY wa_message_id COLLATE "C" ASC LIMIT $5`,
+    [connectorAccount(), eventMessageId,
+      accountKey(await canonicalConversationId(storageConversationId(chatId))),
+      cursor === null ? null : accountKey(cursor), limit + 1]
+  );
+  const items = toStoredRawRows(result.rows.slice(0, limit));
+  return {items, nextCursor: result.rows.length > limit ? items.at(-1)!.waMessageId : null};
+}

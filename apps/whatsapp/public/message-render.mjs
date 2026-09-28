@@ -686,15 +686,21 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     } else card.append(makeElement(documentRef, 'small', 'message-poll-note', 'Votación no disponible en esta copia'));
     bubble.append(card);
   } else if (metadata.kind === 'event') {
-    const card = makeElement(documentRef, 'div', 'message-structured-card');
-    card.append(makeElement(documentRef, 'strong', '', metadata.isCancelled ? 'Evento cancelado' : 'Evento'));
-    if (metadata.startTime) card.append(makeElement(documentRef, 'span', '', new Date(metadata.startTime < 1e12 ? metadata.startTime * 1000 : metadata.startTime).toLocaleString('es-ES')));
+    const card = makeElement(documentRef, 'div', 'message-structured-card message-event-card');
+    card.append(makeElement(documentRef, 'span', 'message-event-label', metadata.isCancelled ? 'Evento cancelado' : 'Evento'));
+    card.append(makeElement(documentRef, 'strong', 'message-event-title', textValue(message?.text ?? message?.content).trim() || 'Evento'));
+    if (metadata.startTime) card.append(makeElement(documentRef, 'span', '', new Date(metadata.startTime < 1e12 ? metadata.startTime * 1000 : metadata.startTime).toLocaleString('es-ES', {dateStyle: 'medium', timeStyle: 'short'})));
     if (metadata.description) card.append(makeElement(documentRef, 'span', '', metadata.description));
     if (metadata.location?.name) card.append(makeElement(documentRef, 'span', '', metadata.location.name));
+    const responses = makeElement(documentRef, 'button', 'message-event-open', 'Ver respuestas');
+    responses.type = 'button';
+    responses.dataset.cancelled = String(metadata.isCancelled === true);
+    responses.dataset.extraGuests = String(metadata.extraGuestsAllowed === true);
+    card.append(responses);
     bubble.append(card);
   }
   const text = textValue(message?.text ?? message?.content);
-  if (text && metadata.kind !== 'poll') {
+  if (text && !['poll', 'event'].includes(metadata.kind)) {
     const textElement = makeElement(documentRef, 'div', 'message-text');
     appendRichText(textElement, text, documentRef);
     bubble.append(textElement);
