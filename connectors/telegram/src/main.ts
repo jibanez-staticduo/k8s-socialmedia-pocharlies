@@ -102,11 +102,14 @@ async function main() {
   });
   app.use('/api/v1', createRouter(client, CONNECTOR_SHARED_SECRET));
 
-  // Health check endpoint
-  app.get('/health', (req, res) => {
+  // Health check endpoint. INFRA-291 (P4): readiness reports the REAL NATS
+  // state (eventPublisher.isConnected()) — the publisher no longer kills the
+  // process when NATS is down, so /health must not pretend events flow.
+  app.get('/health', (_req, res) => {
     res.json({
       status: 'ok',
       connected: client.isClientConnected(),
+      natsConnected: eventPublisher.isConnected(),
       platform: 'telegram',
     });
   });
@@ -115,7 +118,9 @@ async function main() {
     console.log(`Telegram Connector API listening on port ${PORT}`);
   });
 
-  // Connect to NATS
+  // Connect to NATS. INFRA-291 (P4): connect() never throws — a NATS that is
+  // down at boot used to kill main.ts here (CrashLoop); now the publisher
+  // retries with backoff and /health's natsConnected reflects the real state.
   await eventPublisher.connect();
 
   // Handle connection
