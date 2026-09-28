@@ -68,6 +68,33 @@ Tres Deployment: **`social-api`** (:3020, imagen mcp-server) es la ÚNICA cara y
 
 Flags (todas entregadas INERTES por `k8s/base/social-pairing.yaml`, P3: `replicas: 0`): `SOCIAL_PAIRING_API` (`on` = trim/lowercase; off → 404 salvo /health, en las tres caras), `CREDENTIAL_STORE_ENABLED` (`true` + `CREDENTIAL_STORE_MASTER_KEY` válida, si no 503 `pairing_unavailable`), `SOCIAL_API_ALLOWED_ORIGINS` (vacío por defecto: un `Origin` presente fuera de la lista es 403; nunca se contestan cabeceras CORS) y `SOCIAL_IDENTITY_BINDING` (NO la lee social-api: gatea las tools del MCP; `/social/status` lee los vínculos siempre, fail-closed). El resto del env es el contrato con los manifests P3 (`WHATSAPP_PAIRING_URL`, `TELEGRAM_PAIRING_URL`, `SOCIAL_API_JWT_*`, `SOCIAL_API_ALLOWED_AZP`, `CONNECTOR_SHARED_SECRET`, `DATABASE_URL`, `SOCIAL_ACCOUNTS_FILE`, `SOCIAL_IDENTITY_BINDINGS_FILE`). Detalle, códigos de error y JWT contract: **`docs/social-api.md`**; superficies registradas: `http.social-api.*` en `CONTRACTS.yaml`. Encendido = PR del operador tras el PR2 de SC-705 y el mapper Audience de SC-1198 historia 0. Los QR de la casa (`/api/v1/auth/qr`, `/api/v1/me` de los conectores) son superficie DISTINTA e intacta (diseño D6).
 
+## Reenganche NATS + backfill acotado al reconectar (INFRA-112)
+
+Tres piezas, todas por GitOps (rama `feat/infra-112-p6-integration` → PR → `deploy/prod` → ArgoCD):
+
+- **Backfill acotado (whatsapp-web)**: cuando la sesión Baileys se reengancha tras una caída, el conector
+  pide el histórico SOLO de la ventana perdida: `historyBackfillRequestedUntil` = ahora −
+  `WA_RECONNECT_BACKFILL_WINDOW_HOURS` (prod: `6`), con tope duro de `WA_RECONNECT_BACKFILL_MAX_MESSAGES`
+  mensajes (prod: `500`), newer-first. Se ingresa con el marcador que ya existía:
+  `source=baileys_history_sync` (`connectors/whatsapp-web/src/baileys-client.ts`) — nunca un marcador nuevo.
+  Los dos env se declaran en el registro de cuentas `k8s/base/social-accounts.json` (bloque `deploy.env`
+  de las tres cuentas WhatsApp) y viajan a los pods vía `k8s/base/generated/connectors.yaml`
+  (renderizado por `scripts/render-connectors.py`; CI falla si está obsoleto con `--check`).
+  `WA_HISTORY_SYNC_ON_LOGIN` global sigue SIN activarse: todo histórico queda acotado por estos dos env.
+  Test: `src/reconnect-backfill.test.ts` (afirma que `fetchMessageHistory` no se invoca por encima del tope).
+- **Retén NATS acotado (whatsapp-web + instagram)**: si el publish contra NATS falla, los publishers
+  (`connectors/whatsapp-web/src/events/publisher.ts`, `connectors/instagram/src/publisher.ts`) ya NO
+  descartan el evento: lo guardan en una cola con tope de entradas y antigüedad y lo republica al
+  reengancharse, sin duplicar por id de evento, con backoff `NATS_RECONNECT_BASE_MS`→`NATS_RECONNECT_MAX_MS`
+  (2s→30s default). Contadores publicados/recibidos para medir la pérdida.
+  Tests: `src/events/publisher.retention.test.ts` y `src/events/publisher.live.test.ts` (whatsapp-web),
+  `src/publisher.retention.test.ts` (instagram).
+- **Reenganche NATS (telegram)**: el publisher de telegram reintenta `connect()` con el mismo backoff en
+  vez de propagar el error; `main.ts` ya no muere con un fallo de NATS en runtime (antes: CrashLoop).
+  Test: `connectors/telegram/src/events/publisher.test.ts`.
+
+Subjects NATS y formato de evento: INTACTOS (los consumen mcp-server/telegram-sync/brain-ingest).
+
 ## Estructura
 
 Tras el refactor del 2026-05-07 (commit `6791fae`), todo bajo carpetas dedicadas:
