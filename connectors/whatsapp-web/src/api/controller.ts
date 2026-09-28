@@ -1,3 +1,4 @@
+import { parseMediaQuality } from '../media-quality';
 import { createConnectorAccess, secretEquals } from './access';
 import express, { Request, Response } from 'express';
 import { createHash } from 'crypto';
@@ -1571,6 +1572,7 @@ export function createRouter(
           return;
         }
         const options = {
+          quality: parseMediaQuality(req.body.quality),
           asSticker: !!asSticker || kind === 'sticker',
           asGif: kind === 'gif',
           replyToMessageId: optionalString(replyTo),
@@ -1586,6 +1588,7 @@ export function createRouter(
               asSticker: options.asSticker,
               asGif: options.asGif,
               replyToMessageId: options.replyToMessageId,
+              quality: options.quality,
               sourceDigest,
               sourceMimeType,
             })
@@ -1640,7 +1643,10 @@ export function createRouter(
           });
           return;
         }
-        const failureClass = classifyWhatsAppSendFailure(e);
+        const failureClass =
+          e instanceof CapabilityError && e.code === 'INVALID_CAPABILITY_INPUT'
+            ? 'invalid_request'
+            : classifyWhatsAppSendFailure(e);
         res.status(statusForSendFailure(failureClass)).json({
           error: errorMessage(e),
           failureClass,

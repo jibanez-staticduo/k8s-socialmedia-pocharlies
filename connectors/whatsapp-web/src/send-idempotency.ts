@@ -1,3 +1,4 @@
+import { parseMediaQuality, type MediaQuality } from './media-quality';
 import { createHash } from 'node:crypto';
 import { connectorAccount, getPool } from './db-writer';
 
@@ -149,6 +150,7 @@ export async function reserveEventCreationSend(input: {
 }
 
 export async function reserveMediaSend(input: {
+  quality?: MediaQuality;
   token: string;
   conversationId: string;
   fileUrl: string;
@@ -169,6 +171,7 @@ export async function reserveMediaSend(input: {
     throw new Error('Invalid sourceMimeType');
   if (input.sourceDigest && !input.sourceMimeType)
     throw new Error('sourceMimeType is required with sourceDigest');
+  const quality = parseMediaQuality(input.quality);
   const dataHeader = input.fileUrl.match(/^data:([^,]*),/i)?.[1];
   const outputMimeType =
     dataHeader
@@ -188,6 +191,8 @@ export async function reserveMediaSend(input: {
         input.replyToMessageId || null,
         outputMimeType,
         sourceMimeType,
+        // Preserve existing source reservations across upgrades.
+        ...(quality === 'source' ? [] : [quality]),
       ])
     )
     .update('\0')

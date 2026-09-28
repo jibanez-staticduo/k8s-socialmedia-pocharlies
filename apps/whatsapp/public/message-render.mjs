@@ -1,8 +1,15 @@
+import { createMediaDownloadPolicy } from './settings-ui.mjs';
+
 const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
 const FORMAT_TYPES = { '*': 'strong', '_': 'em', '~': 'del' };
 const TRAILING_LINK_PUNCTUATION = /[.,!?;:]+$/;
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 const mediaViewerStates = new WeakMap();
+const defaultMediaPolicy = createMediaDownloadPolicy();
+const pendingMediaControllers = new WeakMap();
+const mountedMediaStates = new WeakMap();
+const viewerMediaStates = new WeakMap();
+const mediaPolicyDocuments = new WeakSet();
 const MESSAGE_KINDS = {
   IMAGE: { label: 'Imagen', icon: 'image' },
   VIDEO: { label: 'Video', icon: 'video' },
@@ -344,13 +351,47 @@ function attachmentName(attachment) {
   return textValue(attachment?.name || attachment?.fileName || attachment?.file_name || 'Archivo adjunto').trim() || 'Archivo adjunto';
 }
 
-function appendDownload(parent, url, name, documentRef) {
+const MEDIA_PENDING_LABELS = { image: 'Descargar foto', audio: 'Descargar audio', video: 'Descargar video', document: 'Descargar documento' };
+const MEDIA_PENDING_BADGES = { image: 'IMG', audio: 'AUD', video: 'VID', document: 'DOC' };
+
+function attachmentSizeBytes(attachment) {
+  const size = Number(attachment?.size ?? attachment?.fileSize ?? attachment?.file_size);
+  return Number.isFinite(size) && size > 0 ? size : null;
+}
+
+function formatMediaSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
+}
+
+function mediaAccount(url) {
+  try { return new URL(url).searchParams.get('account') || ''; } catch { return ''; }
+}
+
+function makeDownloadLink(url, name, documentRef) {
   const link = makeElement(documentRef, 'a', 'attachment-link attachment-download', `Descargar ${name}`);
   link.href = url;
   link.download = name;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
-  parent.append(link);
+  return link;
+}
+
+function openExternally(documentRef, url, name) {
+  const anchor = makeElement(documentRef, 'a', 'attachment-external');
+  anchor.href = url;
+  anchor.download = name;
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  anchor.hidden = true;
+  const host = documentRef?.body || documentRef;
+  host?.append?.(anchor);
+  try { anchor.click?.(); } catch {} finally { anchor.remove?.(); }
+}
+
+function appendDownload(parent, url, name, documentRef) {
+  parent.append(makeDownloadLink(url, name, documentRef));
 }
 
 function appendAttachmentError(parent, documentRef, message = 'No se pudo cargar el adjunto.') {
@@ -412,7 +453,7 @@ function openImageViewer(url, name, documentRef, opener) {
   const move = delta => {
     const target = entries[index + delta];
     if (!target || !target.isConnected) return;
-    const targetUrl = safeMessageUrl(target.dataset.viewerUrl);
+    const targetUrl = safeViewerUrl(target);
     if (!targetUrl) return;
     index += delta;
     image.src = targetUrl; image.alt = target.dataset.viewerName || 'Imagen';
@@ -532,13 +573,97 @@ function createDocumentCard(attachment, url, name, documentRef) {
   details.append(makeElement(documentRef, 'strong', 'document-name', name));
   const size = Number(attachment?.fileSize ?? attachment?.file_size);
   if (Number.isFinite(size) && size >= 0) details.append(makeElement(documentRef, 'span', 'document-size', `${Math.ceil(size / 1024)} KB`));
-  card.append(icon, details);
-  appendDownload(card, url, name, documentRef);
+  const link = makeDownloadLink(url, name, documentRef);
+  card.append(icon, details, link);
   return card;
 }
 
-/** Build a safe attachment element with native image/video and custom audio controls. */
-export function createAttachmentElement(attachment, { document: documentRef = globalThis.document, baseUrl = browserBaseUrl(), onImageOpen } = {}) {
+function buildDocumentCard(attachment, url, name, documentRef) {
+  const card = createDocumentCard(attachment, url, name, documentRef);
+  return { card, details: card.querySelector('.document-details'), link: card.querySelector('.attachment-download') };
+}
+
+function safeViewerUrl(button) {
+  const raw = button?.dataset?.viewerUrl;
+  const safe = safeMessageUrl(raw);
+  if (safe) return safe;
+  const state = viewerMediaStates.get(button);
+  return state?.url === raw && state.policy?.isLive?.(raw) ? raw : null;
+}
+
+function attachmentMediaNodes(attachment, { documentRef, src, name, parent, onImageOpen, kind, policy }) {
+  if (kind === 'image') {
+    const button = makeElement(documentRef, 'button', 'media-image-button');
+    button.type = 'button';
+    button.setAttribute('aria-label', `Abrir imagen ${name}`);
+    button.dataset.viewerUrl = src;
+    button.dataset.viewerName = name;
+    if (src.startsWith('blob:')) viewerMediaStates.set(button, { url: src, policy });
+    const image = makeElement(documentRef, 'img', 'attachment-image');
+    image.src = src;
+    image.alt = textValue(attachment?.alt || name);
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    addMediaError(image, parent, documentRef);
+    button.append(image);
+    button.onclick = () => {
+      const viewerUrl = safeViewerUrl(button);
+      if (!viewerUrl) return;
+      if (onImageOpen) onImageOpen({ url: viewerUrl, name, document: documentRef, opener: button });
+      else openImageViewer(viewerUrl, name, documentRef, button);
+    };
+    return [button];
+  }
+  if (kind === 'video') {
+    const video = makeElement(documentRef, 'video', 'attachment-video');
+    video.controls = true;
+    video.preload = 'metadata';
+    video.playsInline = true;
+    video.src = src;
+    addMediaError(video, parent, documentRef);
+    return [video];
+  }
+  if (kind === 'audio') return [createAudioPlayer(src, name, parent, documentRef)];
+  return [];
+}
+
+function ensureMediaPolicyListener(documentRef, policy) {
+  if (policy !== defaultMediaPolicy) return;
+  if (typeof documentRef?.addEventListener !== 'function') return;
+  if (mediaPolicyDocuments.has(documentRef)) return;
+  mediaPolicyDocuments.add(documentRef);
+  documentRef.addEventListener('wa:media-autodownload-change', event => reevaluatePendingMedia(documentRef, event?.detail));
+}
+
+/** Start the visible placeholders that a new setting enables, per their own account scope. */
+export function reevaluatePendingMedia(scope, detail = {}) {
+  const type = textValue(detail?.mediaType);
+  if (detail?.enabled !== true && detail?.enabled !== false) return 0;
+  let started = 0;
+  for (const wrap of scope?.querySelectorAll?.('.attachment-pending') || []) {
+    if (wrap?.dataset?.mediaKind !== type) continue;
+    const account = textValue(wrap.dataset?.mediaAccount);
+    if (detail?.account && detail.account !== '*' && detail.account !== account) continue;
+    const controller = pendingMediaControllers.get(wrap);
+    if (!controller) continue;
+    if (detail.enabled === false) {
+      if (!defaultMediaPolicy.enabled(type, account)) controller.cancelAuto?.();
+      continue;
+    }
+    if (controller.state !== 'manual' || !defaultMediaPolicy.enabled(type, account)) continue;
+    started += 1;
+    void controller.load('auto');
+  }
+  return started;
+}
+
+/**
+ * Build a safe attachment honoring the per-account auto-download setting:
+ * enabled types load automatically, disabled types request nothing until the
+ * user taps an explicit download action. Declared sizes are advisory only;
+ * actual bytes pass through the bounded policy before media is mounted.
+ */
+export function createAttachmentElement(attachment, { document: documentRef = globalThis.document, baseUrl = browserBaseUrl(), onImageOpen, mediaPolicy } = {}) {
   const container = makeElement(documentRef, 'div', 'attachment message-attachment');
   const url = safeMessageUrl(attachmentUrl(attachment), baseUrl);
   const name = attachmentName(attachment);
@@ -547,41 +672,180 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
     return container;
   }
   const kind = getAttachmentKind(attachment);
-  if (kind === 'image') {
-    const button = makeElement(documentRef, 'button', 'media-image-button');
-    button.type = 'button';
-    button.setAttribute('aria-label', `Abrir imagen ${name}`);
-    button.dataset.viewerUrl = url;
-    button.dataset.viewerName = name;
-    const image = makeElement(documentRef, 'img', 'attachment-image');
-    image.src = url;
-    image.alt = textValue(attachment?.alt || name);
-    image.loading = 'lazy';
-    image.decoding = 'async';
-    addMediaError(image, container, documentRef);
-    button.append(image);
-    button.onclick = () => onImageOpen ? onImageOpen({ url, name, document: documentRef, opener: button }) : openImageViewer(url, name, documentRef, button);
-    container.append(button);
-  } else if (kind === 'video') {
-    const video = makeElement(documentRef, 'video', 'attachment-video');
-    video.controls = true;
-    video.preload = 'metadata';
-    video.playsInline = true;
-    video.src = url;
-    addMediaError(video, container, documentRef);
-    container.append(video);
-  } else if (kind === 'audio') {
-    container.append(createAudioPlayer(url, name, container, documentRef));
-  } else {
-    container.append(createDocumentCard(attachment, url, name, documentRef));
-  }
+  const policy = mediaPolicy || defaultMediaPolicy;
+  const account = mediaAccount(url);
+  container.dataset.mediaKind = kind;
+  container.dataset.mediaAccount = account;
   const caption = textValue(attachment?.caption).trim();
+  let captionElement = null;
   if (caption) {
-    const captionElement = makeElement(documentRef, 'div', 'attachment-caption');
+    captionElement = makeElement(documentRef, 'div', 'attachment-caption');
     appendRichText(captionElement, caption, documentRef);
-    container.append(captionElement);
   }
-  if (kind !== 'document') appendDownload(container, url, name, documentRef);
+  const mountMedia = (src, managed = false) => {
+    const previous = mountedMediaStates.get(container);
+    if (previous?.objectUrl && previous.objectUrl !== src) policy.release(previous.objectUrl, container);
+    container.replaceChildren(...attachmentMediaNodes(attachment, { documentRef, src, name, parent: container, onImageOpen, kind, policy }));
+    if (captionElement) container.append(captionElement);
+    if (kind !== 'document') container.append(makeDownloadLink(src, name, documentRef));
+    container.dataset.mediaState = managed ? 'loaded' : 'auto';
+    mountedMediaStates.set(container, { objectUrl: managed ? src : null });
+  };
+
+  if (kind === 'document') {
+    const { card, details, link } = buildDocumentCard(attachment, url, name, documentRef);
+    container.append(card);
+    if (captionElement) container.append(captionElement);
+    container.dataset.mediaState = 'manual';
+    card.className += ' attachment-pending';
+    card.dataset.mediaKind = 'document';
+    card.dataset.mediaAccount = account;
+    ensureMediaPolicyListener(documentRef, policy);
+    const controller = { state: 'manual', load: null, cancelAuto: null, generation: 0 };
+    controller.load = async () => {
+      if (controller.state !== 'manual' || !policy.enabled('document', account)) return;
+      const declared = attachmentSizeBytes(attachment);
+      if (declared != null && declared > policy.autoMaxBytes) {
+        container.dataset.mediaReason = 'size-limit';
+        return;
+      }
+      controller.state = 'loading';
+      const generation = ++controller.generation;
+      try {
+        container.dataset.mediaState = 'loading';
+        const loaded = await policy.loadBytes(url, { maxBytes: policy.autoMaxBytes, owner: container });
+        if (generation !== controller.generation) {
+          policy.release(loaded.objectUrl, container);
+          return;
+        }
+        if (card.isConnected === false) {
+          policy.release(loaded.objectUrl, container);
+          controller.state = 'manual';
+          container.dataset.mediaState = 'manual';
+          return;
+        }
+        link.href = loaded.objectUrl;
+        link.setAttribute('download', name);
+        details.append(makeElement(documentRef, 'span', 'document-size', 'Copia en memoria lista para abrir'));
+        mountedMediaStates.set(container, { objectUrl: loaded.objectUrl });
+        controller.state = 'loaded';
+        container.dataset.mediaState = 'loaded';
+      } catch (error) {
+        if (generation !== controller.generation || error?.code === 'MEDIA_CANCELLED') return;
+        controller.state = 'manual';
+        container.dataset.mediaState = 'manual';
+        container.dataset.mediaReason = error?.code === 'MEDIA_TOO_LARGE' ? 'too-large' : error?.code === 'MEDIA_CACHE_FULL' ? 'cache-full' : 'error';
+        if (error?.code === 'MEDIA_CACHE_FULL' || error?.code === 'MEDIA_UNBOUNDED') appendAttachmentError(container, documentRef, error.message);
+      }
+    };
+    controller.cancelAuto = () => {
+      if (controller.state !== 'loading') return;
+      controller.generation += 1;
+      controller.state = 'manual';
+      container.dataset.mediaState = 'manual';
+      policy.cancel?.(url, container);
+    };
+    pendingMediaControllers.set(card, controller);
+    if (policy.enabled('document', account)) void controller.load('auto');
+    return container;
+  }
+
+  const declaredSize = attachmentSizeBytes(attachment);
+  const sizeWithinAutoLimit = declaredSize === null || declaredSize <= policy.autoMaxBytes;
+  // WhatsApp descarga los stickers automaticamente: el interruptor de Fotos
+  // afecta a las fotos, no a los stickers, y estos montan de forma nativa.
+  const isSticker = ['STICKER'].includes(textValue(attachment?.type ?? attachment?.kind).toUpperCase());
+  if (isSticker) {
+    const cached = policy.cachedUrl(url, { maxBytes: policy.autoMaxBytes, owner: container });
+    mountMedia(cached || url, Boolean(cached));
+    return container;
+  }
+  if (policy.enabled(kind, account) && sizeWithinAutoLimit) {
+    const cached = policy.cachedUrl(url, { maxBytes: policy.autoMaxBytes, owner: container });
+    if (cached) {
+      mountMedia(cached, true);
+      return container;
+    }
+  }
+
+  ensureMediaPolicyListener(documentRef, policy);
+  if (policy.enabled(kind, account) && !sizeWithinAutoLimit) container.dataset.mediaReason = 'size-limit';
+  const wrap = makeElement(documentRef, 'div', 'attachment-document attachment-pending');
+  wrap.dataset.mediaKind = kind;
+  wrap.dataset.mediaAccount = account;
+  wrap.dataset.mediaState = 'manual';
+  const icon = makeElement(documentRef, 'span', 'document-icon', MEDIA_PENDING_BADGES[kind] || 'FILE');
+  icon.setAttribute('aria-hidden', 'true');
+  const details = makeElement(documentRef, 'span', 'document-details');
+  details.append(makeElement(documentRef, 'strong', 'document-name', name));
+  const declared = attachmentSizeBytes(attachment);
+  if (declared != null) details.append(makeElement(documentRef, 'span', 'document-size', formatMediaSize(declared)));
+  const label = MEDIA_PENDING_LABELS[kind] || `Descargar ${name}`;
+  const button = makeElement(documentRef, 'button', 'attachment-link attachment-load', label);
+  button.type = 'button';
+  button.setAttribute('aria-label', label);
+  wrap.append(icon, details, button);
+  const controller = { kind, account, state: 'manual', mode: null, load: null, cancelAuto: null, generation: 0 };
+  controller.load = async mode => {
+    if (wrap.isConnected === false || controller.state === 'loading' || controller.state === 'loaded') return;
+    if (mode === 'auto' && !policy.enabled(kind, account)) return;
+    controller.state = 'loading';
+    controller.mode = mode;
+    const generation = ++controller.generation;
+    const restoreFocus = mode === 'explicit' && documentRef.activeElement === button;
+    wrap.dataset.mediaState = 'loading';
+    button.disabled = true;
+    button.textContent = 'Descargando…';
+    try {
+      const loaded = await policy.loadBytes(url, {
+        maxBytes: mode === 'auto' ? policy.autoMaxBytes : policy.explicitMaxBytes,
+        owner: container,
+      });
+      if (generation !== controller.generation) {
+        policy.release(loaded.objectUrl, container);
+        return;
+      }
+      if (wrap.isConnected === false) {
+        policy.release(loaded.objectUrl, container);
+        controller.state = 'manual';
+        return;
+      }
+      controller.state = 'loaded';
+      mountMedia(loaded.objectUrl, true);
+      if (restoreFocus) container.querySelector('.media-image-button, .audio-toggle, .attachment-video')?.focus?.();
+    } catch (error) {
+      if (generation !== controller.generation || error?.code === 'MEDIA_CANCELLED') return;
+      controller.state = 'manual';
+      wrap.dataset.mediaState = 'manual';
+      button.disabled = false;
+      wrap.dataset.mediaReason = error?.code === 'MEDIA_TOO_LARGE' ? 'too-large' : error?.code === 'MEDIA_CACHE_FULL' ? 'cache-full' : 'error';
+      if (error?.code === 'MEDIA_CACHE_FULL' || error?.code === 'MEDIA_UNBOUNDED') {
+        appendAttachmentError(container, documentRef, error.message);
+        if (!wrap.querySelector('.attachment-download')) wrap.append(makeDownloadLink(url, name, documentRef));
+      }
+      if (error?.code === 'MEDIA_TOO_LARGE' && mode === 'explicit') {
+        openExternally(documentRef, url, name);
+        button.textContent = label;
+      } else {
+        button.textContent = mode === 'auto' ? label : 'Reintentar';
+      }
+    }
+  };
+  controller.cancelAuto = () => {
+    if (controller.state !== 'loading' || controller.mode !== 'auto') return;
+    controller.generation += 1;
+    controller.state = 'manual';
+    controller.mode = null;
+    wrap.dataset.mediaState = 'manual';
+    button.disabled = false;
+    button.textContent = label;
+    policy.cancel?.(url, container);
+  };
+  button.onclick = () => { void controller.load('explicit'); };
+  pendingMediaControllers.set(wrap, controller);
+  container.append(wrap);
+  if (captionElement) container.append(captionElement);
+  if (policy.enabled(kind, account) && sizeWithinAutoLimit) queueMicrotask(() => { void controller.load('auto'); });
   return container;
 }
 
@@ -676,7 +940,7 @@ function messageBubbleClass(message) {
   return classes.join(' ');
 }
 
-export function renderMessage(message, { document: documentRef = globalThis.document, showSenderNames = false } = {}) {
+export function renderMessage(message, { document: documentRef = globalThis.document, showSenderNames = false, mediaPolicy } = {}) {
   const fromMe = message?.fromMe === true;
   const bubble = makeElement(documentRef, 'article', messageBubbleClass(message));
   if (message?.id != null) bubble.dataset.messageId = String(message.id);
@@ -762,7 +1026,7 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     const shownAttachment = text.trim() && text.trim() === textValue(attachment?.caption).trim()
       ? { ...attachment, caption: '' }
       : attachment;
-    bubble.append(createAttachmentElement(shownAttachment, { document: documentRef }));
+    bubble.append(createAttachmentElement(shownAttachment, { document: documentRef, mediaPolicy }));
   }
   if (!text && !attachments.length && !['contact', 'poll', 'event'].includes(metadata.kind)) bubble.append(messageKindLine(documentRef, message?.type, '', { unavailable: !MESSAGE_KINDS[messageType(message?.type)] }));
   const meta = makeElement(documentRef, 'div', 'message-meta');
@@ -787,7 +1051,7 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
 }
 
 /** Render a complete message list, including date chips and grouping metadata. */
-export function renderMessageList(messages, { document: documentRef = globalThis.document, now = new Date(), showSenderNames = false } = {}) {
+export function renderMessageList(messages, { document: documentRef = globalThis.document, now = new Date(), showSenderNames = false, mediaPolicy } = {}) {
   const fragment = documentRef.createDocumentFragment();
   const decorated = decorateMessages(messages, { now });
   for (const message of decorated) {
@@ -796,7 +1060,7 @@ export function renderMessageList(messages, { document: documentRef = globalThis
       separator.append(makeElement(documentRef, 'span', 'message-date-label', message.dateLabel));
       fragment.append(separator);
     }
-    fragment.append(renderMessage(message, { document: documentRef, showSenderNames }));
+    fragment.append(renderMessage(message, { document: documentRef, showSenderNames, mediaPolicy }));
   }
   return { fragment, messages: decorated };
 }
@@ -869,10 +1133,11 @@ export function reconcileMessageList(container, messages, options = {}) {
       syncSenderHeader(previous, message, options.showSenderNames === true, documentRef);
       if (container.children?.[cursor] !== previous) container.insertBefore(previous, reference);
     } else {
-      container.insertBefore(renderMessage(message, { document: documentRef, showSenderNames: options.showSenderNames === true }), reference);
+      container.insertBefore(renderMessage(message, { document: documentRef, showSenderNames: options.showSenderNames === true, mediaPolicy: options.mediaPolicy }), reference);
     }
     cursor += 1;
   }
   while ((container.children?.length || 0) > cursor) container.children[cursor]?.remove?.();
+  if (options.mediaPolicy === undefined) defaultMediaPolicy.sweep();
   return { fragment: null, messages: decorated };
 }

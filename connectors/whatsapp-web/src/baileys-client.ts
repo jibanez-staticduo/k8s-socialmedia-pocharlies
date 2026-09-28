@@ -1,3 +1,4 @@
+import { parseMediaQuality, prepareImageQuality, type MediaQuality } from './media-quality';
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
 import {
@@ -2404,6 +2405,7 @@ export class BaileysClient extends EventEmitter {
     fileUrl: string,
     caption?: string,
     options?: {
+      quality?: MediaQuality;
       asSticker?: boolean;
       asGif?: boolean;
       replyToMessageId?: string;
@@ -2413,6 +2415,7 @@ export class BaileysClient extends EventEmitter {
     }
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
+    const quality = parseMediaQuality(options?.quality);
     const raw = this.toRawJid(chatId);
     const ownJid = this.sock.user?.id;
     let buf: Buffer;
@@ -2425,7 +2428,8 @@ export class BaileysClient extends EventEmitter {
     } catch (e: any) {
       throw new Error(`Failed to fetch file from ${fileUrl}: ${e?.message || e}`);
     }
-    const fileName =
+    const normalizedContentType = contentType.split(';', 1)[0].trim().toLowerCase();
+    let fileName =
       (
         options?.fileName ||
         (fileUrl.startsWith('data:') ? 'attachment' : fileUrl.split('/').pop()) ||
@@ -2446,10 +2450,28 @@ export class BaileysClient extends EventEmitter {
         throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Sticker payload must be image/webp');
       }
       payload = { sticker: buf };
-    } else if (options?.asGif || contentType === 'image/gif') {
-      payload = { video: buf, mimetype: contentType || 'image/gif', gifPlayback: true, caption };
-    } else if (contentType.startsWith('image/')) payload = { image: buf, caption };
-    else if (contentType.startsWith('video/')) payload = { video: buf, caption };
+    } else if (options?.asGif || normalizedContentType === 'image/gif') {
+      const isMp4 =
+        normalizedContentType === 'video/mp4' &&
+        buf.length >= 12 &&
+        buf.toString('ascii', 4, 8) === 'ftyp';
+      if (!isMp4) {
+        throw new CapabilityError(
+          'INVALID_CAPABILITY_INPUT',
+          'Animated GIFs must be transcoded to MP4 before sending; the connector does not transcode GIF files'
+        );
+      }
+      payload = { video: buf, mimetype: 'video/mp4', gifPlayback: true, caption };
+    } else if (contentType.startsWith('image/')) {
+      const prepared = await prepareImageQuality(buf, contentType, quality);
+      buf = prepared.bytes;
+      contentType = prepared.mimeType;
+      if (quality !== 'source') {
+        fileName =
+          fileName.replace(/\.[^.]+$/, '') + (contentType === 'image/png' ? '.png' : '.jpg');
+      }
+      payload = { image: buf, mimetype: contentType, caption };
+    } else if (contentType.startsWith('video/')) payload = { video: buf, caption };
     else if (contentType.startsWith('audio/'))
       payload = { audio: buf, mimetype: contentType, ptt: false };
     else

@@ -7,6 +7,7 @@ const historyReady = import('./chat-history.mjs').then(module => {
   ({mergeMessages, mergeRecentMessages, pinnedFirst, shouldSubmitMessageKey} = module);
 });
 const $ = id => document.getElementById(id);
+function safeLocalStorage() { try { return globalThis.localStorage; } catch { return null; } }
 let messageRenderer = null;
 const rendererReady = import('./message-render.mjs').then(module => { messageRenderer = module; return module; });
 let attachmentTools = null;
@@ -78,8 +79,8 @@ function resetMessageHistory() {
   updateOlderControl();
 }
 function error(message = '') { $('error').textContent = message; $('error').hidden = !message; }
-async function api(path, data, onEvent) {
-  const signal = onEvent ? AbortSignal.timeout(240000) : undefined;
+async function api(path, data, onEvent, requestSignal) {
+  const signal = requestSignal || (onEvent ? AbortSignal.timeout(240000) : undefined);
   const timeoutError = () => new Error('Se agotó el tiempo de espera del agente. Comprueba el chat antes de repetir una acción.');
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -144,7 +145,9 @@ function setConversationAvatar(chat = null) {
   } else avatar.textContent = chatInitials(chat);
 }
 function renderChats() {
-  const search = $('search').value.trim().toLocaleLowerCase();
+  const archivedView = featureUI?.isFeatureView?.() === 'archived';
+  sidebarSearch?.viewChanged(archivedView);
+  const search = archivedView ? '' : $('search').value.trim().toLocaleLowerCase();
   const filter = chatFilterValue();
   state.chatFilter = filter;
   const chats = pinnedFirst(state.chats.filter(chat => chatMatchesFilter(chat, filter) && `${chat.name || ''} ${chat.preview || ''}`.toLocaleLowerCase().includes(search)));
@@ -317,7 +320,7 @@ function renderMessages() {
           state.signature = '';
           renderMessages();
           const replyTo = item.replyTo || '';
-          if (item.file) void sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption || '', replyTo));
+          if (item.file) void sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption || '', replyTo, item.quality));
           else void sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
         };
         meta.append(retry);
@@ -479,7 +482,29 @@ async function proposeMessage() {
   }
 }
 function selectChat(chat) { messageRenderer?.closeMediaViewer?.(); saveDraft(); cancelRecording(); cameraController?.close(); cancelAttachment(); state.selectedChat = chat; state.chat = chat.id; state.historyMode = false; historyNotice.hidden = true; state.version++; resetMessageHistory(); state.signature = ''; $('message').value = state.drafts.get(`${state.account}:${state.chat}`) || ''; resizeMessageInput(); $('chat-title').textContent = chat.name || chat.id; $('chat-subtitle').textContent = chat.isGroup === true ? 'Grupo' : 'Contacto'; setConversationAvatar(chat); setAgentContext(chat); $('messages').replaceChildren(node('div', 'welcome', 'Cargando mensajes…')); renderMessages(); assistant?.select(context()); document.body.classList.add('chat-open'); error(); featureUI?.chatChanged?.(chat); renderChats(); updateControls(); return loadMessages(); }
-$('search').oninput = renderChats; $('message').oninput = saveDraft; $('back').onclick = () => { messageRenderer?.closeMediaViewer?.(); cancelRecording(); cameraController?.close(); document.body.classList.remove('chat-open'); };
+let sidebarSearch = null;
+let uploadQualityUI = null;
+const uploadQualityReady = import('./upload-quality-ui.mjs').then(({installUploadQualityUI}) => {
+  uploadQualityUI = installUploadQualityUI(document, safeLocalStorage());
+  return uploadQualityUI;
+}).catch(err => { error(`No se pudo cargar la calidad de subida: ${err.message}`); return null; });
+const sidebarSearchReady = import('./sidebar-search.mjs').then(({installSidebarMessageSearch}) => { sidebarSearch = installSidebarMessageSearch({
+  documentRef: document, input: $('search'), chatList: $('chats'),
+  getAccount: () => state.account, getChats: () => state.chats,
+  request: ({account, query: term, cursor, signal}) => api(`/api/search?${new URLSearchParams({account, q: term, scope: 'all', limit: '50', ...(cursor ? {cursor} : {})})}`, undefined, undefined, signal),
+  openMessage: async (chat, messageId, account) => {
+    if (state.account !== account) return;
+    const loading = selectChat(chat);
+    const selected = context();
+    await loading;
+    if (current(selected)) {
+      try { await showHistoricalMessage(messageId); }
+      catch (err) { if (current(selected)) throw err; }
+    }
+  },
+  showError: error,
+}); return sidebarSearch; }).catch(err => { error(`No se pudo cargar la b\u00fasqueda: ${err.message}`); return null; });
+$('search').oninput = () => { renderChats(); sidebarSearch?.changed(); }; $('message').oninput = saveDraft; $('back').onclick = () => { messageRenderer?.closeMediaViewer?.(); cancelRecording(); cameraController?.close(); document.body.classList.remove('chat-open'); };
 async function switchAccount(accountId) {
   if (!accountId || accountId === state.account || ![...$('account').options].some(option => option.value === accountId)) return;
   const settings = document.querySelector('.rail-settings');
@@ -490,7 +515,7 @@ async function switchAccount(accountId) {
   $('message').value = ''; resizeMessageInput(); $('chat-title').textContent = 'SocialMedia'; $('chat-subtitle').textContent = 'Selecciona un chat para empezar'; setConversationAvatar(); setAgentContext();
   $('messages').replaceChildren(node('div', 'welcome', 'Selecciona una conversación de esta cuenta.'));
   assistant?.select(context());
-  document.body.classList.remove('chat-open'); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); error(); renderChats(); updateControls(); await loadChats();
+  document.body.classList.remove('chat-open'); sidebarSearch?.accountChanged(); uploadQualityUI?.accountChanged(); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); error(); renderChats(); updateControls(); await loadChats();
 }
 $('account').onchange = () => switchAccount($('account').value);
 async function sendPayload(path, payload, onSuccess, onConfirmed) { const ctx = context(); state.busy = true; error(); updateControls(); try { const body = typeof payload === 'function' ? await payload() : payload; if (!current(ctx)) return; await api(path, {...ctx, version: undefined, ...body}); onConfirmed?.(ctx); if (current(ctx)) { onSuccess?.(ctx); await Promise.all([loadMessages(), loadChats()]); } } catch (err) { if (current(ctx)) error(err.message); } finally { state.busy = false; updateControls(); } }
@@ -532,6 +557,7 @@ $('composer').onsubmit = event => {
     : [{text, replyTo: featurePayload.replyTo}];
   const items = plans.map(plan => ({id: `local-${crypto.randomUUID()}`, account: ctx.account, chat: ctx.chat, ctx,
     text: plan.text || plan.caption || '', caption: plan.caption || '', file: plan.file || null,
+    quality: plan.file ? attachmentTools.readUploadQuality(safeLocalStorage(), ctx.account, plan.file) : 'source',
     replyTo: plan.replyTo || '', sendToken: crypto.randomUUID(), timestamp: new Date().toISOString(), state: 'sending', messageId: null}));
   const key = outgoingKey(ctx.account, ctx.chat);
   state.outgoing.set(key, [...outgoingFor(ctx.account, ctx.chat), ...items]);
@@ -550,7 +576,7 @@ $('composer').onsubmit = event => {
 async function sendPlannedMessages(items) {
   for (const item of items) {
     if (item.file) {
-      await sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption, item.replyTo));
+      await sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption, item.replyTo, item.quality));
     } else {
       const replyTo = item.replyTo;
       await sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
@@ -754,7 +780,7 @@ const mediaLibraryReady = import('./media-library-ui.mjs').then(({installMediaLi
   }, onOpen: () => closeRailPanels(['library']) });
   return mediaLibraryUI;
 }).catch(err => { error(`No se pudo cargar el contenido multimedia: ${err.message}`); return null; });
-async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await novedadesReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await uploadQualityReady; await sidebarSearchReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await novedadesReady; await assistantReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; sidebarSearch?.accountChanged(); uploadQualityUI?.accountChanged(); assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); updateControls(); if (state.account) await loadChats(); else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
 let polling = false; setInterval(async () => { if (polling) return; polling = true; try { await Promise.all([loadChats({background: true}), document.hidden ? null : loadMessages(), document.hidden ? null : pinnedUI?.refresh()]); } finally { polling = false; } }, 10000);
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });

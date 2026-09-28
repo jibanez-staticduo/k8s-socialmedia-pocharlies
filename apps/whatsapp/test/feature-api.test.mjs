@@ -882,3 +882,22 @@ test('AppState rejects corrupt JSON without replacing the existing file', async 
   await assert.rejects(() => new AppState(dir).init(), /Invalid app state file/);
   assert.equal(await readFile(file, 'utf8'), '{not-json');
 });
+
+
+test('upload validates and forwards media quality with source as the compatible default', async t => {
+  const outbound = [];
+  const {request} = await fixture(t, {fetchImpl: async (_url, options) => {
+    outbound.push(JSON.parse(options.body));
+    return Response.json({messageId: 'receipt'});
+  }});
+  const body = {account: 'secondary', chat: 'secondary-chat', name: 'photo.png', mimeType: 'image/png',
+    data: Buffer.from('image').toString('base64'), sendToken: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'};
+  for (const quality of [undefined, 'source', 'standard', 'hd']) {
+    assert.equal((await request('/api/upload', {...body, quality})).status, 200);
+    assert.equal(outbound.at(-1).quality, quality ?? 'source');
+  }
+  for (const quality of ['invalid', null, 1, {}]) {
+    assert.equal((await request('/api/upload', {...body, quality})).status, 400);
+  }
+  assert.equal(outbound.length, 4);
+});

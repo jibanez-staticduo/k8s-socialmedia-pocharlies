@@ -545,6 +545,45 @@ describe('Socialmedia canonical v2 acceptance gaps', () => {
       });
     });
 
+    test('forwards direct GIF attachments unchanged and reports connector rejection as failed', async () => {
+      const previousEnableSending = process.env.ENABLE_SENDING;
+      process.env.ENABLE_SENDING = 'true';
+      try {
+        const server = createServer();
+        const gifUrl = 'https://example.test/animation.gif';
+        server.connectorCall = jest.fn(async () => {
+          throw new Error(
+            'Connector error 400: {"error":"Animated GIFs must be transcoded to MP4 before sending","failureClass":"invalid_request"}'
+          );
+        });
+
+        const result = await server.executeCanonicalTool(
+          definition('social_send_message'),
+          {
+            channel: 'whatsapp',
+            accountId: 'personal',
+            target: '34600000000@s.whatsapp.net',
+            attachments: [{ url: gifUrl, caption: 'animation' }],
+          }
+        );
+
+        expect(server.connectorCall).toHaveBeenCalledWith(
+          'http://wa-personal',
+          'POST',
+          '/api/v1/messages/media/send',
+          expect.objectContaining({
+            conversationId: '34600000000@s.whatsapp.net',
+            fileUrl: gifUrl,
+            caption: 'animation',
+          })
+        );
+        expectStructuredError(result, 'provider_error');
+      } finally {
+        if (previousEnableSending === undefined) delete process.env.ENABLE_SENDING;
+        else process.env.ENABLE_SENDING = previousEnableSending;
+      }
+    });
+
     test('routes Telegram replyTo and threadId to both text and attachment operations', async () => {
       const server = createServer();
       server.handleTelegramSendMessage = jest.fn(async (args: unknown) => legacy(args));

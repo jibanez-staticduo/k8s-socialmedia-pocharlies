@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { attachmentCaptionError, attachmentError, filesFromClipboard, MAX_ATTACHMENT_BYTES, uploadPayload } from '../public/composer-attachment.mjs';
+import { attachmentCaptionError, attachmentError, filesFromClipboard, MAX_ATTACHMENT_BYTES, readUploadQuality, readUploadQualityPreference, uploadPayload, writeUploadQualityPreference } from '../public/composer-attachment.mjs';
 
 test('clipboard image and document items become attachments without requiring a file picker', () => {
   const image = { name: 'captura.png', type: 'image/png', size: 24 };
@@ -37,4 +37,22 @@ test('audio with text is blocked while a caption on image remains valid', () => 
   assert.match(attachmentCaptionError({ type: 'audio/mpeg' }, 'Hola'), /no admite texto junto a un audio/);
   assert.equal(attachmentCaptionError({ type: 'audio/mpeg' }, '  '), '');
   assert.equal(attachmentCaptionError({ type: 'image/png' }, 'Hola'), '');
+});
+
+test('upload quality is chosen per account for still images and captured in the upload payload', () => {
+  const values = new Map([['wa-media-upload-quality', JSON.stringify({personal:'hd', secondary:'standard'})]]);
+  const storage = {getItem: key => values.get(key) || null};
+  const photo = {name:'foto.jpg', type:'image/jpeg'};
+  assert.equal(readUploadQuality(storage, 'personal', photo), 'hd');
+  assert.equal(readUploadQuality(storage, 'secondary', photo), 'standard');
+  assert.equal(readUploadQuality(storage, 'other', photo), 'standard');
+  assert.equal(readUploadQuality(storage, 'personal', {name:'clip.mp4', type:'video/mp4'}), 'source');
+  assert.equal(readUploadQuality(storage, 'personal', {name:'anim.gif', type:'image/gif'}), 'source');
+  assert.equal(readUploadQuality(storage, 'personal', {name:'file.pdf', type:'application/pdf'}), 'source');
+  assert.equal(uploadPayload(photo, 'AQID', '', '', 'hd').quality, 'hd');
+  const mutableStorage = {getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value)};
+  assert.equal(writeUploadQualityPreference(mutableStorage, 'secondary', 'hd'), true);
+  assert.equal(readUploadQualityPreference(mutableStorage, 'secondary'), 'hd');
+  assert.equal(readUploadQualityPreference(mutableStorage, 'personal'), 'hd');
+  assert.equal(writeUploadQualityPreference(mutableStorage, 'secondary', 'source'), false);
 });

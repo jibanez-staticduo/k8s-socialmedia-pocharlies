@@ -702,6 +702,21 @@ async function runDesktop(page, state, report) {
     await page.waitForFunction(() => document.querySelector('#account')?.value === 'alpha' && document.querySelector('#chats')?.textContent.includes('Ana Fixture'));
   });
 
+  await check('photo upload quality is visible and scoped to the selected account', async () => {
+    await openSettings(page);
+    const quality = page.locator('#settings-upload-quality');
+    await quality.waitFor({ state: 'visible' });
+    await quality.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(outputDir, 'upload-quality-desktop.png') });
+    assert.equal(await quality.inputValue(), 'standard');
+    await quality.selectOption('hd');
+    await selectAccount(page, 'beta', 'Bruno Fixture');
+    assert.equal(await quality.inputValue(), 'standard');
+    await selectAccount(page, 'alpha', 'Ana Fixture');
+    assert.equal(await quality.inputValue(), 'hd');
+    if (await page.locator('.rail-settings').evaluate(element => element.open)) await page.locator('#settings-close').click();
+  });
+
   await check('archived chats stay separate from Todos', async () => {
     const text = await page.locator('#chats').textContent();
     assert(!text.includes('Archivado Fixture'), `archived chat leaked into Todos: ${text}`);
@@ -749,6 +764,15 @@ async function runDesktop(page, state, report) {
     await sleep(150);
     assert.equal(state.log.filter(item => item.path === '/api/chat-actions').length, 0, 'hidden chat sent a read request');
     await clearReadOnlyDocument(page);
+  });
+
+  await check('sidebar search opens a historical message from account-scoped results', async () => {
+    await page.locator('#search').fill('mensaje antiguo');
+    const result = page.locator('.sidebar-message-result').filter({ hasText: 'Mensaje antiguo' });
+    await result.waitFor({ state: 'visible' });
+    await result.click();
+    await page.waitForFunction(() => document.querySelector('#messages')?.textContent.includes('Mensaje antiguo fuera de los últimos 200'));
+    await page.locator('#search').fill('');
   });
 
   await check('contact info exposes known presence and same-origin avatar', async () => {
@@ -988,6 +1012,7 @@ async function runDesktop(page, state, report) {
     const uploaded = state.log.filter(item => item.path === '/api/upload').at(-1).body;
     assert.equal(uploaded.caption, 'Foto de prueba');
     assert.equal(uploaded.replyToMessageId, 'alpha-direct-outgoing');
+    assert.equal(uploaded.quality, 'hd');
     await page.waitForFunction(() => document.querySelector('#attachment-preview')?.hidden && !document.querySelector('#feature-reply-quote'));
     assert.equal(await page.locator('#message').inputValue(), '');
     await page.locator('#message').evaluate(input => {

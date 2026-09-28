@@ -9,6 +9,30 @@ const DOCUMENT_EXTENSIONS = {
   'application/x-zip-compressed': '.zip',
   'text/plain': '.txt',
 };
+export const UPLOAD_QUALITY_KEY = 'wa-media-upload-quality';
+
+function savedUploadQualities(storage) {
+  try {
+    const saved = JSON.parse(storage?.getItem(UPLOAD_QUALITY_KEY) || '{}');
+    return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  } catch { return {}; }
+}
+
+export function readUploadQualityPreference(storage, accountId) {
+  return savedUploadQualities(storage)[accountId] === 'hd' ? 'hd' : 'standard';
+}
+
+export function writeUploadQualityPreference(storage, accountId, quality) {
+  if (!accountId || !['standard', 'hd'].includes(quality)) return false;
+  const saved = {...savedUploadQualities(storage), [accountId]: quality};
+  try { storage?.setItem(UPLOAD_QUALITY_KEY, JSON.stringify(saved)); return true; }
+  catch { return false; }
+}
+
+export function readUploadQuality(storage, accountId, file) {
+  if (!/^image\/(jpeg|png|webp)$/.test(file?.type || '')) return 'source';
+  return readUploadQualityPreference(storage, accountId);
+}
 
 function attachmentName(file) {
   if (file.name) return file.name;
@@ -39,13 +63,14 @@ export function attachmentCaptionError(file, caption) {
     : '';
 }
 
-export function uploadPayload(file, data, caption = '', replyToMessageId = '') {
+export function uploadPayload(file, data, caption = '', replyToMessageId = '', quality = 'source') {
   return {
     name: attachmentName(file),
     mimeType: file.type || 'application/octet-stream',
     data,
     voice: false,
     caption: caption.trim(),
+    ...(quality !== 'source' ? { quality } : {}),
     ...(replyToMessageId ? { replyToMessageId } : {}),
   };
 }

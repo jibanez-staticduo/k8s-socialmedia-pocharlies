@@ -75,7 +75,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
 | Pinned messages and event RSVP | Partial | Deployed 5adcb7f; this candidate adds uncertainty recovery and indexed history reads. Real-provider write acceptance remains unverified |
-| Search and media/link/document gallery per chat | Partial | Global media browser deployed 8ad9dd9; advanced message-search filters and media multiselect/duration ordering remain |
+| Search and media/link/document gallery per chat | In validation | Sidebar search now queries account-scoped message history with cursor paging and opens the exact result, including unloaded chats. Global media browser deployed 8ad9dd9; advanced filters and media multiselect/duration ordering remain |
 | Composer optimistic sends, paste and voice recording | Verified | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
@@ -86,7 +86,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
 | Settings drawer / wallpaper / spellcheck / Enter preference | Verified | Desktop/mobile, light/dark, persistence |
-| Emoji substitution / upload quality / automatic downloads | Partial | Emoji replacement switch and common typed shortcuts now work locally, with cursor and draft updates verified in browser. Standard/HD upload and separate Photos/Audio/Videos/Documents download toggles remain |
+| Emoji substitution / upload quality / automatic downloads | In validation | Emoji replacement is deployed. Image Standard/HD preprocessing and per-account quality selection pass synthetic tests; Baileys has no native HD flag, and video remains source quality. Four account-scoped download switches are under adversarial cache/network review before release |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
 | Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
@@ -445,7 +445,7 @@ staged `image/gif` to MP4 with `gifPlayback` even without `featureKind`, while
 preserving its caption, quote, digest and send token. A contract test covers
 that path; no real GIF was sent during QA.
 
-Current integration candidate (September 28): the connector passes 327 tests,
+Earlier integration candidate (September 28): the connector passes 327 tests,
 TypeScript and lint with no errors. Disposable PostgreSQL 17 fixtures verify
 the indexed pin/RSVP cursors with 200,000 ordinary messages and 1,201 cases of
 each type, including account/chat isolation. The app passes 351 tests.
@@ -463,3 +463,30 @@ typed emoticons at the caret without changing pasted text. Synthetic browser
 QA verifies enabled and disabled behavior, draft updates and persistence;
 353 app tests pass. The complete WhatsApp shortcut catalog has not been
 established.
+
+## Search, image quality, and automatic downloads (September 28)
+
+The sidebar searches account-scoped messages with cursor paging, opens the exact
+result even when its chat was not loaded, and cancels stale requests on query,
+archive-view, or account changes. Image uploads have per-account Standard/HD
+choices; the connector changes the actual image bytes with bounded Sharp
+processing, preserves transparency, and does not upscale. `source` remains the
+default for MCP callers. Baileys 7.0.0-rc13 has no native HD marker, so the
+choice controls resolution/encoding rather than the official badge. Videos
+remain at source quality. Raw GIF bytes are rejected by the connector; staged
+GIF uploads are converted to MP4 before sending.
+
+Four per-account automatic-download preferences cover photos, audio, video,
+and documents. Disabled media waits for a user action without requesting bytes;
+stickers still load automatically. Reads have byte/entry budgets and shared
+URL caching. Disabling a category or leaving the final message mount cancels a
+running request; keyboard activation preserves focus on the replacement media
+control. The cache entry cap also holds when different downloads finish
+concurrently.
+
+Validation: 392 app tests, 331 connector tests, TypeScript, lint, contract and
+Compose checks; 49 selected-feature and 28 download Playwright checks pass.
+An independent reviewer reproduced the three download race/focus fixes. QA is
+synthetic: no real image, GIF, or message was sent during this validation, and
+provider acceptance of HD-transformed images remains unverified. Other rows
+above remain open; this does not establish full WhatsApp parity.

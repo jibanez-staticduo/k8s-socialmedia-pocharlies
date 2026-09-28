@@ -2051,6 +2051,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         if (path === '/api/send') return json(200, await connector(a, '/messages/send', { conversationId: providerChat, content: required(body.text, 'text', 20000), sendToken: sendToken(body) }));
         if (path === '/api/upload') {
           if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+          const quality = body.quality === undefined ? 'source' : body.quality;
+          if (!['source', 'standard', 'hd'].includes(quality)) throw fail(400, 'Invalid media quality');
           const bytes = uploadBytes(body);
           const sourceDigest = createHash('sha256').update(bytes).digest('hex');
           if (body.caption !== undefined && (typeof body.caption !== 'string' || body.caption.length > 20000)) throw fail(400, 'Invalid caption');
@@ -2062,15 +2064,15 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           const featureKind = String(body.featureKind || '').toLowerCase();
           if (featureKind === 'sticker') {
             if (body.mimeType !== 'image/webp' || bytes.length < 12 || bytes.subarray(0, 4).toString() !== 'RIFF' || bytes.subarray(8, 12).toString() !== 'WEBP') throw fail(400, 'Sticker requires a valid WebP image');
-            return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:image/webp;base64,${bytes.toString('base64')}`, fileName: body.name, kind: 'sticker', asSticker: true, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
+            return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:image/webp;base64,${bytes.toString('base64')}`, fileName: body.name, quality, kind: 'sticker', asSticker: true, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
           }
           if (featureKind === 'gif' || body.mimeType === 'image/gif') {
             if (body.mimeType !== 'image/gif') throw fail(400, 'GIF requires an image/gif upload');
             const converted = await gifBytes(bytes);
-            return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:video/mp4;base64,${converted.toString('base64')}`, fileName: body.name.replace(/\.gif$/i, '.mp4'), kind: 'gif', gifPlayback: true, caption, replyTo, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
+            return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:video/mp4;base64,${converted.toString('base64')}`, fileName: body.name.replace(/\.gif$/i, '.mp4'), quality, kind: 'gif', gifPlayback: true, caption, replyTo, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
           }
           if (body.voice) return json(200, await connector(a, '/messages/audio', { conversationId: providerChat, audioBase64: (await voiceBytes(bytes)).toString('base64'), mimeType: 'audio/ogg; codecs=opus', sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
-          return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:${body.mimeType};base64,${bytes.toString('base64')}`, fileName: body.name, caption, replyTo, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
+          return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:${body.mimeType};base64,${bytes.toString('base64')}`, fileName: body.name, quality, caption, replyTo, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
         }
         if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'Hermes endpoint is not configured');
         const message = required(body.message, 'message', 20000);

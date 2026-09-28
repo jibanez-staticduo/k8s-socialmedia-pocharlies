@@ -182,6 +182,12 @@ test('reserves one send per account and token across retries and rejects changed
       const mediaId = (await firstMedia.json()).messageId;
       assert.equal((await post('/messages/media/send', media)).status, 200);
       assert.equal((await post('/messages/media/send', { ...media, caption: 'changed' })).status, 409);
+      assert.equal((await post('/messages/media/send', { ...media, quality: 'source' })).status, 200);
+      assert.equal((await post('/messages/media/send', { ...media, quality: 'hd' })).status, 409);
+      assert.equal((await post('/messages/media/send', { ...media, quality: 'standard' })).status, 409);
+      for (const quality of ['invalid', null, 1]) {
+        assert.equal((await post('/messages/media/send', { ...media, sendToken: 'invalid-quality', quality })).status, 400);
+      }
       assert.equal(mediaCalls, 1);
       assert.equal((await post('/messages/media/send', { ...media, sendToken: undefined })).status, 200);
       assert.equal(mediaCalls, 2);
@@ -197,6 +203,12 @@ test('reserves one send per account and token across retries and rejects changed
       assert.equal((await post('/messages/media/send', { ...gif, fileUrl: 'data:image/gif;base64,Zmlyc3Q=' })).status, 409);
       assert.equal((await post('/messages/media/send', { ...gif, sourceMimeType: 'video/quicktime' })).status, 409);
       assert.equal(mediaCalls, 5);
+      const standard = { ...media, sendToken: 'quality-retry', quality: 'standard' };
+      assert.equal((await post('/messages/media/send', standard)).status, 200);
+      assert.equal((await post('/messages/media/send', standard)).status, 200);
+      assert.equal((await post('/messages/media/send', { ...standard, quality: 'hd' })).status, 409);
+      assert.equal((await post('/messages/media/send', { ...standard, quality: 'source' })).status, 409);
+      assert.equal(mediaCalls, 6);
 
       const voice = { sendToken: 'voice-operation', conversationId: '111@s.whatsapp.net',
         audioBase64: 'YXVkaW8=', mimeType: 'audio/ogg; codecs=opus' };

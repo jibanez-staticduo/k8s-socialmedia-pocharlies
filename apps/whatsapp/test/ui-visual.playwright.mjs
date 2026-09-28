@@ -435,7 +435,8 @@ async function assertMessageSafetyAndMedia(page) {
   assert(await page.locator('.attachment-error').count() >= 1, 'blocked attachment did not render an error state');
   const attachmentLinks = await page.locator('a.attachment-download').evaluateAll(elements => elements.map(element => ({ href: element.href, download: element.download, target: element.target, rel: element.rel })));
   assert(attachmentLinks.length >= 4, `download links missing: ${JSON.stringify(attachmentLinks)}`);
-  assert(attachmentLinks.every(link => ['http:', 'https:'].includes(new URL(link.href).protocol)), `unsafe attachment link rendered: ${JSON.stringify(attachmentLinks)}`);
+  const fixtureOrigin = new URL(page.url()).origin;
+  assert(attachmentLinks.every(link => ['http:', 'https:'].includes(new URL(link.href).protocol) || link.href.startsWith(`blob:${fixtureOrigin}/`)), `unsafe attachment link rendered: ${JSON.stringify(attachmentLinks)}`);
 
   await page.locator('.media-image-button').click();
   await page.locator('.media-viewer').waitFor();
@@ -490,8 +491,13 @@ async function assertComposerAndAi(page, requestLog) {
   await page.locator('#ai-panel').waitFor({ state: 'hidden' });
 }
 
+function enableAllAutoDownloads() {
+  window.localStorage.setItem('wa-media-autodownload', JSON.stringify({ '*': { image: true, audio: true, video: true, document: true } }));
+}
+
 async function runDesktop(browser, baseUrl) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 675 }, reducedMotion: 'reduce' });
+  await context.addInitScript(enableAllAutoDownloads);
   await context.addInitScript(() => {
     window.__qaRecorder = { tracksStopped: 0 };
     const fixtureTrack = { stop: () => { window.__qaRecorder.tracksStopped += 1; } };
@@ -594,6 +600,7 @@ async function runDesktop(browser, baseUrl) {
 
 async function runMobile(browser, baseUrl) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, reducedMotion: 'reduce' });
+  await context.addInitScript(enableAllAutoDownloads);
   const page = await context.newPage();
   const requestLog = [];
   const dialogs = [];

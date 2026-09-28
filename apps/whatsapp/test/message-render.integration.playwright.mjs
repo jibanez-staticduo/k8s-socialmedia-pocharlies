@@ -22,7 +22,7 @@ const server = createServer(async (request, response) => {
     response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles.css"></head><body></body></html>');
     return;
   }
-  if (path === '/message-render.mjs' || path === '/styles.css') {
+  if (path === '/message-render.mjs' || path === '/settings-ui.mjs' || path === '/styles.css') {
     response.writeHead(200, { 'content-type': path.endsWith('.css') ? 'text/css' : 'text/javascript; charset=utf-8' });
     response.end(await readFile(join(publicDir, path.slice(1))));
     return;
@@ -65,7 +65,16 @@ try {
     host.append(rendered.fragment);
     const attachment = renderer.createAttachmentElement({ url: '/fixture.png', mimeType: 'image/png', name: 'fixture.png' });
     document.body.append(attachment);
-    const opener = attachment.querySelector('.media-image-button');
+    const opener = await new Promise((resolve, reject) => {
+      const current = attachment.querySelector('.media-image-button');
+      if (current) return resolve(current);
+      const observer = new MutationObserver(() => {
+        const button = attachment.querySelector('.media-image-button');
+        if (button) { clearTimeout(timeout); observer.disconnect(); resolve(button); }
+      });
+      const timeout = setTimeout(() => { observer.disconnect(); reject(new Error('Image did not finish loading')); }, 5000);
+      observer.observe(attachment, { childList: true, subtree: true });
+    });
     opener.focus();
     opener.click();
     return {
@@ -101,12 +110,13 @@ try {
     const chat = document.createElement('section'); chat.id = 'messages';
     for (const name of ['first.png', 'second.png', 'third.png']) chat.append(renderer.createAttachmentElement({url:`/${name}`,mimeType:'image/png',name}));
     document.body.append(chat);
-    chat.querySelector('.media-image-button').click();
   });
+  await page.waitForFunction(() => document.querySelectorAll('#messages .media-image-button').length === 3);
+  await page.evaluate(() => document.querySelector('#messages .media-image-button').click());
   assert(await page.getByRole('button', {name:'Imagen anterior',exact:true}).isDisabled());
   await page.keyboard.press('ArrowRight');
   assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'second.png');
-  assert.equal(await page.locator('.media-viewer-actions a').getAttribute('href'), `${new URL(page.url()).origin}/second.png`);
+  assert.equal(await page.locator('.media-viewer-actions a').getAttribute('href'), await page.locator('#messages .media-image-button').nth(1).getAttribute('data-viewer-url'));
   assert.equal(await page.locator('.media-viewer-counter').textContent(), '2 / 3');
   for (const theme of ['light','dark']) for (const width of [1200,390]) {
     await page.setViewportSize({width,height:844});

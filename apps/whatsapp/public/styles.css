@@ -374,6 +374,73 @@ h1, h2, p { margin: 0; }
   scrollbar-width: thin;
 }
 
+.sidebar-search-heading {
+  flex: 0 0 auto;
+  margin: 8px 16px 4px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.chat-sidebar:has(.sidebar-message-search:not([hidden])) .chat-list {
+  flex: 0 1 auto;
+  max-height: min(34vh, 300px);
+}
+
+.sidebar-message-search {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-message-search[hidden], .sidebar-search-heading[hidden] { display: none; }
+
+.sidebar-search-status {
+  margin: 6px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sidebar-search-status:empty { display: none; }
+
+.sidebar-search-results { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+
+.sidebar-message-result {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 4px;
+  padding: 11px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-message-result:hover, .sidebar-message-result:focus-visible { background: var(--surface-raised); }
+.sidebar-message-result strong, .sidebar-message-result span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-message-result span { max-width: 100%; font-size: 13px; }
+.sidebar-message-result small { color: var(--muted); }
+
+.sidebar-search-more {
+  display: block;
+  width: calc(100% - 32px);
+  min-height: 40px;
+  margin: 8px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.sidebar-search-more[aria-disabled="true"] { cursor: wait; opacity: .7; }
+
 .chat-item {
   display: flex;
   align-items: center;
@@ -804,6 +871,18 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
 }
 
 .attachment-link:hover { text-decoration: underline; }
+
+.attachment-load {
+  background: transparent;
+  border: 0;
+  color: var(--accent-strong);
+  cursor: pointer;
+  display: block;
+  padding: 2px 0;
+  text-align: left;
+}
+
+.attachment-load:hover { text-decoration: underline; }
 
 .message img,
 .message video {
@@ -1324,6 +1403,8 @@ body[data-theme="light"] .ai-panel-avatar { background: #d8e0e3; color: #34464f;
 
 .chat-sidebar[data-archive-view="true"] .chat-sidebar-header,
 .chat-sidebar[data-archive-view="true"] > .search,
+.chat-sidebar[data-archive-view="true"] > .sidebar-search-heading,
+.chat-sidebar[data-archive-view="true"] > .sidebar-message-search,
 .chat-sidebar[data-archive-view="true"] .feature-view-nav,
 .chat-sidebar[data-archive-view="true"] .feature-archive-entry { display: none; }
 
