@@ -55,11 +55,11 @@ const catalog = {
   alpha: {
     media: [
       item('img-1', 'image', { name: 'foto.jpg', url: 'SELF', mimeType: 'image/jpeg' }),
-      item('vid-1', 'video', { name: 'clip.mp4', url: 'SELF', mimeType: 'video/mp4' }),
-      item('aud-1', 'audio', { name: 'nota.ogg', url: 'SELF', mimeType: 'audio/ogg' }),
+      item('vid-1', 'video', { name: 'clip.mp4', url: 'SELF', mimeType: 'video/mp4', durationSeconds: 95 }),
+      item('aud-1', 'audio', { name: 'nota.ogg', url: 'SELF', mimeType: 'audio/ogg', durationSeconds: 42 }),
       item('img-2', 'image', { name: 'pendiente.jpg', url: null }),
       item('img-3', 'image', { name: 'proveedor.jpg', url: 'https://mmgc1.c.us/x.jpg?sig=secret' }),
-      item('aud-2', 'audio', { name: 'solo-tuyo.ogg', url: 'SELF', fromMe: true }),
+      item('aud-2', 'audio', { name: 'solo-tuyo.ogg', url: 'SELF', fromMe: true, durationSeconds: 130 }),
     ],
     documents: Array.from({ length: 5 }, (_, index) => item(`doc-${index + 1}`, 'document', { name: `guia-${index + 1}.pdf`, url: 'SELF', mimeType: 'application/pdf' })),
     links: [
@@ -154,7 +154,8 @@ await page.route('**/api/**', async route => {
     .filter(Boolean).join(' ').toLowerCase();
   const matching = all.filter(entry => (query.sender === 'me' ? entry.fromMe === true : query.sender === 'others' ? entry.fromMe !== true : true)
     && (!query.q || haystack(entry).includes(query.q.toLowerCase())));
-  const ordered = query.order === 'oldest' ? [...matching].reverse() : matching;
+  const ordered = query.order === 'oldest' ? [...matching].reverse()
+    : query.order === 'longest' ? [...matching].sort((a, b) => (b.durationSeconds || -1) - (a.durationSeconds || -1)) : matching;
   const offset = Number(query.cursor || 0);
   const size = PAGE_SIZE[key] ?? 50;
   const slice = ordered.slice(offset, offset + size);
@@ -294,10 +295,18 @@ try {
   await openPanel();
   assert.equal(await page.evaluate(() => window.__opens.length), 2, 'cada apertura avisar al host');
   assert.deepEqual(await ids(), ['img-1', 'vid-1', 'aud-1', 'img-2', 'img-3', 'aud-2'], 'al reabrir se recarga la pestaña activa');
+  await page.getByLabel('Ordenar').selectOption('longest');
+  await settle();
+  assert.equal(lastRequest().order, 'longest');
+  assert.deepEqual(await ids(), ['aud-2', 'vid-1', 'aud-1', 'img-1', 'img-2', 'img-3']);
+  assert.match(await list.locator('.media-library-card[data-id="aud-2"] .media-library-meta').textContent(), /2:10/);
+  await page.getByLabel('Ordenar').selectOption('newest');
+  await settle();
 
   await page.getByRole('tab', { name: 'Documentos' }).click();
   await settle();
   assert.equal(lastRequest().kind, 'documents');
+  assert.equal(await page.locator('option[value="longest"]').isHidden(), true, 'duration ordering is only offered for media');
   assert.deepEqual(await ids(), ['doc-1', 'doc-2']);
   assert.equal(await list.locator('img').count(), 0, 'un documento no se precarga como imagen');
   assert.match(await list.locator('.media-library-open').first().getAttribute('href'), /^\/api\/media\/doc-1\?account=alpha/);

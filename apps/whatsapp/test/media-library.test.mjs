@@ -64,6 +64,29 @@ test('oldest and other-sender filters are parameter-safe and documents are separ
   assert.equal(result.items[0].fromMe, false);
 });
 
+test('longest orders by stored duration with unknown media last and a stable cursor', async () => {
+  const first = await readMediaLibrary({account: 'a', params: params({kind: 'media', order: 'longest', limit: '1'}), query: async (sql, args) => {
+    assert.match(sql, /ORDER BY COALESCE\(NULLIF\(a\.duration_seconds, 0\), NULLIF\(a\.duration, 0\), -1\) DESC, m\.wa_timestamp DESC/);
+    assert.deepEqual(args, ['a', 2]);
+    return [row(1, {message_type: 'VIDEO', duration_seconds: 95}), row(2, {message_type: 'AUDIO', duration_seconds: 30})];
+  }});
+  assert.equal(first.items[0].durationSeconds, 95);
+  let call;
+  await readMediaLibrary({account: 'a', params: params({kind: 'media', order: 'longest', limit: '1', cursor: first.nextCursor}), query: async (sql, args) => {
+    call = {sql, args}; return [];
+  }});
+  assert.match(call.sql, /\(COALESCE\(NULLIF\(a\.duration_seconds, 0\), NULLIF\(a\.duration, 0\), -1\), m\.wa_timestamp, m\.id::text, COALESCE\(a\.id::text, ''\)\) </);
+  assert.deepEqual(call.args.slice(1, 5), [95, '2026-09-27 10:00:00.123456+00', id(1), id(101)]);
+  assert.throws(() => mediaLibraryOptions('a', params({order: 'newest', cursor: first.nextCursor})), /cursor/);
+  const bad = JSON.parse(Buffer.from(first.nextCursor, 'base64url').toString());
+  delete bad.duration;
+  assert.throws(() => mediaLibraryOptions('a', params({order: 'longest', cursor: Buffer.from(JSON.stringify(bad)).toString('base64url')})), /cursor/);
+  bad.duration = 2147483648;
+  assert.throws(() => mediaLibraryOptions('a', params({order: 'longest', cursor: Buffer.from(JSON.stringify(bad)).toString('base64url')})), /cursor/);
+  const legacy = await readMediaLibrary({account: 'a', params: params({order: 'longest'}), query: async () => [row(3, {duration_seconds: 0, duration: 12})]});
+  assert.equal(legacy.items[0].durationSeconds, 12);
+});
+
 test('link cards preserve all distinct safe links and never expose provider media URLs', async () => {
   let sql;
   const result = await readMediaLibrary({ account: 'a', params: params({ kind: 'links' }), query: async statement => { sql = statement; return [row(1, { attachment_id: '', content: 'https://example.com/a https://example.org/b https://example.com/a', file_url: 'https://provider.invalid/private-token' })]; } });

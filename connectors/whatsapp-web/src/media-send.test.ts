@@ -1,6 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BaileysClient } from './baileys-client.js';
+import pg from 'pg';
+
+test('an existing video attachment gains provider duration without redownloading', async () => {
+  const client = Object.create(BaileysClient.prototype) as any;
+  client.mediaPersistenceLocks = new Map();
+  const queries: Array<{sql: string; params: unknown[]}> = [];
+  const original = pg.Pool.prototype.query;
+  (pg.Pool.prototype as any).query = async (sql: string, params: unknown[] = []) => {
+    queries.push({sql, params});
+    return {rows: [{file_url: 'stored-key', file_size: 42, mime_type: 'video/mp4', file_name: 'clip.mp4'}]};
+  };
+  try {
+    const result = await client.downloadAndStoreMedia({key: {id: 'message'}, message: {videoMessage: {seconds: 97}}}, 'message', 'VIDEO');
+    assert.equal(result.storageKey, 'stored-key');
+    assert.match(queries[1].sql, /SET duration_seconds=COALESCE\(duration_seconds, \$2\)/);
+    assert.deepEqual(queries[1].params, ['message', 97]);
+    queries.length = 0;
+    await client.downloadAndStoreMedia({key: {id: 'message'}, message: {videoMessage: {seconds: 0}}}, 'message', 'VIDEO');
+    assert.equal(queries.length, 1, 'unknown duration must not overwrite stored metadata');
+  } finally {
+    (pg.Pool.prototype as any).query = original;
+  }
+});
 
 test('channel media persists original payload outside chats and keeps receipt on store failure', async () => {
   const client = Object.create(BaileysClient.prototype) as any;

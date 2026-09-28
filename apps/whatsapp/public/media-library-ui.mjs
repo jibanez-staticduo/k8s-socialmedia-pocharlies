@@ -14,7 +14,7 @@ export const MEDIA_LIBRARY_TABS = Object.freeze([
 const ITEM_KINDS = new Set(['image', 'video', 'audio', 'document', 'link']);
 const TAB_LABELS = new Map(MEDIA_LIBRARY_TABS.map(tab => [tab.kind, tab.label]));
 const SENDERS = Object.freeze([['all', 'Todos'], ['me', 'Tú'], ['others', 'Otras personas']]);
-const ORDERS = Object.freeze([['newest', 'Más recientes'], ['oldest', 'Más antiguos']]);
+const ORDERS = Object.freeze([['newest', 'Más recientes'], ['oldest', 'Más antiguos'], ['longest', 'Mayor duración']]);
 const EMPTY_TEXT = Object.freeze({
   media: 'Todavía no hay archivos multimedia.',
   documents: 'Todavía no hay documentos.',
@@ -83,6 +83,7 @@ export function normalizeMediaLibraryItem(raw, baseUrl = 'http://localhost/', ac
     fromMe: raw.fromMe === true,
     name: text(raw.name).trim(),
     mimeType: text(raw.mimeType).trim(),
+    durationSeconds: Number.isSafeInteger(raw.durationSeconds) && raw.durationSeconds > 0 ? raw.durationSeconds : null,
     text: text(raw.text),
     url: raw.kind === 'link' ? links[0]?.url || '' : mediaAssetUrl(raw.url, baseUrl, account),
     links,
@@ -304,6 +305,7 @@ export function installMediaLibraryUI({
   const signature = () => `${getAccount()}|${queryKind()}|${tab}|${senderFilter.input.value}|${orderFilter.input.value}|${searchInput.value.trim()}`;
   const requested = () => ({ kind: queryKind(), sender: senderFilter.input.value, order: orderFilter.input.value, q: searchInput.value.trim() });
   const formatDate = value => value ? new Date(value).toLocaleString('es-ES', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  const formatDuration = value => value ? `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}` : '';
   const titleFor = item => item.name || item.text.trim() || (item.kind === 'link' ? item.links[0]?.title || item.links[0]?.url : '') || KIND_LABEL[item.kind];
 
   function setStatus(message, kind = '') {
@@ -313,6 +315,9 @@ export function installMediaLibraryUI({
   }
 
   function render() {
+    const durationOption = orderFilter.input.querySelector('option[value="longest"]');
+    durationOption.hidden = queryKind() !== 'media' && queryKind() !== 'all';
+    durationOption.disabled = durationOption.hidden;
     for (const tabButton of tabButtons) {
       const active = tabButton.dataset.kind === tab;
       tabButton.classList.toggle('is-active', active);
@@ -416,7 +421,7 @@ export function installMediaLibraryUI({
     }
     const copy = make('div', 'media-library-copy');
     copy.append(make('strong', '', titleFor(item)));
-    const meta = [formatDate(item.timestamp), item.fromMe ? 'Tú' : ''].filter(Boolean).join(' · ');
+    const meta = [formatDate(item.timestamp), formatDuration(item.durationSeconds), item.fromMe ? 'Tú' : ''].filter(Boolean).join(' · ');
     copy.append(make('small', 'media-library-meta', meta));
     const actions = make('div', 'media-library-actions');
     const chatButton = control('media-library-chat', item.chatName);
@@ -513,6 +518,7 @@ export function installMediaLibraryUI({
   function switchTab(kind) {
     if (kind === tab || !TAB_LABELS.has(kind)) return;
     tab = kind;
+    if (kind !== 'media' && orderFilter.input.value === 'longest') orderFilter.input.value = 'newest';
     actionSeq += 1; acting = false;
     selected.clear();
     closePreview(); actionShade.hidden = true;

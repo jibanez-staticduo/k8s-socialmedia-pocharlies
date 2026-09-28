@@ -2051,7 +2051,8 @@ export class BaileysClient extends EventEmitter {
     fileType: string,
     mimeType?: string,
     fileName?: string,
-    caption?: string
+    caption?: string,
+    durationSeconds?: number
   ): Promise<StoredMediaInfo> {
     const db = await getPool().connect();
     try {
@@ -2077,9 +2078,9 @@ export class BaileysClient extends EventEmitter {
       }
       const stored = await uploadMedia(messageId, bytes, mimeType, fileName);
       await db.query(
-        `INSERT INTO attachments (message_id, file_type, mime_type, file_name, file_size, file_url, caption)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [messageId, fileType, mimeType, fileName, stored.fileSize, stored.storageKey, caption]
+        `INSERT INTO attachments (message_id, file_type, mime_type, file_name, file_size, file_url, caption, duration_seconds)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [messageId, fileType, mimeType, fileName, stored.fileSize, stored.storageKey, caption, durationSeconds || null]
       );
       await db.query('COMMIT');
       return { ...stored, mimeType, fileName };
@@ -2103,13 +2104,21 @@ export class BaileysClient extends EventEmitter {
           WHERE message_id=$1 ORDER BY id DESC LIMIT 1`,
         [messageId]
       );
-      if (existing.rows[0]?.file_url)
+      if (existing.rows[0]?.file_url) {
+        const rawDuration = Number(msg.message?.videoMessage?.seconds ?? msg.message?.audioMessage?.seconds);
+        if (Number.isSafeInteger(rawDuration) && rawDuration > 0 && rawDuration <= 2147483647) {
+          await getPool().query(
+            'UPDATE attachments SET duration_seconds=COALESCE(duration_seconds, $2) WHERE message_id=$1',
+            [messageId, rawDuration]
+          );
+        }
         return {
           storageKey: existing.rows[0].file_url,
           fileSize: Number(existing.rows[0].file_size || 0),
           mimeType: existing.rows[0].mime_type,
           fileName: existing.rows[0].file_name,
         };
+      }
       return this.downloadAndStoreMediaUnlocked(msg, messageId, messageType, caption);
     });
   }
@@ -2145,6 +2154,9 @@ export class BaileysClient extends EventEmitter {
     }
 
     const { mimeType, fileName } = this.mediaMetaFromMessage(msg);
+    const rawDuration = Number(msg.message?.videoMessage?.seconds ?? msg.message?.audioMessage?.seconds);
+    const durationSeconds = Number.isSafeInteger(rawDuration) && rawDuration > 0 && rawDuration <= 2147483647
+      ? rawDuration : undefined;
 
     const stored = await this.storeMediaBytesOnce(
       messageId,
@@ -2152,7 +2164,8 @@ export class BaileysClient extends EventEmitter {
       messageType,
       mimeType,
       fileName,
-      caption
+      caption,
+      durationSeconds
     );
     this.logger.info(
       `Stored media ${stored.storageKey} (${stored.fileSize} bytes) for msg ${messageId}`

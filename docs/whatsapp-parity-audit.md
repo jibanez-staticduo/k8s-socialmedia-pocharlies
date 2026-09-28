@@ -79,7 +79,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
 | Pinned messages and event RSVP | Partial | The pin bar works for captured events, but live storage has no pin events and Baileys exposes no current-pin query. Historical backfill is not guaranteed; real-provider write acceptance remains unverified |
-| Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names, including results across media, documents and links. Global-library multiselect supports download, delete, star and forward with synthetic QA; duration ordering remains |
+| Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names, including results across media, documents and links. Global-library multiselect supports download, delete, star and forward with synthetic QA; longest-first sorting uses stored audio/video duration where available. Older attachments without saved duration retain timestamp order after known-duration clips |
 | Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
@@ -104,6 +104,15 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
 | Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
+
+The global library's longest-first option orders by saved audio/video seconds,
+then timestamp and attachment ID for stable pagination. The connector records
+provider duration for newly stored media and fills it when an existing media
+message is seen again. The deployed historical corpus has 37 audio and 203
+video attachments without a saved duration; those remain after clips with a
+known duration. No duration is inferred from a file name or an unavailable
+binary. Node tests, mobile/desktop browser QA and read-only PostgreSQL `EXPLAIN`
+cover the query shape; provider ingestion of a new clip remains live-unverified.
 
 ## Verified provider boundaries
 
