@@ -290,3 +290,15 @@ body[data-theme="light"] .photo-editor-header .photo-editor-apply { color: #fff;
   text-align: center;
 }
 .photo-editor-notice[hidden] { display: none; }
+
+.feature-sticker-preview {
+  display: grid;
+  place-items: center;
+  width: min(100%, 230px);
+  aspect-ratio: 1;
+  margin: 12px auto;
+  border-radius: 12px;
+  background: repeating-conic-gradient(var(--surface-raised) 0% 25%, var(--surface) 0% 50%) 50% / 24px 24px;
+}
+.feature-sticker-preview[hidden] { display: none; }
+.feature-sticker-preview img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }

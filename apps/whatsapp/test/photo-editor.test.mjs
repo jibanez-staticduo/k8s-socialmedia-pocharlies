@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_EDIT_DIM, EDIT_MEMORY_BUDGET, MIN_SNAPSHOTS, historyLimitFor, editCapNotice,
-  editableImage, outputFileName, rotatedSize, clampCrop, isFullCrop, History,
+  editableImage, outputFileName, stickerFileName, rotatedSize, clampCrop, isFullCrop, History,
 } from '../public/photo-editor.mjs';
 import {attachmentError, MAX_ATTACHMENT_BYTES} from '../public/composer-attachment.mjs';
 
@@ -25,6 +25,11 @@ test('outputFileName strips the original extension and marks the edit', () => {
   assert.equal(outputFileName('sin-extension'), 'sin-extension-editada.jpg');
   assert.equal(outputFileName(''), 'imagen-editada.jpg');
   assert.equal(outputFileName('folder/x.webp'), 'folder/x-editada.jpg');
+});
+
+test('stickerFileName marks a WebP derived from the source photo', () => {
+  assert.equal(stickerFileName('foto.png'), 'foto-sticker.webp');
+  assert.equal(stickerFileName('sin-extension'), 'sin-extension-sticker.webp');
 });
 
 test('rotatedSize swaps dimensions only on odd quarter turns', () => {

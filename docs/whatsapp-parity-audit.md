@@ -82,7 +82,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names, including results across media, documents and links. Global-library multiselect supports download, delete, star and forward with synthetic QA; longest-first sorting uses stored audio/video duration where available. Older attachments without saved duration retain timestamp order after known-duration clips |
 | Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
 | Camera, media editing and view-once | In validation | Camera capture/cleanup tested; view-once image/video sends pass synthetic app, browser and connector QA. Draft JPEG/PNG/WebP photos can be cropped, rotated, drawn on and annotated with text before sending, with undo/redo and per-file captions/view-once preserved in synthetic browser QA. Exact visual parity, real-provider delivery and iPhone editing remain unverified |
-| Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
+| Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents passes synthetic QA. New sticker creation accepts JPEG/PNG/WebP, opens the image editor, exports a transparent 512px WebP under 100 KiB, and requires preview plus an explicit send; synthetic mobile/browser QA passes. GIF discovery, sticker packs, exact visual parity and real-provider sticker acceptance remain |
 | Location and live location | Partial | Received locations render; the authenticated WhatsApp Web attachment menu inspected on 28 Sep 2026 has no location-send action |
 | Link and map previews | Existing | Reference QA and failure states |
 | Image viewer navigation | In validation | Previous/next buttons and keyboard arrows page through the selected chat's stored images, including older images outside the loaded timeline. The media cursor orders equal timestamps and multiple attachments without skipping rows; synthetic browser/API coverage passes. Historical media absent from storage is still unavailable |
@@ -217,8 +217,9 @@ Second composer batch (`dd52a98`), deployed and validated:
 - Authenticated production QA verifies the new menu entries, outside-click
   dismissal and staging/removing two files with zero sends and no page errors.
   Both connectors and the app are healthy; fork CI passes on this exact commit.
-- The new-sticker entry opens the existing WebP uploader; a full sticker editor
-  and per-image crop/annotation are still pending.
+- At this stage the new-sticker entry opened a WebP uploader. The later photo
+  editor and sticker creation flow supersede this limitation; see the current
+  parity table.
 
 Attachment menu visual correction (`2c4cbf4`), deployed and validated:
 

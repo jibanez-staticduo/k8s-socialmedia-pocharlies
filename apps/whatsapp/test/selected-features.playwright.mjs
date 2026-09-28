@@ -1265,7 +1265,7 @@ async function runDesktop(page, state, report) {
     assert((await page.locator('#message').inputValue()).length > 0, 'emoji was not inserted');
     await clickDialogButton(picker, 'GIF local');
     assert.equal(await picker.locator('input[aria-label="Subir GIF"]').count(), 1);
-    await clickDialogButton(picker, 'Sticker local');
+    await clickDialogButton(picker, 'Crear sticker');
     assert.equal(await picker.locator('input[aria-label="Subir sticker"]').count(), 1);
     await closeDialog(page);
   });

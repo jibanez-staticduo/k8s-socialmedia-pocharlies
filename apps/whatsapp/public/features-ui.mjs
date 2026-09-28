@@ -7,6 +7,7 @@ import { createPollComposer } from './poll-composer.mjs';
 import { createEventComposer } from './event-composer.mjs';
 import { localDayRange } from './message-date.mjs';
 import { createEmojiPicker } from './emoji-picker.mjs';
+import { attachmentError } from './composer-attachment.mjs';
 
 /*
  * Feature UI for the selected WhatsApp Web inventory.  The module owns the
@@ -425,6 +426,7 @@ export function installFeatureUI({
   setChat = () => {},
   showError = () => {},
   openCamera = () => {},
+  openStickerEditor = () => {},
   stageFiles = () => false,
   isMessagePinned = () => false,
   onPinsChange = async () => {},
@@ -449,7 +451,6 @@ export function installFeatureUI({
     chatListBaseline: new Map(),
     notificationPermission: windowRef?.Notification?.permission || 'default',
     modal: null,
-    composeFile: null,
     presenceTimer: null,
     presenceExpiryTimer: null,
     presenceStream: null,
@@ -547,6 +548,7 @@ export function installFeatureUI({
       }
     }
     const onKey = event => {
+      if (documentRef.getElementById('photo-editor-overlay')?.hidden === false) return;
       if (event.key === 'Escape') { event.preventDefault(); closeModal(); return; }
       if (variant) return;
       if (event.key !== 'Tab') return;
@@ -1644,9 +1646,12 @@ export function installFeatureUI({
     const content = node('div', 'feature-picker-content');
     const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
     const isCurrent = () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation;
+    let disposeUpload = () => {};
+    runtime.modal.onClose = () => disposeUpload();
     const renderEmoji = () => { content.replaceChildren(createEmojiPicker({documentRef, account: context.account, isCurrent, onSelect: insertEmoji})); };
     const renderUpload = (kind, accept) => {
-      content.replaceChildren(node('p', 'feature-muted', kind === 'GIF' ? 'El GIF se prepara junto al mensaje para revisarlo antes de enviar.' : `Selecciona un archivo local de ${kind}. No se usa un servicio externo.`));
+      const sticker = kind === 'sticker';
+      content.replaceChildren(node('p', 'feature-muted', kind === 'GIF' ? 'El GIF se prepara junto al mensaje para revisarlo antes de enviar.' : 'Elige una foto, edítala y revisa el sticker antes de enviarlo.'));
       const input = documentRef.createElement('input'); input.type = 'file'; input.accept = accept; input.setAttribute('aria-label', `Subir ${kind}`);
       if (kind === 'GIF') {
         input.onchange = () => {
@@ -1656,23 +1661,61 @@ export function installFeatureUI({
         content.append(input);
         return;
       }
-      const send = button(documentRef, `Enviar ${kind}`, 'feature-button primary'); send.disabled = true;
+      const preview = node('div', 'feature-sticker-preview'); preview.hidden = true;
+      const image = documentRef.createElement('img'); image.alt = 'Vista previa del sticker';
+      preview.append(image);
+      const send = button(documentRef, 'Enviar sticker', 'feature-button primary'); send.disabled = true;
+      let selectedFile = null;
+      let previewUrl = '';
       let sendToken = '';
-      input.onchange = () => { runtime.composeFile = input.files?.[0] || null; sendToken = ''; send.disabled = !runtime.composeFile; };
-      send.onclick = async () => {
-        if (!runtime.composeFile) return;
-        const file = runtime.composeFile;
-        let data; try { data = await readBase64(file); } catch (error) { toast(error.message, 'error'); return; }
-        sendToken ||= crypto.randomUUID();
-        const result = await mutate('/api/messages/compose', { kind: kind === 'sticker' ? 'sticker' : 'gif', name: file.name, mimeType: file.type || 'application/octet-stream', data, sendToken }, { refreshMessages: true, success: `${kind} enviado.` });
-        if (result) { runtime.composeFile = null; closeModal(); }
+      disposeUpload = () => { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = ''; selectedFile = null; };
+      input.onchange = () => {
+        const source = input.files?.[0];
+        input.value = '';
+        if (!source || !isCurrent()) return;
+        if (!/^image\/(jpeg|png|webp)$/.test(source.type)) { toast('Elige una imagen JPEG, PNG o WebP.', 'error'); return; }
+        const problem = attachmentError(source);
+        if (problem) { toast(problem, 'error'); return; }
+        send.disabled = true;
+        selectedFile = null;
+        preview.hidden = true;
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        previewUrl = '';
+        sendToken = '';
+        if (sticker) openStickerEditor(source, edited => {
+          if (!isCurrent()) return true;
+          if (edited?.type !== 'image/webp') return false;
+          selectedFile = edited;
+          previewUrl = URL.createObjectURL(edited);
+          image.src = previewUrl;
+          preview.hidden = false;
+          send.disabled = false;
+          return true;
+        });
       };
-      content.append(input, send);
+      send.onclick = async () => {
+        if (!selectedFile || !isCurrent() || send.disabled) return;
+        const file = selectedFile;
+        send.disabled = true;
+        input.disabled = true;
+        try {
+          const data = await readBase64(file);
+          if (!isCurrent() || selectedFile !== file) return;
+          sendToken ||= crypto.randomUUID();
+          const result = await mutate('/api/messages/compose', { kind: 'sticker', name: file.name, mimeType: file.type, data, sendToken }, { refreshMessages: true, success: 'Sticker enviado.' });
+          if (result && isCurrent()) closeModal();
+        } catch (error) {
+          if (isCurrent()) toast(error.message, 'error');
+        } finally {
+          if (isCurrent()) { send.disabled = false; input.disabled = false; }
+        }
+      };
+      content.append(input, preview, send);
     };
-    const addTab = (label, render) => { const tab = button(documentRef, label, 'feature-button subtle'); tab.onclick = () => { for (const item of tabs.children) item.classList.remove('active'); tab.classList.add('active'); render(); }; tabs.append(tab); return tab; };
+    const addTab = (label, render) => { const tab = button(documentRef, label, 'feature-button subtle'); tab.onclick = () => { disposeUpload(); disposeUpload = () => {}; for (const item of tabs.children) item.classList.remove('active'); tab.classList.add('active'); render(); }; tabs.append(tab); return tab; };
     const emojiTab = addTab('Emoji', renderEmoji);
     addTab('GIF local', () => renderUpload('GIF', 'image/gif'));
-    const stickerTab = addTab('Sticker local', () => renderUpload('sticker', 'image/webp'));
+    const stickerTab = addTab('Crear sticker', () => renderUpload('sticker', 'image/jpeg,image/png,image/webp'));
     (initial === 'sticker' ? stickerTab : emojiTab).click();
     modal.body.append(tabs, content);
   }

@@ -13,6 +13,8 @@ export const MIN_SNAPSHOTS = 2;
 const EDITABLE_MIME = /^image\/(jpeg|png|webp)$/;
 const EXPORT_MIME = 'image/jpeg';
 const EXPORT_QUALITY = 0.92;
+const STICKER_SIZE = 512;
+const STICKER_MAX_BYTES = 100 * 1024;
 const MAX_HISTORY = 15;
 
 export function historyLimitFor(width, height, budget = EDIT_MEMORY_BUDGET) {
@@ -31,6 +33,10 @@ export function editableImage(file) {
 export function outputFileName(name) {
   const base = String(name || 'imagen').replace(/\.[^./\\]+$/, '') || 'imagen';
   return `${base}-editada.jpg`;
+}
+
+export function stickerFileName(name) {
+  return outputFileName(name).replace(/-editada\.jpg$/, '-sticker.webp');
 }
 
 export function rotatedSize(width, height, quarterTurns) {
@@ -90,27 +96,29 @@ function paintCanvas(target, source) {
   ctx.drawImage(source, 0, 0);
 }
 
-function loadImage(file) {
+function scaledCanvas(source, width, height, maxDim) {
+  const scale = Math.min(1, maxDim / Math.max(width, height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+  return {canvas, reduced: scale < 1};
+}
+
+function loadImage(file, maxDim) {
   if (globalThis.createImageBitmap) {
     return globalThis.createImageBitmap(file).then(bitmap => {
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      canvas.getContext('2d').drawImage(bitmap, 0, 0);
-      bitmap.close?.();
-      return canvas;
+      try { return scaledCanvas(bitmap, bitmap.width, bitmap.height, maxDim); }
+      finally { bitmap.close?.(); }
     });
   }
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const image = new Image();
     image.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      canvas.getContext('2d').drawImage(image, 0, 0);
-      URL.revokeObjectURL(url);
-      resolve(canvas);
+      try { resolve(scaledCanvas(image, image.naturalWidth, image.naturalHeight, maxDim)); }
+      catch (error) { reject(error); }
+      finally { URL.revokeObjectURL(url); }
     };
     image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('No se pudo leer la imagen.')); };
     image.src = url;
@@ -128,6 +136,22 @@ function exportJpeg(canvas) {
   return new Promise((resolve, reject) => {
     flat.toBlob(blob => blob ? resolve(blob) : reject(new Error('No se pudo generar la imagen editada.')), EXPORT_MIME, EXPORT_QUALITY);
   });
+}
+
+export async function exportSticker(canvas) {
+  const square = canvas.ownerDocument.createElement('canvas');
+  square.width = STICKER_SIZE;
+  square.height = STICKER_SIZE;
+  const scale = Math.min(STICKER_SIZE / canvas.width, STICKER_SIZE / canvas.height);
+  const width = canvas.width * scale;
+  const height = canvas.height * scale;
+  square.getContext('2d').drawImage(canvas, (STICKER_SIZE - width) / 2, (STICKER_SIZE - height) / 2, width, height);
+  for (const quality of [0.9, 0.8, 0.68, 0.56, 0.44, 0.32, 0.2]) {
+    const blob = await new Promise(resolve => square.toBlob(resolve, 'image/webp', quality));
+    if (!blob || blob.type !== 'image/webp') throw new Error('Este navegador no puede crear stickers WebP.');
+    if (blob.size <= STICKER_MAX_BYTES) return blob;
+  }
+  throw new Error('El sticker supera los 100 KiB. Prueba con una imagen más sencilla.');
 }
 
 export function createPhotoEditor({getContext, isCurrent, onApply, showError, documentRef} = {}) {
@@ -328,6 +352,7 @@ export function createPhotoEditor({getContext, isCurrent, onApply, showError, do
   let cropDrag = null;
   let loaded = false;
   let applyHandler = onApply;
+  let outputMode = 'photo';
 
   function toCanvasPoint(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
@@ -538,6 +563,7 @@ export function createPhotoEditor({getContext, isCurrent, onApply, showError, do
       .filter(el => el && !el.disabled && el.offsetParent !== null);
   }
   overlay.addEventListener('keydown', event => {
+    event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); close(); return; }
     if (event.key !== 'Tab') return;
     const items = focusables();
@@ -557,10 +583,14 @@ export function createPhotoEditor({getContext, isCurrent, onApply, showError, do
     apply.disabled = true;
     let file;
     try {
-      const blob = await exportJpeg(canvas);
-      file = new File([blob], outputFileName(currentName), {type: EXPORT_MIME});
+      const blob = outputMode === 'sticker' ? await exportSticker(canvas) : await exportJpeg(canvas);
+      file = outputMode === 'sticker'
+        ? new File([blob], stickerFileName(currentName), {type: 'image/webp'})
+        : new File([blob], outputFileName(currentName), {type: EXPORT_MIME});
     } catch (err) {
-      showError?.(err.message || 'No se pudo editar la imagen.');
+      notice.textContent = err.message || 'No se pudo editar la imagen.';
+      notice.hidden = false;
+      showError?.(notice.textContent);
       apply.disabled = false;
       return;
     }
@@ -582,31 +612,29 @@ export function createPhotoEditor({getContext, isCurrent, onApply, showError, do
   cropFrame.addEventListener('pointercancel', endCropDrag);
 
   let currentName = 'imagen';
-  async function open(file, onApplyOverride) {
+  async function open(file, onApplyOverride, {mode = 'photo'} = {}) {
     close(false);
     const token = generation;
     opener = doc.activeElement;
     currentName = file?.name || 'imagen';
+    outputMode = mode === 'sticker' ? 'sticker' : 'photo';
+    title.textContent = outputMode === 'sticker' ? 'Crear sticker' : 'Editar foto';
+    apply.textContent = outputMode === 'sticker' ? 'Usar sticker' : 'Listo';
+    dialog.setAttribute('aria-label', title.textContent);
     applyHandler = onApplyOverride || onApply;
     overlay.hidden = false;
     stage.dataset.tool = 'crop';
     stage.dataset.loaded = '';
     notice.hidden = true;
     try {
-      const source = await loadImage(file);
+      const maxDim = outputMode === 'sticker' ? STICKER_SIZE : MAX_EDIT_DIM;
+      const source = await loadImage(file, maxDim);
       if (token !== generation) return;
-      const scale = Math.min(1, MAX_EDIT_DIM / Math.max(source.width, source.height));
-      if (scale < 1) {
-        notice.textContent = editCapNotice();
+      if (source.reduced) {
+        notice.textContent = outputMode === 'sticker' ? 'El sticker se prepara a 512 × 512 px.' : editCapNotice();
         notice.hidden = false;
-        const scaled = doc.createElement('canvas');
-        scaled.width = Math.round(source.width * scale);
-        scaled.height = Math.round(source.height * scale);
-        scaled.getContext('2d').drawImage(source, 0, 0, scaled.width, scaled.height);
-        paintCanvas(canvas, scaled);
-      } else {
-        paintCanvas(canvas, source);
       }
+      paintCanvas(canvas, source.canvas);
       loaded = true;
       textAnchor = null;
       textInput.value = '';

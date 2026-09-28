@@ -26,6 +26,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const context = await browser.newContext({baseURL:origin, viewport:{width:1280, height:844}});
 const page = await context.newPage();
 const uploads = [];
+const stickerSends = [];
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 await page.route('**/api/**', async route => {
@@ -35,6 +36,7 @@ await page.route('**/api/**', async route => {
   if (url.pathname === '/api/chats') return json({chats:[{id:'one',name:'Uno'}]});
   if (url.pathname === '/api/messages') return json({messages:[], nextCursor:null});
   if (url.pathname === '/api/upload') { uploads.push(route.request().postDataJSON()); return json({messageId:`wa-${uploads.length}`, confirmed:true}); }
+  if (url.pathname === '/api/messages/compose') { stickerSends.push(route.request().postDataJSON()); return json({messageId:`sticker-${stickerSends.length}`, confirmed:true}); }
   return json({models:[], items:[], communities:[], lists:[], favorites:[], sessions:[]});
 });
 
@@ -269,6 +271,60 @@ try {
     await page.locator('#photo-editor-cancel').click();
     await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
   }
+
+  // A source photo becomes a reviewed WebP sticker; opening or applying never sends it.
+  await clearAttachments();
+  await page.setViewportSize({width:390, height:844});
+  await page.locator('#attach').click();
+  await page.getByRole('menuitem', {name:'Nuevo sticker'}).click();
+  await page.getByLabel('Subir sticker').setInputFiles({name:'no-imagen.txt', mimeType:'text/plain', buffer:Buffer.from('no')});
+  assert.equal(await page.locator('#photo-editor-overlay').isHidden(), true, 'a non-image must not open sticker creation');
+  assert.equal(await page.getByRole('button', {name:'Enviar sticker'}).isDisabled(), true);
+  await page.getByLabel('Subir sticker').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
+  await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
+  await page.waitForFunction(() => document.querySelector('.photo-editor-stage')?.dataset.loaded === '1');
+  assert.equal(await page.locator('.photo-editor-header h2').textContent(), 'Crear sticker');
+  assert.equal(stickerSends.length, 0);
+  await page.keyboard.press('Escape');
+  await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
+  assert(await page.getByRole('dialog', {name:'Emoji, GIF y stickers'}).isVisible(), 'Escape should leave the picker open');
+  assert.equal(await page.getByRole('button', {name:'Enviar sticker'}).isDisabled(), true);
+  await page.getByLabel('Subir sticker').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
+  await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
+  await page.waitForFunction(() => document.querySelector('.photo-editor-stage')?.dataset.loaded === '1');
+  await page.locator('#photo-tab-text').click();
+  await page.locator('#photo-text-input').fill('OK');
+  await page.locator('#photo-text-add').click();
+  await page.locator('#photo-editor-apply').click();
+  await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
+  assert.equal(stickerSends.length, 0, 'applying a sticker should not send it');
+  assert(await page.locator('.feature-sticker-preview img').isVisible(), 'edited sticker preview missing');
+  const stickerLayout = await page.evaluate(() => ({width: window.innerWidth, scroll: document.documentElement.scrollWidth,
+    dialog: document.querySelector('.feature-dialog').getBoundingClientRect().toJSON()}));
+  assert(stickerLayout.scroll <= stickerLayout.width + 1, 'sticker preview overflows the phone');
+  assert(stickerLayout.dialog.left >= 0 && stickerLayout.dialog.right <= stickerLayout.width + 1, 'sticker dialog escapes the phone');
+  await page.screenshot({path:path.join(outputDir, 'sticker-preview-mobile.png'), animations:'disabled'});
+  for (const width of [320, 375, 430]) {
+    await page.setViewportSize({width, height:700});
+    const layout = await page.evaluate(() => ({width:window.innerWidth, scroll:document.documentElement.scrollWidth,
+      dialog:document.querySelector('.feature-dialog').getBoundingClientRect().toJSON(),
+      send:document.querySelector('.feature-sticker-preview + button').getBoundingClientRect().toJSON()}));
+    assert(layout.scroll <= width + 1 && layout.dialog.left >= 0 && layout.dialog.right <= width + 1,
+      `sticker dialog overflows at ${width}px`);
+    assert(layout.send.left >= 0 && layout.send.right <= width + 1 && layout.send.bottom <= 701,
+      `send button escapes at ${width}px`);
+  }
+  const stickerResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/messages/compose');
+  await page.getByRole('button', {name:'Enviar sticker'}).click();
+  await stickerResponse;
+  assert.equal(stickerSends.length, 1);
+  const sticker = stickerSends[0];
+  assert.equal(sticker.kind, 'sticker');
+  assert.equal(sticker.mimeType, 'image/webp');
+  assert.match(sticker.name, /-sticker\.webp$/);
+  assert(Buffer.from(sticker.data, 'base64').length <= 100 * 1024);
+  assert.deepEqual(await imageDims(sticker.data, 'image/webp'), {width:512, height:512});
+  assert.equal(Buffer.from(sticker.data, 'base64').toString('ascii', 0, 4), 'RIFF');
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(' | ')}`);
 } finally {
