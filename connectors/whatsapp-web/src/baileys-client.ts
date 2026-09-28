@@ -1545,7 +1545,10 @@ export class BaileysClient extends EventEmitter {
       this.rememberMessageForRetry(msg.key, msg.message);
     }
 
-    if (normalizeMessageContent(msg.message)?.encEventResponseMessage || normalizeMessageContent(msg.message)?.pinInChatMessage) {
+    if (
+      normalizeMessageContent(msg.message)?.encEventResponseMessage ||
+      normalizeMessageContent(msg.message)?.pinInChatMessage
+    ) {
       await storeRawWAMessage(msg);
       return { inserted: false };
     }
@@ -3228,54 +3231,100 @@ export class BaileysClient extends EventEmitter {
     return readPinnedMessages(this.toRawJid(chatId));
   }
 
-  async sendPin(input: PinSendInput, messageId: string, beforeSend: () => Promise<void>): Promise<string> {
-    if (!this.sock || !this.isConnected() || !this.meJid) throw new PinSendError('PIN_DISCONNECTED', 'WhatsApp is not connected', 503);
+  async sendPin(
+    input: PinSendInput,
+    messageId: string,
+    beforeSend: () => Promise<void>
+  ): Promise<string> {
+    if (!this.sock || !this.isConnected() || !this.meJid)
+      throw new PinSendError('PIN_DISCONNECTED', 'WhatsApp is not connected', 503);
     const stored = await getRawWAMessage(input.targetMessageId, input.conversationId);
-    if (!stored?.key?.id || !stored.message) throw new PinSendError('PIN_TARGET_UNAVAILABLE', 'Message is not available locally', 404);
+    if (!stored?.key?.id || !stored.message)
+      throw new PinSendError('PIN_TARGET_UNAVAILABLE', 'Message is not available locally', 404);
     const raw = this.toRawJid(input.conversationId);
     let targetKey = stored.key;
-    if (targetKey.remoteJid && targetKey.remoteJid !== raw &&
-        await canonicalConversationId(this.normalizeJid(targetKey.remoteJid)) === await canonicalConversationId(this.normalizeJid(raw))) {
-      targetKey = {...targetKey, remoteJid: raw};
+    if (
+      targetKey.remoteJid &&
+      targetKey.remoteJid !== raw &&
+      (await canonicalConversationId(this.normalizeJid(targetKey.remoteJid))) ===
+        (await canonicalConversationId(this.normalizeJid(raw)))
+    ) {
+      targetKey = { ...targetKey, remoteJid: raw };
     }
-    const payload = await generateWAMessageContent(pinMessageContent(targetKey, raw, input.pinned, input.duration), {upload: this.sock.waUploadToServer});
-    const full = generateWAMessageFromContent(raw, payload, {messageId, userJid: this.meJid});
+    const payload = await generateWAMessageContent(
+      pinMessageContent(targetKey, raw, input.pinned, input.duration),
+      { upload: this.sock.waUploadToServer }
+    );
+    const full = generateWAMessageFromContent(raw, payload, { messageId, userJid: this.meJid });
     await beforeSend();
-    await this.sock.relayMessage(raw, full.message as proto.IMessage, {messageId});
-    try { await storeRawWAMessage(full); }
-    catch { this.logger.warn('Pin action relayed; local persistence is pending'); }
+    await this.sock.relayMessage(raw, full.message as proto.IMessage, { messageId });
+    try {
+      await storeRawWAMessage(full);
+    } catch {
+      this.logger.warn('Pin action relayed; local persistence is pending');
+    }
     return messageId;
   }
 
   async getEventResults(chatId: string, eventMessageIds: string[]) {
     return readEventResults(chatId, eventMessageIds, {
       ownJid: this.meJid,
-      resolvePhoneJid: async jid => (await this.sock?.signalRepository?.lidMapping?.getPNForLID?.(jid)) || null,
+      resolvePhoneJid: async jid =>
+        (await this.sock?.signalRepository?.lidMapping?.getPNForLID?.(jid)) || null,
     });
   }
 
-  async sendEventResponse(input: EventSendInput, messageId: string, beforeSend: () => Promise<void>): Promise<string> {
-    if (!this.sock || !this.isConnected()) throw new EventSendError('EVENT_DISCONNECTED', 'WhatsApp is not connected', 503);
+  async sendEventResponse(
+    input: EventSendInput,
+    messageId: string,
+    beforeSend: () => Promise<void>
+  ): Promise<string> {
+    if (!this.sock || !this.isConnected())
+      throw new EventSendError('EVENT_DISCONNECTED', 'WhatsApp is not connected', 503);
     const stored = await getRawWAMessage(input.eventMessageId, input.conversationId);
     const content = normalizeMessageContent(stored?.message);
     const event = content?.eventMessage;
-    if (!stored?.key?.id || !event) throw new EventSendError('EVENT_NOT_FOUND', 'Event is not available locally', 404);
+    if (!stored?.key?.id || !event)
+      throw new EventSendError('EVENT_NOT_FOUND', 'Event is not available locally', 404);
     if (event.isCanceled) throw new EventSendError('EVENT_CANCELLED', 'Event was cancelled', 409);
-    if (input.extraGuestCount && !event.extraGuestsAllowed) throw new EventSendError('EVENT_GUESTS_DISABLED', 'This event does not allow extra guests', 400);
-    const secret = content.messageContextInfo?.messageSecret || stored.message?.messageContextInfo?.messageSecret;
-    if (!(secret instanceof Uint8Array) || secret.length !== 32) throw new EventSendError('EVENT_KEY_UNAVAILABLE', 'Event encryption key is unavailable', 409);
+    if (input.extraGuestCount && !event.extraGuestsAllowed)
+      throw new EventSendError(
+        'EVENT_GUESTS_DISABLED',
+        'This event does not allow extra guests',
+        400
+      );
+    const secret =
+      content.messageContextInfo?.messageSecret ||
+      stored.message?.messageContextInfo?.messageSecret;
+    if (!(secret instanceof Uint8Array) || secret.length !== 32)
+      throw new EventSendError('EVENT_KEY_UNAVAILABLE', 'Event encryption key is unavailable', 409);
     const own = this.meJid;
     let creator = stored.key.fromMe ? own : stored.key.participant || stored.key.remoteJid;
-    if (creator?.endsWith('@lid')) creator = await this.sock.signalRepository.lidMapping.getPNForLID(creator);
-    if (!own || !creator) throw new EventSendError('EVENT_IDENTITY_UNAVAILABLE', 'Event identity cannot be resolved', 409);
-    const response = buildEventResponse({eventKey: stored.key, eventSecret: secret, creatorJid: creator, responderJid: own,
-      attendance: input.attendance, extraGuestCount: input.extraGuestCount});
+    if (creator?.endsWith('@lid'))
+      creator = await this.sock.signalRepository.lidMapping.getPNForLID(creator);
+    if (!own || !creator)
+      throw new EventSendError(
+        'EVENT_IDENTITY_UNAVAILABLE',
+        'Event identity cannot be resolved',
+        409
+      );
+    const response = buildEventResponse({
+      eventKey: stored.key,
+      eventSecret: secret,
+      creatorJid: creator,
+      responderJid: own,
+      attendance: input.attendance,
+      extraGuestCount: input.extraGuestCount,
+    });
     const raw = this.toRawJid(input.conversationId);
-    const full = generateWAMessageFromContent(raw, response, {messageId, userJid: own});
+    const full = generateWAMessageFromContent(raw, response, { messageId, userJid: own });
     await beforeSend();
-    await this.sock.relayMessage(raw, full.message as proto.IMessage, {messageId});
-    try { await this.persistSentMessage(full, raw); }
-    catch { this.logger.warn('Event response relayed; local persistence is pending'); }
+    await this.sock.relayMessage(raw, full.message as proto.IMessage, { messageId });
+    try {
+      await this.persistSentMessage(full, raw);
+    } catch {
+      this.logger.warn('Event response relayed; local persistence is pending');
+    }
     return messageId;
   }
 
