@@ -396,8 +396,36 @@ function openImageViewer(url, name, documentRef, opener) {
   image.alt = name;
   const actions = makeElement(documentRef, 'div', 'media-viewer-actions');
   appendDownload(actions, url, name, documentRef);
+  const scope = opener?.closest?.('#messages');
+  const entries = scope ? [...scope.querySelectorAll('.media-image-button')].filter(button => button.dataset.viewerUrl) : [];
+  let index = entries.indexOf(opener);
+  const previous = makeElement(documentRef, 'button', 'media-viewer-previous', '\u2039');
+  const next = makeElement(documentRef, 'button', 'media-viewer-next', '\u203a');
+  const counter = makeElement(documentRef, 'span', 'media-viewer-counter');
+  previous.type = next.type = 'button';
+  previous.setAttribute('aria-label', 'Imagen anterior'); next.setAttribute('aria-label', 'Imagen siguiente');
+  counter.setAttribute('aria-live', 'polite');
+  const updateNavigation = () => {
+    previous.disabled = index <= 0; next.disabled = index >= entries.length - 1;
+    counter.textContent = `${index + 1} / ${entries.length}`;
+  };
+  const move = delta => {
+    const target = entries[index + delta];
+    if (!target || !target.isConnected) return;
+    const targetUrl = safeMessageUrl(target.dataset.viewerUrl);
+    if (!targetUrl) return;
+    index += delta;
+    image.src = targetUrl; image.alt = target.dataset.viewerName || 'Imagen';
+    overlay.setAttribute('aria-label', image.alt);
+    actions.replaceChildren(); appendDownload(actions, targetUrl, image.alt, documentRef);
+    updateNavigation();
+  };
+  previous.onclick = () => move(-1); next.onclick = () => move(1);
   const close = () => closeImageViewer(documentRef);
   const onKey = event => {
+    if (entries.length > 1 && index >= 0 && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      event.preventDefault(); move(event.key === 'ArrowLeft' ? -1 : 1); return;
+    }
     if (event.key === 'Escape') {
       event.preventDefault();
       close();
@@ -431,6 +459,7 @@ function openImageViewer(url, name, documentRef, opener) {
   mediaViewerStates.set(documentRef, { overlay, onKey, opener });
   documentRef.addEventListener?.('keydown', onKey);
   overlay.append(closeButton, image, actions);
+  if (entries.length > 1 && index >= 0) {updateNavigation(); overlay.append(previous, next, counter);}
   documentRef.body.append(overlay);
   closeButton.focus?.();
 }
@@ -522,6 +551,8 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
     const button = makeElement(documentRef, 'button', 'media-image-button');
     button.type = 'button';
     button.setAttribute('aria-label', `Abrir imagen ${name}`);
+    button.dataset.viewerUrl = url;
+    button.dataset.viewerName = name;
     const image = makeElement(documentRef, 'img', 'attachment-image');
     image.src = url;
     image.alt = textValue(attachment?.alt || name);

@@ -113,8 +113,6 @@ import {
   buildPresenceSnapshot,
   buildPrivacyUpdate,
   CapabilityError,
-  type EventMessageInput,
-  type PollMessageInput,
 } from './whatsapp-capabilities';
 import {
   aggregateCapturedPollVotes,
@@ -134,6 +132,12 @@ import { PinSendError, type PinSendInput } from './pinned-send';
 import { generateWAMessageContent } from '@whiskeysockets/baileys';
 import { buildEventResponse } from './event-responses';
 import { EventSendError, type EventSendInput } from './event-send';
+import {
+  NOVEDADES_MEDIA_MAX_BYTES,
+  NovedadesReaderError,
+  readNovedadesMediaStream,
+} from './novedades-reader';
+import { PreparedEvent, PreparedPoll, StructuredSendError } from './structured-send';
 import {
   appendCompanyToDisplayName,
   displayNameOrPhone,
@@ -3085,12 +3089,43 @@ export class BaileysClient extends EventEmitter {
     return sent?.key?.id || undefined;
   }
 
-  async sendPoll(chatId: string, input: PollMessageInput): Promise<string | undefined> {
-    if (!this.sock) throw new Error('Client not initialized');
-    const raw = this.toRawJid(chatId);
-    const sent = await this.sock.sendMessage(raw, buildPollMessage(input));
-    await this.persistSentMessage(sent, raw);
-    return sent?.key?.id || undefined;
+  /**
+   * Create a poll under the message ID owned by a send reservation. `beforeSend`
+   * claims the attempt, so the row already reads 'pending' by the time bytes
+   * leave this process: a timeout is then an uncertain send the caller must
+   * check in the chat, not an untracked one it may replay. The payload is built
+   * before that claim so a rejected poll cannot burn a token, and a persistence
+   * failure after the relay is logged rather than thrown, because the poll is
+   * really in the chat and the durable reader catches up on the next read.
+   */
+  async sendPoll(
+    input: PreparedPoll,
+    messageId: string,
+    beforeSend: () => Promise<void>
+  ): Promise<string> {
+    if (!this.sock || !this.isConnected())
+      throw new StructuredSendError('POLL_DISCONNECTED', 'WhatsApp is not connected', 503);
+    const raw = this.toRawJid(input.conversationId);
+    const content = buildPollMessage({
+      name: input.name,
+      values: input.values,
+      ...(input.selectableCount === undefined ? {} : { selectableCount: input.selectableCount }),
+    });
+    await beforeSend();
+    const sent = await this.sock.sendMessage(raw, content, { messageId });
+    const relayedId = sent?.key?.id;
+    if (!relayedId || relayedId !== messageId)
+      throw new StructuredSendError(
+        'POLL_SEND_OUTCOME_UNCERTAIN',
+        'WhatsApp did not confirm the reserved message ID; check the chat before sending again',
+        409
+      );
+    try {
+      await this.persistSentMessage(sent, raw);
+    } catch {
+      this.logger.warn('Poll relayed; local persistence is pending');
+    }
+    return relayedId;
   }
 
   /**
@@ -3298,10 +3333,25 @@ export class BaileysClient extends EventEmitter {
       stored.message?.messageContextInfo?.messageSecret;
     if (!(secret instanceof Uint8Array) || secret.length !== 32)
       throw new EventSendError('EVENT_KEY_UNAVAILABLE', 'Event encryption key is unavailable', 409);
-    const own = this.meJid;
-    let creator = stored.key.fromMe ? own : stored.key.participant || stored.key.remoteJid;
-    if (creator?.endsWith('@lid'))
-      creator = await this.sock.signalRepository.lidMapping.getPNForLID(creator);
+    // Same identity rules as readEventResults: only a normalized phone number can encrypt a
+    // response. A missing LID mapping must surface as a typed 409 before the token is claimed.
+    const resolvePhone = async (jid: string | null | undefined): Promise<string | null> => {
+      if (!jid || !/^\d+(?::\d+)?@(?:s\.whatsapp\.net|c\.us|lid)$/.test(jid)) return null;
+      const normalized = jidNormalizedUser(jid);
+      if (!normalized.endsWith('@lid'))
+        return /^\d+@s\.whatsapp\.net$/.test(normalized) ? normalized : null;
+      let mapped: string | null | undefined;
+      try {
+        mapped = await this.sock?.signalRepository?.lidMapping?.getPNForLID?.(normalized);
+      } catch {
+        mapped = null;
+      }
+      return mapped && /^\d+@s\.whatsapp\.net$/.test(mapped) ? mapped : null;
+    };
+    const own = await resolvePhone(this.meJid);
+    const creator = await resolvePhone(
+      stored.key.fromMe ? this.meJid : stored.key.participant || stored.key.remoteJid
+    );
     if (!own || !creator)
       throw new EventSendError(
         'EVENT_IDENTITY_UNAVAILABLE',
@@ -3328,12 +3378,49 @@ export class BaileysClient extends EventEmitter {
     return messageId;
   }
 
-  async sendEvent(chatId: string, input: EventMessageInput): Promise<string | undefined> {
-    if (!this.sock) throw new Error('Client not initialized');
-    const raw = this.toRawJid(chatId);
-    const sent = await this.sock.sendMessage(raw, buildEventMessage(input));
-    await this.persistSentMessage(sent, raw);
-    return sent?.key?.id || undefined;
+  /**
+   * Create an event under the reservation's message ID, with the same claim
+   * discipline as sendPoll. `location` is passed through as validated, so a
+   * place typed as text keeps only its name: rc13 copies it into the proto,
+   * whose coordinates are optional, and inventing 0/0 would move the pin to the
+   * Gulf of Guinea. A `call` is the one field that costs a provider round trip
+   * (the link) before the relay, so its failure can leave an uncertain attempt.
+   */
+  async sendEvent(
+    input: PreparedEvent,
+    messageId: string,
+    beforeSend: () => Promise<void>
+  ): Promise<string> {
+    if (!this.sock || !this.isConnected())
+      throw new StructuredSendError('EVENT_CREATE_DISCONNECTED', 'WhatsApp is not connected', 503);
+    const raw = this.toRawJid(input.conversationId);
+    const content = buildEventMessage({
+      name: input.name,
+      ...(input.description ? { description: input.description } : {}),
+      startDate: new Date(input.startDate),
+      ...(input.endDate ? { endDate: new Date(input.endDate) } : {}),
+      ...(input.location ? { location: input.location } : {}),
+      ...(input.call ? { call: input.call } : {}),
+      ...(input.isCancelled === undefined ? {} : { isCancelled: input.isCancelled }),
+      ...(input.extraGuestsAllowed === undefined
+        ? {}
+        : { extraGuestsAllowed: input.extraGuestsAllowed }),
+    });
+    await beforeSend();
+    const sent = await this.sock.sendMessage(raw, content, { messageId });
+    const relayedId = sent?.key?.id;
+    if (!relayedId || relayedId !== messageId)
+      throw new StructuredSendError(
+        'EVENT_CREATE_OUTCOME_UNCERTAIN',
+        'WhatsApp did not confirm the reserved message ID; check the chat before sending again',
+        409
+      );
+    try {
+      await this.persistSentMessage(sent, raw);
+    } catch {
+      this.logger.warn('Event relayed; local persistence is pending');
+    }
+    return relayedId;
   }
 
   async modifyChat(
@@ -4154,6 +4241,65 @@ export class BaileysClient extends EventEmitter {
     } catch (e: any) {
       this.logger.error(`downloadMedia failed for ${messageId}: ${e?.message || e}`);
       return null;
+    }
+  }
+
+  /**
+   * Normalized user JID of this session, or null while disconnected. The
+   * Novedades read paths need it to mark which statuses this account itself
+   * posted; no device suffix, no raw JID.
+   */
+  get ownJid(): string | null {
+    return this.meJid;
+  }
+
+  /**
+   * Read stored status/channel media without receipts, re-upload requests or writes.
+   * rc13 does not forward AbortSignal to fetch, nor propagate output destruction
+   * to its private HTTP stream. The deadline bounds caller wait; we destroy the
+   * returned stream (also when late) and retain at most the cap in collected chunks.
+   */
+  async downloadNovedadesMedia(
+    message: WAMessage
+  ): Promise<{ buffer: Buffer; mimeType?: string; fileName?: string } | null> {
+    if (!this.isConnected())
+      throw new NovedadesReaderError(
+        'NOVEDADES_SESSION_DOWN',
+        'WhatsApp session is not connected',
+        503
+      );
+    const rawTimeout = Number.parseInt(process.env.WA_MEDIA_DOWNLOAD_TIMEOUT_MS || '30000', 10);
+    const timeoutMs =
+      Number.isSafeInteger(rawTimeout) && rawTimeout >= 1000 && rawTimeout <= 60000
+        ? rawTimeout
+        : 30000;
+    const content = normalizeMessageContent(
+      message.message ? proto.Message.fromObject(message.message) : undefined
+    );
+    const media =
+      content?.imageMessage ||
+      content?.videoMessage ||
+      content?.audioMessage ||
+      content?.documentMessage ||
+      content?.stickerMessage;
+    const declared = Number(media?.fileLength ?? 0);
+    if (Number.isFinite(declared) && declared > NOVEDADES_MEDIA_MAX_BYTES)
+      throw new NovedadesReaderError(
+        'NOVEDADES_MEDIA_TOO_LARGE',
+        'Media exceeds the download size cap',
+        413
+      );
+    try {
+      // Omitting ctx avoids provider logging of message keys and re-upload writes.
+      const buffer = await readNovedadesMediaStream(
+        () => downloadMediaMessage(message, 'stream', {}),
+        timeoutMs
+      );
+      return buffer.length ? { buffer, ...this.mediaMetaFromMessage(message) } : null;
+    } catch (error) {
+      if (error instanceof NovedadesReaderError) throw error;
+      this.logger.warn('Novedades media download failed');
+      throw new NovedadesReaderError('NOVEDADES_MEDIA_FAILED', 'The media download failed', 502);
     }
   }
 

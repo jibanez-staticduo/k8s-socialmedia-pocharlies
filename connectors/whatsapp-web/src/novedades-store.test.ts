@@ -9,7 +9,9 @@ import {
   NovedadesStoreError,
   NOVEDADES_STATUS_TTL_MS,
   ensureNovedadesTables,
+  getNovedadesChannel,
   getNovedadesMessage,
+  getNovedadesStatus,
   isNovedadesAuxiliaryMessage,
   isNovedadesChannelJid,
   listNovedadesChannels,
@@ -1039,4 +1041,186 @@ test('channel directory stores normalized metadata and preserves the provider ob
     restoreList();
   }
   assert.equal(listCalls[0]!.params[0], 'personal');
+});
+
+test('status paging keys on exact epoch milliseconds with an id tie-breaker', async () => {
+  const { calls, restore } = stubPool([{ rows: [] }, { rows: [] }]);
+  try {
+    await listNovedadesStatus({ after: { timestampMs: 1_700_000_000_000, id: 'ST-9' } });
+    const sql = calls[0]!.sql;
+    assert.match(sql, /message_timestamp_ms < \$2::bigint/);
+    assert.match(sql, /\(message_timestamp_ms = \$2::bigint AND wa_message_id < \$3\)/);
+    assert.match(sql, /ORDER BY message_timestamp_ms DESC NULLS LAST, wa_message_id DESC/);
+    assert.doesNotMatch(sql, /posted_at/);
+    assert.deepEqual(calls[0]!.params.slice(1, 3), [1_700_000_000_000, 'ST-9']);
+    // A null keyset timestamp means the "no posting time" tail, not "everything".
+    await listNovedadesStatus({ after: { timestampMs: null, id: 'ST-9' } });
+    assert.match(
+      calls[1]!.sql,
+      /WHEN \$2::bigint IS NULL\s+THEN \(message_timestamp_ms IS NULL AND wa_message_id < \$3\)/
+    );
+    assert.equal(calls[1]!.params[1], null);
+  } finally {
+    restore();
+  }
+  const { calls: badCalls, restore: restoreBad } = stubPool([]);
+  try {
+    for (const bad of [0, -5, 12.5, Number.MAX_SAFE_INTEGER + 1, 'soon']) {
+      await assert.rejects(
+        () => listNovedadesStatus({ after: { timestampMs: bad as number, id: 'ST-1' } }),
+        (error: unknown) =>
+          error instanceof NovedadesStoreError && error.code === 'INVALID_NOVEDADES_INPUT'
+      );
+    }
+    assert.equal(badCalls.length, 0);
+  } finally {
+    restoreBad();
+  }
+});
+
+test('post paging keys on the same timestamp column the page is sorted by', async () => {
+  const { calls, restore } = stubPool([{ rows: [] }, { rows: [] }]);
+  try {
+    await listNovedadesMessages(CHANNEL, {
+      after: { timestampMs: 1_700_000_000_000, id: 'P-9' },
+    });
+    const sql = calls[0]!.sql;
+    assert.match(sql, /message_timestamp_ms < \$3::bigint/);
+    assert.match(sql, /\(message_timestamp_ms = \$3::bigint AND message_id < \$4\)/);
+    assert.match(sql, /ORDER BY message_timestamp_ms DESC NULLS LAST, message_id DESC/);
+    assert.deepEqual(calls[0]!.params.slice(2, 4), [1_700_000_000_000, 'P-9']);
+    await listNovedadesMessages(CHANNEL, { after: { timestampMs: null, id: 'P-9' } });
+    assert.match(calls[1]!.sql, /THEN \(message_timestamp_ms IS NULL AND message_id < \$4\)/);
+  } finally {
+    restore();
+  }
+});
+
+test('channel paging sorts by name then jid so equal names still advance', async () => {
+  const { calls, restore } = stubPool([{ rows: [] }]);
+  try {
+    await listNovedadesChannels({ limit: 25, after: { name: 'Canal', jid: CHANNEL } });
+    assert.match(
+      calls[0]!.sql,
+      /AND \(lower\(name\) > \$2 OR \(lower\(name\) = \$2 AND channel_jid > \$3\)\)/
+    );
+    assert.match(calls[0]!.sql, /ORDER BY lower\(name\), channel_jid/);
+    assert.deepEqual(calls[0]!.params, ['personal', 'canal', CHANNEL, 25]);
+  } finally {
+    restore();
+  }
+});
+
+test('one channel is read exactly by account and jid, never by scanning a page', async () => {
+  const { calls, restore } = stubPool([
+    {
+      rows: [
+        {
+          account: 'personal',
+          channel_jid: CHANNEL,
+          name: 'Canal Oficial',
+          role: 'admin',
+          avatar_url: 'https://pps.whatsapp.net/v/t6/avatar.jpg',
+          subscriber_count: '10',
+          creation_timestamp_ms: '1600000000000',
+          mute_state: 'none',
+          raw_metadata: { source: 'test' },
+        },
+      ],
+    },
+  ]);
+  try {
+    const row = await getNovedadesChannel(CHANNEL);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0]!.sql, /WHERE account = \$1 AND channel_jid = \$2 LIMIT 1/);
+    assert.deepEqual(calls[0]!.params, ['personal', CHANNEL]);
+    assert.equal(row?.jid, CHANNEL);
+    assert.equal(row?.role, 'admin');
+    assert.equal(row?.subscriberCount, 10);
+    assert.equal(row?.creationTimestampMs, 1_600_000_000_000);
+    assert.deepEqual(row?.rawMetadata, { source: 'test' });
+  } finally {
+    restore();
+  }
+  const { calls: rejected, restore: restoreRejected } = stubPool([]);
+  try {
+    await assert.rejects(
+      () => getNovedadesChannel('34600123456@s.whatsapp.net'),
+      (error: unknown) =>
+        error instanceof NovedadesStoreError && error.code === 'INVALID_NOVEDADES_CHANNEL'
+    );
+    assert.equal(rejected.length, 0);
+  } finally {
+    restoreRejected();
+  }
+});
+
+test('one status is read exactly by account, author and id with conservative defaults', async () => {
+  const posted = new Date(1_700_000_000_000);
+  const { calls, restore } = stubPool([
+    {
+      rows: [
+        {
+          account: 'personal',
+          author_jid: '34600123456@s.whatsapp.net',
+          wa_message_id: 'ST-1',
+          message_key: {
+            id: 'ST-1',
+            remoteJid: 'status@broadcast',
+            participant: '34600123456@s.whatsapp.net',
+          },
+          message_payload: { conversation: 'hola' },
+          message_timestamp_ms: '1700000000000',
+          message_type: 'conversation',
+          visibility: 'visible',
+          metadata: {},
+          posted_at: posted,
+          expires_at: new Date(Date.now() + 3_600_000),
+          is_deleted: false,
+        },
+      ],
+    },
+    { rows: [] },
+  ]);
+  try {
+    const row = await getNovedadesStatus('34600123456@c.us', 'ST-1');
+    const sql = calls[0]!.sql;
+    assert.match(sql, /account = \$1 AND author_jid = \$2 AND wa_message_id = \$3/);
+    assert.match(sql, /expires_at > now\(\)/);
+    assert.match(sql, /NOT is_deleted/);
+    assert.match(sql, /visibility = \$4/);
+    assert.match(sql, /LIMIT 1/);
+    assert.deepEqual(calls[0]!.params, [
+      'personal',
+      '34600123456@s.whatsapp.net',
+      'ST-1',
+      'visible',
+    ]);
+    assert.equal(row?.messageId, 'ST-1');
+    assert.equal(row?.active, true);
+    assert.equal(row?.timestampMs, 1_700_000_000_000);
+    const missing = await getNovedadesStatus('34600123456@s.whatsapp.net', 'ST-404', {
+      includeExpired: true,
+      includeDeleted: true,
+      visibility: 'all',
+    });
+    assert.equal(missing, undefined);
+    assert.doesNotMatch(calls[1]!.sql, /expires_at > now\(\)/);
+    assert.doesNotMatch(calls[1]!.sql, /NOT is_deleted/);
+    assert.doesNotMatch(calls[1]!.sql, /visibility = /);
+    assert.equal(calls[1]!.params.length, 3);
+  } finally {
+    restore();
+  }
+  const { calls: rejected, restore: restoreRejected } = stubPool([]);
+  try {
+    await assert.rejects(
+      () => getNovedadesStatus('120363123456789012@g.us', 'ST-1'),
+      (error: unknown) =>
+        error instanceof NovedadesStoreError && error.code === 'INVALID_NOVEDADES_AUTHOR'
+    );
+    assert.equal(rejected.length, 0);
+  } finally {
+    restoreRejected();
+  }
 });

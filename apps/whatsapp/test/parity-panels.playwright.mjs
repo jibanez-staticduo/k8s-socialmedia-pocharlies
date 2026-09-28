@@ -21,7 +21,7 @@ const server = createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
   const file = path.resolve(source, `.${pathname === '/' ? '/index.html' : pathname}`);
   if (file !== source && !file.startsWith(`${source}${path.sep}`)) { res.writeHead(403); res.end(); return; }
-  try { res.writeHead(200, { 'content-type': contentTypes[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' }); res.end(await readFile(file)); }
+  try { const body = await readFile(file); res.writeHead(200, { 'content-type': contentTypes[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' }); res.end(body); }
   catch { res.writeHead(404); res.end(); }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -144,7 +144,7 @@ try {
   assert.equal(await communityPage.page.locator('#chat-title').textContent(), 'Grupo de la comunidad');
   await openSettings(communityPage.page);
   await communityPage.page.locator('#account').selectOption('beta');
-  await communityPage.page.locator('#settings-close').click();
+  assert.equal(await communityPage.page.locator('#settings-close').isVisible(), false, 'account switch closes settings');
   await communityPage.page.locator('#communities-toggle').click();
   await communityPage.page.locator('[data-community-id="beta-community"]').first().waitFor();
   await communityPage.page.locator('[data-community-id="beta-community"]').first().click();

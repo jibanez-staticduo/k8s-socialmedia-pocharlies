@@ -12,6 +12,9 @@ import {
   storeRawWAMessage,
   getRawWAMessage,
   listCapturedEventResponses,
+  EVENT_RESPONSE_PRESENT_SQL,
+  PIN_ACTION_SQL,
+  PAYLOAD_PARTIAL_INDEX_DDL,
   upsertChatState,
 } from './durable-message-store';
 
@@ -33,8 +36,38 @@ test('durable table bootstrap holds one transaction advisory lock on a dedicated
     assert.match(calls[1], /pg_advisory_xact_lock/);
     assert.equal(calls.at(-2), 'COMMIT');
     assert.equal(calls.at(-1), 'RELEASE');
+    // The payload indexes must be part of the same bootstrap transaction, so a
+    // rejected statement rolls back instead of half-creating the schema.
+    const commitAt = calls.indexOf('COMMIT');
+    for (const ddl of PAYLOAD_PARTIAL_INDEX_DDL) {
+      const at = calls.indexOf(ddl);
+      assert.ok(at > 0 && at < commitAt, `partial index DDL not inside bootstrap: ${ddl}`);
+    }
   } finally {
     (pg.Pool.prototype as any).connect = original;
+  }
+});
+
+test('payload partial indexes key on the C collation and reuse the read predicates', () => {
+  const indexNames = [
+    'idx_whatsapp_message_payloads_pins',
+    'idx_whatsapp_message_payloads_event_responses',
+  ];
+  assert.equal(PAYLOAD_PARTIAL_INDEX_DDL.length, indexNames.length);
+  for (let i = 0; i < indexNames.length; i++) {
+    const name = indexNames[i]!;
+    const ddl = PAYLOAD_PARTIAL_INDEX_DDL[i]!;
+    assert.ok(ddl.startsWith(`CREATE INDEX IF NOT EXISTS ${name}`), name);
+    assert.ok(
+      ddl.includes('(account, conversation_id, wa_message_id COLLATE "C")'),
+      `${name} must order the keyset by the C collation`
+    );
+    const predicate = ddl.slice(ddl.indexOf(' WHERE '));
+    assert.ok(
+      predicate === ` WHERE ${EVENT_RESPONSE_PRESENT_SQL}` ||
+        predicate === ` WHERE ${PIN_ACTION_SQL}`,
+      `${name} must reuse the exported read predicate verbatim`
+    );
   }
 });
 
@@ -54,6 +87,22 @@ function stubPool(rows: Record<string, unknown>[] = []): {
     return Promise.resolve({ rows });
   };
   return { calls, restore: () => ((pg.Pool.prototype as any).query = original) };
+}
+
+/**
+ * PostgreSQL must be able to type every parameter up to the highest one in the
+ * statement, so a bound argument that no `$n` refers to fails the query at
+ * runtime. Guards that without needing a server.
+ */
+function assertDenseParameters(sql: string, params: unknown[]) {
+  const used = [...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1]));
+  assert.equal(
+    Math.max(...used),
+    params.length,
+    'highest parameter must be the last bound argument'
+  );
+  for (let index = 1; index <= params.length; index++)
+    assert.ok(used.includes(index), `parameter $${index} is bound but never referenced`);
 }
 
 test('raw chat storage ignores Novedades IDs that may collide with chat messages', async () => {
@@ -241,20 +290,67 @@ test('reactions use an account-scoped target and explicit removal state', async 
 test('RSVP ciphertext pages bind account, event and canonical chat with an explicit continuation', async () => {
   const previous = process.env.CONNECTOR_ACCOUNT;
   process.env.CONNECTOR_ACCOUNT = 'professional';
-  const {calls, restore} = stubPool(['one', 'two', 'three'].map(id => ({
-    wa_message_id: `professional:${id}`,
-    message_key: JSON.stringify({id, remoteJid: '123@g.us'}),
-    message_payload: JSON.stringify({encEventResponseMessage: {eventCreationMessageKey: {id: 'event'}}}),
-  })));
+  const { calls, restore } = stubPool(
+    ['one', 'two', 'three'].map(id => ({
+      wa_message_id: `professional:${id}`,
+      message_key: JSON.stringify({ id, remoteJid: '123@g.us' }),
+      message_payload: JSON.stringify({
+        encEventResponseMessage: { eventCreationMessageKey: { id: 'event' } },
+      }),
+    }))
+  );
   try {
-    const result = await listCapturedEventResponses('event', '123@g.us', {cursor: 'before', limit: 2});
+    const result = await listCapturedEventResponses('event', '123@g.us', {
+      cursor: 'before',
+      limit: 2,
+    });
     assert.equal(result.items.length, 2);
     assert.equal(result.nextCursor, 'two');
     const query = calls.at(-1)!;
-    assert.deepEqual(query.params, ['professional', 'event', 'professional:123@g.us', 'professional:before', 3]);
+    assert.deepEqual(query.params, [
+      'professional',
+      'event',
+      'professional:123@g.us',
+      'professional:before',
+      3,
+    ]);
     assert.match(query.sql, /account = \$1 AND conversation_id = \$3/);
-    assert.match(query.sql, /jsonb_path_exists/);
+    assert.ok(
+      query.sql.includes(EVENT_RESPONSE_PRESENT_SQL),
+      'RSVP scan must repeat the partial index predicate verbatim'
+    );
     assert.match(query.sql, /ORDER BY wa_message_id COLLATE "C" ASC/);
+    assert.ok(
+      query.sql.includes('wa_message_id COLLATE "C" > $4::text COLLATE "C"'),
+      'continuation must be an index bound rather than a post-scan filter'
+    );
+    assertDenseParameters(query.sql, query.params);
+  } finally {
+    restore();
+    if (previous === undefined) delete process.env.CONNECTOR_ACCOUNT;
+    else process.env.CONNECTOR_ACCOUNT = previous;
+  }
+});
+
+test('first RSVP page omits the keyset bound and still scans only matching payloads', async () => {
+  const previous = process.env.CONNECTOR_ACCOUNT;
+  process.env.CONNECTOR_ACCOUNT = 'professional';
+  const { calls, restore } = stubPool();
+  try {
+    assert.deepEqual(await listCapturedEventResponses('event', '123@g.us'), {
+      items: [],
+      nextCursor: null,
+    });
+    const query = calls.at(-1)!;
+    assert.deepEqual(query.params, ['professional', 'event', 'professional:123@g.us', 201]);
+    assert.match(query.sql, /LIMIT \$4$/);
+    assert.ok(query.sql.includes(EVENT_RESPONSE_PRESENT_SQL));
+    assert.ok(
+      !query.sql.includes('wa_message_id COLLATE "C" >'),
+      'an unbounded first page must not compare against the cursor'
+    );
+    assert.ok(!/IS NULL OR/.test(query.sql), 'the cursor must not be folded into a nullable OR');
+    assertDenseParameters(query.sql, query.params);
   } finally {
     restore();
     if (previous === undefined) delete process.env.CONNECTOR_ACCOUNT;
@@ -263,13 +359,21 @@ test('RSVP ciphertext pages bind account, event and canonical chat with an expli
 });
 
 test('RSVP ciphertext empty pages terminate and invalid limits do not silently truncate', async () => {
-  const {calls, restore} = stubPool();
+  const { calls, restore } = stubPool();
   try {
-    assert.deepEqual(await listCapturedEventResponses('event', '123@g.us'), {items: [], nextCursor: null});
+    assert.deepEqual(await listCapturedEventResponses('event', '123@g.us'), {
+      items: [],
+      nextCursor: null,
+    });
     const before = calls.length;
     for (const limit of [0, 501, NaN, 1.5]) {
-      await assert.rejects(listCapturedEventResponses('event', '123@g.us', {limit}), /Invalid event response page/);
+      await assert.rejects(
+        listCapturedEventResponses('event', '123@g.us', { limit }),
+        /Invalid event response page/
+      );
     }
     assert.equal(calls.length, before);
-  } finally { restore(); }
+  } finally {
+    restore();
+  }
 });

@@ -20,6 +20,42 @@ export function storageConversationId(jid: string): string {
   return jid.endsWith('@s.whatsapp.net') ? jid.replace(/@s\.whatsapp\.net$/, '@c.us') : jid;
 }
 
+/**
+ * Payload predicates that define the pins and RSVP partial indexes. They are
+ * exported because the scans interpolate the very same strings: keeping one
+ * definition means a query can never drift away from the index it relies on,
+ * which is what lets Postgres prove the predicate and skip ordinary chat
+ * messages entirely instead of filtering them after the fact.
+ */
+export const PIN_ACTION_SQL = "jsonb_path_exists(message_payload, '$.**.pinInChatMessage')";
+export const EVENT_RESPONSE_PRESENT_SQL =
+  "jsonb_path_exists(message_payload, '$.**.encEventResponseMessage')";
+
+/**
+ * Keyset order shared by both scans: account and chat as equality scopes, then
+ * message ids in C collation so the cursor comparison and the index order are
+ * byte-exact regardless of the database default collation.
+ *
+ * CREATE INDEX here is non-concurrent and therefore takes a SHARE lock, so the
+ * very first startup on an existing populated table blocks writers while it
+ * builds. Later startups are no-ops thanks to IF NOT EXISTS.
+ */
+const PAYLOAD_INDEX_KEY = `(account, conversation_id, wa_message_id COLLATE "C")`;
+
+function partialPayloadIndex(indexName: string, predicate: string): string {
+  return [
+    `CREATE INDEX IF NOT EXISTS ${indexName}`,
+    `  ON whatsapp_message_payloads ${PAYLOAD_INDEX_KEY}`,
+    ` WHERE ${predicate}`,
+  ].join('\n');
+}
+
+/** Executed by the bootstrap transaction below and by the PostgreSQL specs. */
+export const PAYLOAD_PARTIAL_INDEX_DDL = [
+  partialPayloadIndex('idx_whatsapp_message_payloads_pins', PIN_ACTION_SQL),
+  partialPayloadIndex('idx_whatsapp_message_payloads_event_responses', EVENT_RESPONSE_PRESENT_SQL),
+] as const;
+
 /** Tables owned by the connector; deployment migrations can adopt them later. */
 export async function ensureDurableTables(): Promise<void> {
   if (tablesReady) return;
@@ -45,6 +81,7 @@ export async function ensureDurableTables(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_whatsapp_message_payloads_chat
       ON whatsapp_message_payloads (account, conversation_id, message_timestamp_ms DESC)
   `);
+    for (const ddl of PAYLOAD_PARTIAL_INDEX_DDL) await client.query(ddl);
     await client.query(`
     CREATE TABLE IF NOT EXISTS whatsapp_chat_state (
       account text NOT NULL,
@@ -475,22 +512,36 @@ export async function listCapturedEventResponses(
   ) {
     throw new Error('Invalid event response page');
   }
-  const result = await pool().query(
-    `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
-       FROM whatsapp_message_payloads
-      WHERE account = $1 AND conversation_id = $3
-        AND ($4::text IS NULL OR wa_message_id COLLATE "C" > $4::text COLLATE "C")
-        AND jsonb_path_exists(message_payload,
+  // Parameters are numbered per branch: PostgreSQL needs a determinable type for
+  // every symbol up to the highest one in the statement, so an unreferenced $4
+  // would fail the first page, and a nullable OR would push the keyset bound out
+  // of the index condition into a post-scan filter.
+  const params: unknown[] = [
+    connectorAccount(),
+    eventMessageId,
+    accountKey(await canonicalConversationId(storageConversationId(chatId))),
+  ];
+  const filters = [
+    // Same expression as idx_whatsapp_message_payloads_event_responses.
+    EVENT_RESPONSE_PRESENT_SQL,
+    `jsonb_path_exists(message_payload,
           '$.**.encEventResponseMessage.eventCreationMessageKey.id ? (@ == $eventId)',
-          jsonb_build_object('eventId', $2::text))
-      ORDER BY wa_message_id COLLATE "C" ASC LIMIT $5`,
+          jsonb_build_object('eventId', $2::text))`,
+  ];
+  if (cursor !== null) {
+    params.push(accountKey(cursor));
+    filters.push(`wa_message_id COLLATE "C" > $${params.length}::text COLLATE "C"`);
+  }
+  params.push(limit + 1);
+  const result = await pool().query(
     [
-      connectorAccount(),
-      eventMessageId,
-      accountKey(await canonicalConversationId(storageConversationId(chatId))),
-      cursor === null ? null : accountKey(cursor),
-      limit + 1,
-    ]
+      `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms`,
+      `  FROM whatsapp_message_payloads`,
+      ` WHERE account = $1 AND conversation_id = $3`,
+      ...filters.map(filter => `   AND ${filter}`),
+      ` ORDER BY wa_message_id COLLATE "C" ASC LIMIT $${params.length}`,
+    ].join('\n'),
+    params
   );
   const items = toStoredRawRows(result.rows.slice(0, limit));
   return { items, nextCursor: result.rows.length > limit ? items.at(-1)!.waMessageId : null };

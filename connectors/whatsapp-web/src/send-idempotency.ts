@@ -91,6 +91,63 @@ export async function reserveEventResponseSend(input: {
   return reserveSend(input.token, hash);
 }
 
+/**
+ * A created poll is identified by its whole payload: the same token reused with
+ * a different question, option list or choice count is a different send, so it
+ * has to conflict instead of silently replaying the first one.
+ */
+export async function reservePollSend(input: {
+  token: string;
+  conversationId: string;
+  name: string;
+  values: string[];
+  selectableCount?: number;
+}): Promise<SendReservation> {
+  const hash = createHash('sha256')
+    .update(
+      JSON.stringify([
+        'poll-creation',
+        input.conversationId,
+        input.name,
+        input.values,
+        input.selectableCount ?? null,
+      ])
+    )
+    .digest('hex');
+  return reserveSend(input.token, hash);
+}
+
+export async function reserveEventCreationSend(input: {
+  token: string;
+  conversationId: string;
+  name: string;
+  description?: string;
+  startDate: string;
+  endDate?: string;
+  location?: { degreesLatitude?: number; degreesLongitude?: number; name?: string };
+  call?: string;
+  isCancelled?: boolean;
+  extraGuestsAllowed?: boolean;
+}): Promise<SendReservation> {
+  const hash = createHash('sha256')
+    .update(
+      JSON.stringify([
+        'event-creation',
+        input.conversationId,
+        input.name,
+        input.description ?? null,
+        input.startDate,
+        input.endDate ?? null,
+        input.location ?? null,
+        input.call ?? null,
+        input.isCancelled ?? null,
+        input.extraGuestsAllowed ?? null,
+      ])
+    )
+    .digest('hex');
+  return reserveSend(input.token, hash);
+}
+
 export async function reserveMediaSend(input: {
   token: string;
   conversationId: string;

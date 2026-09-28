@@ -16,10 +16,15 @@ import { mediaRequest } from './lib/media.mjs';
 import { readMediaLibrary } from './lib/media-library.mjs';
 import { readChatDirectory } from './lib/chat-directory.mjs';
 import { readContactDirectory } from './lib/contact-directory.mjs';
+import { readNovedades, novedadesMediaResponse } from './lib/novedades-proxy.mjs';
 import { Sessions } from './lib/sessions.mjs';
 import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
 import { publicMessageMetadata, publicPollResults, publicEventResults } from './lib/message-projection.mjs';
+import { pollDraft } from './public/poll-draft.mjs';
+import { eventDraft } from './public/event-draft.mjs';
+import { validateDayRange } from './public/message-date.mjs';
+import { MESSAGE_BY_DATE_SQL } from './lib/message-date.mjs';
 import { linkPreviewFromPayload } from './lib/link-preview.mjs';
 import { HermesStreamAccumulator, openSse } from './lib/hermes-stream.mjs';
 import { hermesApiBaseUrl, syncHermesModelLock } from './lib/hermes-model-lock.mjs';
@@ -1104,6 +1109,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       }
       if (req.method === 'GET' && path === '/api/accounts') return json(200, { accounts: accounts.map(a => ({ id: a.accountId, label: a.label || a.accountId })), sendingEnabled: sendingEnabled(env), outboxScope: principal.sessionId ? createHash('sha256').update(principal.sessionId).digest('hex') : 'basic' });
       if (req.method === 'GET' && path === '/api/models') return json(200, { models: await modelList(), defaultModel: env.HERMES_DEFAULT_MODEL || env.APP_AI_DEFAULT_MODEL || '' });
+      if (req.method === 'GET' && path.startsWith('/api/novedades/')) {
+        const a = accountParam(url.searchParams.get('account'));
+        const result = await readNovedades({ account: a, path, params: url.searchParams, remote, secret: env[a.secretEnv] });
+        if (result.data) return json(200, result.data);
+        const output = novedadesMediaResponse(result.media, req.headers['if-range'] ? null : req.headers.range);
+        res.writeHead(output.status, output.headers);
+        return res.end(output.bytes);
+      }
       if (req.method === 'GET' && path === '/api/media-library') {
         const a = accountParam(url.searchParams.get('account'));
         return json(200, await readMediaLibrary({ account: a.accountId, params: url.searchParams, query }));
@@ -1352,6 +1365,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             caption: item.caption || null,
           };
         }), nextCursor: rows.length === limit ? rows[rows.length - 1]?.wa_timestamp || null : null });
+      }
+      if (req.method === 'GET' && path === '/api/messages/by-date') {
+        const a = accountParam(url.searchParams.get('account'));
+        const conversation = await conversationFor(a, safeChatId(url.searchParams.get('chat')));
+        let range;
+        try { range = validateDayRange(url.searchParams.get('start'), url.searchParams.get('end')); }
+        catch { throw fail(400, 'Invalid date range'); }
+        const rows = await query(MESSAGE_BY_DATE_SQL,
+        [a.accountId, await conversationReadIds(a, conversation), range.start, range.end]);
+        return json(200, {account: a.accountId, chat: conversation.id, messageId: rows[0]?.wa_message_id || rows[0]?.id || null});
       }
       if (req.method === 'GET' && (path === '/api/search' || path === '/api/messages/search' || /^\/api\/chats\/[^/]+\/search$/.test(path))) {
         const a = accountParam(url.searchParams.get('account'));
@@ -1712,28 +1735,27 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
               conversationId: providerChat,
             });
           } else if (kind === 'poll') {
-            const values = Array.isArray(composePayload.options)
-              ? composePayload.options.map(value => required(value, 'option', 512))
-              : [];
-            if (values.length < 2) throw fail(400, 'A poll needs at least two options');
+            let draft;
+            try { draft = pollDraft(composePayload); }
+            catch (error) { throw fail(400, error.message); }
             result = await connector(a, '/messages/poll', {
-              name: required(composePayload.question, 'question', 2000),
-              values,
-              ...(composePayload.selectableCount === undefined ? {} : { selectableCount: boundedInteger(composePayload.selectableCount, 'selectableCount', { max: 50 }) }),
+              name: draft.question,
+              values: draft.options,
+              selectableCount: draft.selectableCount,
+              sendToken: sendToken(body),
               conversationId: providerChat,
             });
           } else {
-            const title = required(composePayload.title, 'title', 2000);
-            const startDate = required(composePayload.dateTime, 'dateTime', 128);
-            if (!Number.isFinite(Date.parse(startDate))) throw fail(400, 'Invalid dateTime');
-            const location = cleanProviderValue(composePayload.location, 2000);
+            let draft;
+            try { draft = eventDraft(composePayload); }
+            catch (error) { throw fail(400, error.message); }
             result = await connector(a, '/messages/event', {
-              name: title,
-              startDate: new Date(startDate).toISOString(),
-              // The UI currently collects free-form place/link text while the
-              // connector accepts geographic coordinates. Preserve that text
-              // in the event description until coordinate input is available.
-              ...(location ? { description: `Lugar: ${location}` } : {}),
+              name: draft.title,
+              startDate: draft.dateTime,
+              ...(draft.description ? {description: draft.description} : {}),
+              ...(draft.endDateTime ? {endDate: draft.endDateTime} : {}),
+              ...(draft.location ? {location: {name: draft.location}} : {}),
+              sendToken: sendToken(body),
               conversationId: providerChat,
             });
           }
@@ -2042,10 +2064,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             if (body.mimeType !== 'image/webp' || bytes.length < 12 || bytes.subarray(0, 4).toString() !== 'RIFF' || bytes.subarray(8, 12).toString() !== 'WEBP') throw fail(400, 'Sticker requires a valid WebP image');
             return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:image/webp;base64,${bytes.toString('base64')}`, fileName: body.name, kind: 'sticker', asSticker: true, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
           }
-          if (featureKind === 'gif') {
+          if (featureKind === 'gif' || body.mimeType === 'image/gif') {
             if (body.mimeType !== 'image/gif') throw fail(400, 'GIF requires an image/gif upload');
             const converted = await gifBytes(bytes);
-            return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:video/mp4;base64,${converted.toString('base64')}`, fileName: body.name || 'animation.mp4', kind: 'gif', gifPlayback: true, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
+            return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:video/mp4;base64,${converted.toString('base64')}`, fileName: body.name.replace(/\.gif$/i, '.mp4'), kind: 'gif', gifPlayback: true, caption, replyTo, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
           }
           if (body.voice) return json(200, await connector(a, '/messages/audio', { conversationId: providerChat, audioBase64: (await voiceBytes(bytes)).toString('base64'), mimeType: 'audio/ogg; codecs=opus', sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
           return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:${body.mimeType};base64,${bytes.toString('base64')}`, fileName: body.name, caption, replyTo, sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));

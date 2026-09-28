@@ -10,7 +10,7 @@ import {
   getPool,
   stripAccountKey,
 } from './db-writer';
-import { storageConversationId } from './durable-message-store';
+import { PIN_ACTION_SQL, storageConversationId } from './durable-message-store';
 import { deserializeDurableValue } from './whatsapp-capabilities';
 import { activePinnedMessages } from './pinned-messages';
 
@@ -32,19 +32,31 @@ export async function listCapturedPins(
     (cursor !== null && (typeof cursor !== 'string' || !cursor || cursor.length > 512))
   )
     throw new Error('Invalid pin page');
+  // Parameters are numbered per branch because PostgreSQL needs a determinable
+  // type for every symbol up to the highest one used: an unreferenced $3 fails
+  // the first page outright, and a nullable OR would push the keyset bound out
+  // of the index condition and into a post-scan filter.
+  const params: unknown[] = [
+    connectorAccount(),
+    accountKey(await canonicalConversationId(storageConversationId(chatId))),
+  ];
+  const filters = [PIN_ACTION_SQL];
+  if (cursor !== null) {
+    params.push(accountKey(cursor));
+    filters.push(`wa_message_id COLLATE "C" > $${params.length}::text COLLATE "C"`);
+  }
+  params.push(limit + 1);
   const result = await getPool().query(
-    `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
-       FROM whatsapp_message_payloads
-      WHERE account = $1 AND conversation_id = $2
-        AND ($3::text IS NULL OR wa_message_id COLLATE "C" > $3::text COLLATE "C")
-        AND jsonb_path_exists(message_payload, '$.**.pinInChatMessage')
-      ORDER BY wa_message_id COLLATE "C" ASC LIMIT $4`,
     [
-      connectorAccount(),
-      accountKey(await canonicalConversationId(storageConversationId(chatId))),
-      cursor === null ? null : accountKey(cursor),
-      limit + 1,
-    ]
+      `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms`,
+      `  FROM whatsapp_message_payloads`,
+      ` WHERE account = $1 AND conversation_id = $2`,
+      // Same expression as idx_whatsapp_message_payloads_pins, so ordinary chat
+      // messages never enter the scan.
+      ...filters.map(filter => `   AND ${filter}`),
+      ` ORDER BY wa_message_id COLLATE "C" ASC LIMIT $${params.length}`,
+    ].join('\n'),
+    params
   );
   const rows = result.rows.slice(0, limit);
   return {

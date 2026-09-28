@@ -9,9 +9,15 @@ import {
   buildPollMessage,
   buildPresenceSnapshot,
   buildPrivacyUpdate,
+  POLL_MAX_OPTIONS,
+  POLL_MIN_OPTIONS,
+  POLL_OPTION_MAX_LENGTH,
+  POLL_QUESTION_MAX_LENGTH,
   normalizeCapabilityAction,
   serializeDurableValue,
   deserializeDurableValue,
+  validateEventLocation,
+  validatePollInput,
 } from './whatsapp-capabilities';
 
 test('chat modifications use the Baileys lastMessages contract', () => {
@@ -37,8 +43,14 @@ test('chat modifications use the Baileys lastMessages contract', () => {
 });
 
 test('poll, event, and contact payloads preserve typed Baileys fields', () => {
-  const poll = buildPollMessage({ name: 'Availability', values: ['Yes', 'No'], selectableCount: 1 });
-  assert.deepEqual(poll, { poll: { name: 'Availability', values: ['Yes', 'No'], selectableCount: 1 } });
+  const poll = buildPollMessage({
+    name: 'Availability',
+    values: ['Yes', 'No'],
+    selectableCount: 1,
+  });
+  assert.deepEqual(poll, {
+    poll: { name: 'Availability', values: ['Yes', 'No'], selectableCount: 1 },
+  });
 
   const event = buildEventMessage({
     name: 'Release',
@@ -60,7 +72,10 @@ test('presence snapshots omit unknown lastSeen instead of inventing a timestamp'
     status: 'available',
   });
   assert.deepEqual(
-    buildPresenceSnapshot('34600@c.us', { lastKnownPresence: 'unavailable', lastSeen: 1_700_000_000 }),
+    buildPresenceSnapshot('34600@c.us', {
+      lastKnownPresence: 'unavailable',
+      lastSeen: 1_700_000_000,
+    }),
     { chatId: '34600@c.us', status: 'unavailable', lastSeen: 1_700_000_000 }
   );
 });
@@ -76,7 +91,8 @@ test('privacy update validates only provider-supported values', () => {
   });
   assert.throws(
     () => buildPrivacyUpdate('lastSeen', 'invented'),
-    (error: unknown) => error instanceof CapabilityError && error.code === 'INVALID_CAPABILITY_INPUT'
+    (error: unknown) =>
+      error instanceof CapabilityError && error.code === 'INVALID_CAPABILITY_INPUT'
   );
 });
 
@@ -102,4 +118,161 @@ test('action aliases stay explicit and do not silently become sends', () => {
   assert.equal(normalizeCapabilityAction('unarchive'), 'unarchive');
   assert.equal(normalizeCapabilityAction('unknown'), null);
   assert.equal(proto.Message.ProtocolMessage.Type.MESSAGE_EDIT, 14);
+});
+
+const invalid = (error: unknown) =>
+  error instanceof CapabilityError && error.code === 'INVALID_CAPABILITY_INPUT';
+
+/**
+ * The numbers the official FAQ states (question 255, up to 12 options, option
+ * 100) are pinned here so a later "cleanup" cannot quietly widen them and start
+ * producing polls the provider rejects after the relay.
+ * https://faq.whatsapp.com/796470361614974
+ */
+test('poll limits match the published WhatsApp limits', () => {
+  assert.deepEqual(
+    {
+      question: POLL_QUESTION_MAX_LENGTH,
+      option: POLL_OPTION_MAX_LENGTH,
+      minOptions: POLL_MIN_OPTIONS,
+      maxOptions: POLL_MAX_OPTIONS,
+    },
+    { question: 255, option: 100, minOptions: 2, maxOptions: 12 }
+  );
+});
+
+test('buildPollMessage refuses what the provider would refuse instead of trimming it down', () => {
+  // The route is not the only caller: a caller that skips validation still
+  // cannot put an out-of-band poll on the wire.
+  assert.throws(
+    () =>
+      buildPollMessage({
+        name: 'Comida?',
+        values: Array.from({ length: POLL_MAX_OPTIONS + 1 }, (_v, i) => `o${i}`),
+      }),
+    invalid
+  );
+  assert.throws(() => buildPollMessage({ name: 'Comida?', values: ['Pizza'] }), invalid);
+  assert.throws(() => buildPollMessage({ name: 'Comida?', values: ['Pizza', ' Pizza '] }), invalid);
+  assert.throws(
+    () => buildPollMessage({ name: 'Comida?', values: ['Pizza', 'x'.repeat(101)] }),
+    invalid
+  );
+  assert.throws(() => buildPollMessage({ name: '   ', values: ['Pizza', 'Sushi'] }), invalid);
+  assert.throws(
+    () => buildPollMessage({ name: 'Comida?', values: ['Pizza', 'Sushi'], selectableCount: 3 }),
+    invalid
+  );
+
+  const widest = buildPollMessage({
+    name: 'q'.repeat(POLL_QUESTION_MAX_LENGTH),
+    values: ['x'.repeat(POLL_OPTION_MAX_LENGTH), ...Array.from({ length: 11 }, (_v, i) => `o${i}`)],
+    selectableCount: POLL_MAX_OPTIONS,
+  });
+  assert.equal((widest.poll as { values: string[] }).values.length, POLL_MAX_OPTIONS);
+
+  // The secret is the poll's encryption key, so a caller that supplies one keeps it.
+  const secret = new Uint8Array(32).fill(4);
+  assert.deepEqual(
+    buildPollMessage({ name: 'Q', values: ['a', 'b'], messageSecret: secret }).poll,
+    {
+      name: 'Q',
+      values: ['a', 'b'],
+      messageSecret: secret,
+    }
+  );
+  assert.equal(
+    'messageSecret' in (buildPollMessage({ name: 'Q', values: ['a', 'b'] }).poll as object),
+    false
+  );
+});
+
+test('validatePollInput reports the offending field so the composer can show it', () => {
+  for (const [values, field] of [
+    [['Pizza'], 'values'],
+    [['Pizza', ''], 'values'],
+    [['Pizza', 'Pizza'], 'values'],
+    [['Pizza', 'Sushi'], 'selectableCount'],
+  ] as const) {
+    assert.throws(
+      () =>
+        validatePollInput({
+          name: 'Comida?',
+          values,
+          selectableCount: field === 'values' ? undefined : 9,
+        }),
+      invalid,
+      String(field)
+    );
+  }
+  assert.deepEqual(validatePollInput({ name: '  Comida?  ', values: [' Pizza ', 'Sushi'] }), {
+    name: 'Comida?',
+    values: ['Pizza', 'Sushi'],
+  });
+});
+
+test('event location keeps a typed place separate from a map pin', () => {
+  assert.equal(validateEventLocation(undefined), undefined);
+  assert.equal(validateEventLocation(null), undefined);
+  assert.deepEqual(validateEventLocation({ name: ' Bar Luna ' }), { name: 'Bar Luna' });
+  assert.equal(validateEventLocation({ name: '   ' }), undefined);
+  assert.deepEqual(validateEventLocation({ degreesLatitude: 0, degreesLongitude: 0 }), {
+    degreesLatitude: 0,
+    degreesLongitude: 0,
+  });
+  assert.deepEqual(
+    validateEventLocation({ degreesLatitude: 40.4168, degreesLongitude: -3.7038, name: 'Oficina' }),
+    { degreesLatitude: 40.4168, degreesLongitude: -3.7038, name: 'Oficina' }
+  );
+  for (const location of [
+    'Bar Luna',
+    ['Bar', 'Luna'],
+    { degreesLatitude: 40.4 },
+    { degreesLongitude: -3.7 },
+    { degreesLatitude: 90.1, degreesLongitude: 0 },
+    { degreesLatitude: -90.1, degreesLongitude: 0 },
+    { degreesLatitude: 40.4, degreesLongitude: 180.1 },
+    { degreesLatitude: 40.4, degreesLongitude: Number.NaN },
+    { degreesLatitude: '', degreesLongitude: '' },
+    { degreesLatitude: ' ', degreesLongitude: 0 },
+    { degreesLatitude: false, degreesLongitude: false },
+    { degreesLatitude: [], degreesLongitude: [] },
+  ]) {
+    assert.throws(() => validateEventLocation(location), invalid, JSON.stringify(location));
+  }
+});
+
+test('buildEventMessage keeps one instant per field and drops blanks instead of sending them', () => {
+  const start = new Date('2026-09-28T16:00:00Z');
+  const same = buildEventMessage({ name: 'Cena', startDate: start, endDate: start });
+  assert.equal(same.event.endDate.toISOString(), start.toISOString());
+  assert.throws(
+    () =>
+      buildEventMessage({
+        name: 'Cena',
+        startDate: start,
+        endDate: new Date('2026-09-28T15:59:59Z'),
+      }),
+    invalid
+  );
+
+  const drafted = buildEventMessage({
+    name: ' Cena ',
+    description: '   ',
+    startDate: start,
+    location: { name: 'Bar Luna' },
+    call: 'audio',
+    isCancelled: false,
+    extraGuestsAllowed: true,
+  });
+  assert.equal(drafted.event.name, 'Cena');
+  assert.equal('description' in drafted.event, false);
+  assert.deepEqual(drafted.event.location, { name: 'Bar Luna' });
+  assert.equal(drafted.event.call, 'audio');
+  assert.equal(drafted.event.isCancelled, false);
+  assert.equal(drafted.event.extraGuestsAllowed, true);
+  assert.throws(
+    () => buildEventMessage({ name: 'Cena', startDate: start, location: 'Bar Luna' }),
+    invalid
+  );
 });

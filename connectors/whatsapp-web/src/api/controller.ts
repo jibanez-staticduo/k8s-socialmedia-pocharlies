@@ -31,6 +31,7 @@ import { ProfileError } from '../profile-service';
 import { CommunityError } from '../novedades-communities';
 import { EventSendError, sendEventResponseOnce, type EventSendInput } from '../event-send';
 import { PinSendError, sendPinOnce } from '../pinned-send';
+import { sendEventOnce, sendPollOnce, StructuredSendError } from '../structured-send';
 import {
   claimSendAttempt,
   confirmTextSend,
@@ -39,6 +40,211 @@ import {
   reserveVoiceSend,
   SendAlreadyClaimedError,
 } from '../send-idempotency';
+import {
+  NOVEDADES_MEDIA_MAX_BYTES,
+  NovedadesReaderError,
+  avatarHostAllowed,
+  createNovedadesReader,
+  novedadesErrorBody,
+  parseByteRange,
+  type NovedadesPorts,
+  type NovedadesReader,
+} from '../novedades-reader';
+
+/* --------------------------------------------------------------------------
+ * Novedades read routes: local store only, no WhatsApp traffic
+ * ------------------------------------------------------------------------ */
+
+/** The app proxy abandons a connector call at 30 s, so stop before it does. */
+function novedadesDeadlineMs(): number {
+  const raw = Number(process.env.NOVEDADES_MEDIA_DEADLINE_MS || 22000);
+  return Number.isSafeInteger(raw) && raw >= 1000 && raw <= 28000 ? raw : 22000;
+}
+
+function novedadesAvatarTimeoutMs(): number {
+  const raw = Number(process.env.NOVEDADES_AVATAR_TIMEOUT_MS || 15000);
+  return Number.isSafeInteger(raw) && raw >= 1000 && raw <= 28000 ? raw : 15000;
+}
+
+function novedadesSuccess<T extends object>(res: Response, data: T): void {
+  res.json({ ok: true, ...data });
+}
+
+function novedadesFailure(res: Response, error: unknown): void {
+  const { status, body } = novedadesErrorBody(error);
+  res.status(status).json(body);
+}
+
+/** Turns a hung provider call into an honest 504 inside the caller's budget. */
+function novedadesWithDeadline<T>(
+  work: () => Promise<T>,
+  ms: number,
+  code: string,
+  message: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new NovedadesReaderError(code, message, 504)), ms);
+  });
+  return Promise.race([
+    work().finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    guard,
+  ]);
+}
+
+function novedadesPorts(client: BaileysClient): NovedadesPorts {
+  const ports: NovedadesPorts = { ownJid: () => client.ownJid };
+  if (typeof client.downloadNovedadesMedia === 'function') {
+    ports.downloadMedia = request => {
+      if (typeof client.isConnected === 'function' && !client.isConnected())
+        throw new NovedadesReaderError(
+          'NOVEDADES_SESSION_DOWN',
+          'This WhatsApp session is not connected, so media cannot be fetched',
+          503
+        );
+      return novedadesWithDeadline(
+        () =>
+          client.downloadNovedadesMedia({
+            key: request.key,
+            message: request.message,
+          } as unknown as Parameters<typeof client.downloadNovedadesMedia>[0]),
+        novedadesDeadlineMs(),
+        'NOVEDADES_MEDIA_TIMEOUT',
+        'The media download exceeded the connector deadline; nothing was sent to WhatsApp'
+      );
+    };
+  }
+  ports.fetchAvatar = fetchNovedadesAvatar;
+  return ports;
+}
+
+/**
+ * Fetches a stored avatar over https. A stored reference is data, not a
+ * permission: the host is re-checked after redirects so a provider CDN cannot
+ * bounce this connector to an internal address, and the size cap is applied
+ * before the body is buffered.
+ */
+export async function fetchNovedadesAvatar(url: string): Promise<Buffer | null> {
+  const signal = AbortSignal.timeout(novedadesAvatarTimeoutMs());
+  let response: Awaited<ReturnType<typeof fetch>> | undefined;
+  try {
+    for (let redirects = 0; redirects <= 3; redirects++) {
+      const target = new URL(url);
+      if (target.protocol !== 'https:' || !avatarHostAllowed(target))
+        throw new NovedadesReaderError(
+          'NOVEDADES_AVATAR_UNAVAILABLE',
+          'Avatar host is not allowed',
+          404
+        );
+      response = await fetch(target, { redirect: 'manual', signal });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      await response.body?.cancel();
+      const location = response.headers.get('location');
+      if (!location || redirects === 3)
+        throw new NovedadesReaderError(
+          'NOVEDADES_AVATAR_UNAVAILABLE',
+          'Avatar redirect is unavailable',
+          404
+        );
+      // Validate the next target before any network request, not after following it.
+      url = new URL(location, target).href;
+    }
+    if (!response?.ok) {
+      await response?.body?.cancel();
+      return null;
+    }
+    const declared = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > NOVEDADES_MEDIA_MAX_BYTES) {
+      await response.body?.cancel();
+      throw new NovedadesReaderError(
+        'NOVEDADES_MEDIA_TOO_LARGE',
+        'Avatar exceeds the download size cap',
+        413
+      );
+    }
+    if (!response.body) return null;
+    const reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let size = 0;
+    try {
+      let done = false;
+      while (!done) {
+        const chunk = await reader.read();
+        done = chunk.done;
+        if (done) break;
+        const value = chunk.value;
+        size += value.byteLength;
+        if (size > NOVEDADES_MEDIA_MAX_BYTES)
+          throw new NovedadesReaderError(
+            'NOVEDADES_MEDIA_TOO_LARGE',
+            'Avatar exceeds the download size cap',
+            413
+          );
+        chunks.push(Buffer.from(value));
+      }
+      return size ? Buffer.concat(chunks, size) : null;
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  } catch (error) {
+    if (error instanceof NovedadesReaderError) throw error;
+    const name = (error as { name?: string } | null)?.name;
+    if (name === 'TimeoutError' || name === 'AbortError')
+      throw new NovedadesReaderError(
+        'NOVEDADES_AVATAR_TIMEOUT',
+        'The avatar host exceeded the connector deadline',
+        504
+      );
+    throw new NovedadesReaderError(
+      'NOVEDADES_AVATAR_FAILED',
+      'The avatar host could not be reached',
+      502
+    );
+  }
+}
+
+/**
+ * Binary media for direct clients (`raw=1`). A single satisfiable range gets
+ * 206 with the exact slice; a present but unsatisfiable one gets 416; anything
+ * the parser does not recognize is served whole, which is what the caller can
+ * safely fall back to.
+ */
+function novedadesRawMedia(
+  res: Response,
+  media: { bytes: Buffer; mimeType: string; fileName: string | null },
+  rangeHeader: unknown
+): void {
+  const size = media.bytes.length;
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Content-Type', media.mimeType || 'application/octet-stream');
+  if (media.fileName)
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename*=UTF-8''${encodeURIComponent(media.fileName)}`
+    );
+  const header = typeof rangeHeader === 'string' ? rangeHeader.trim() : undefined;
+  const single = header !== undefined && /^bytes=(\d*)-(\d*)$/.test(header);
+  if (single) {
+    const range = parseByteRange(header, size);
+    if (!range) {
+      res.setHeader('Content-Range', `bytes */${size}`);
+      res.status(416).end();
+      return;
+    }
+    const slice = media.bytes.subarray(range.start, range.end + 1);
+    res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+    res.setHeader('Content-Length', String(slice.length));
+    res.status(206).send(slice);
+    return;
+  }
+  res.setHeader('Content-Length', String(size));
+  res.status(200).send(media.bytes);
+}
 
 function statusForSendFailure(
   failureClass: WhatsAppSendFailureClass | 'disabled_sending' | 'invalid_request'
@@ -64,6 +270,13 @@ function capabilityErrorResponse(res: Response, error: unknown): void {
     res
       .status(error.status)
       .json({ ok: false, error: { code: error.code, message: error.message } });
+    return;
+  }
+  if (error instanceof StructuredSendError) {
+    res.status(error.status).json({
+      ok: false,
+      error: { code: error.code, message: error.message, details: error.details || undefined },
+    });
     return;
   }
   if (error instanceof CommunityError) {
@@ -317,12 +530,15 @@ load();
 export function createRouter(
   client: BaileysClient,
   qrHandler: QRHandler,
-  sharedSecret: string
+  sharedSecret: string,
+  /** Test seam: a reader bound to another store. Defaults to the live store. */
+  novedadesReader?: NovedadesReader
 ): express.Router {
   const router = express.Router();
   router.use(createConnectorAccess(sharedSecret));
   const auth = createHMACAuth(sharedSecret);
   const manualOpenAuth = createManualOpenAuth(auth, sharedSecret);
+  const novedades = novedadesReader ?? createNovedadesReader({ ports: novedadesPorts(client) });
 
   // Detailed health requires authentication; access middleware provides anonymous liveness.
   router.get('/health', (_req: Request, res: Response) => {
@@ -1890,16 +2106,17 @@ export function createRouter(
           return;
         }
         const body = (req.body || {}) as Record<string, unknown>;
-        const chatId = optionalString(body.conversationId || body.chatId);
-        if (!chatId)
-          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'conversationId is required');
-        const messageId = await client.sendPoll(chatId, {
-          name: optionalString(body.name) || '',
-          values: Array.isArray(body.values) ? body.values.map(String) : [],
-          selectableCount:
-            body.selectableCount === undefined ? undefined : Number(body.selectableCount),
-        });
-        res.json({ ok: true, messageId, sent: true });
+        const result = await sendPollOnce(
+          {
+            token: body.sendToken,
+            conversationId: optionalString(body.conversationId) || optionalString(body.chatId),
+            name: body.name,
+            values: body.values,
+            selectableCount: body.selectableCount,
+          },
+          { send: (input, id, beforeSend) => client.sendPoll(input, id, beforeSend) }
+        );
+        res.json({ ok: true, sent: true, ...result });
       } catch (error) {
         capabilityErrorResponse(res, error);
       }
@@ -2091,34 +2308,22 @@ export function createRouter(
           return;
         }
         const body = (req.body || {}) as Record<string, unknown>;
-        const chatId = optionalString(body.conversationId || body.chatId);
-        const startDate = new Date(String(body.startDate || ''));
-        const locationValue =
-          body.location && typeof body.location === 'object' && !Array.isArray(body.location)
-            ? (body.location as Record<string, unknown>)
-            : undefined;
-        if (!chatId)
-          throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'conversationId is required');
-        const messageId = await client.sendEvent(chatId, {
-          name: optionalString(body.name) || '',
-          description: optionalString(body.description),
-          startDate,
-          endDate: body.endDate ? new Date(String(body.endDate)) : undefined,
-          location: locationValue
-            ? {
-                degreesLatitude: Number(locationValue.degreesLatitude),
-                degreesLongitude: Number(locationValue.degreesLongitude),
-                ...(optionalString(locationValue.name)
-                  ? { name: optionalString(locationValue.name) }
-                  : {}),
-              }
-            : undefined,
-          call: body.call === 'audio' || body.call === 'video' ? body.call : undefined,
-          isCancelled: body.isCancelled === undefined ? undefined : Boolean(body.isCancelled),
-          extraGuestsAllowed:
-            body.extraGuestsAllowed === undefined ? undefined : Boolean(body.extraGuestsAllowed),
-        });
-        res.json({ ok: true, messageId, sent: true });
+        const result = await sendEventOnce(
+          {
+            token: body.sendToken,
+            conversationId: optionalString(body.conversationId) || optionalString(body.chatId),
+            name: body.name,
+            description: body.description,
+            startDate: body.startDate,
+            endDate: body.endDate,
+            location: body.location,
+            call: body.call,
+            isCancelled: body.isCancelled,
+            extraGuestsAllowed: body.extraGuestsAllowed,
+          },
+          { send: (input, id, beforeSend) => client.sendEvent(input, id, beforeSend) }
+        );
+        res.json({ ok: true, sent: true, ...result });
       } catch (error) {
         capabilityErrorResponse(res, error);
       }
@@ -2212,5 +2417,138 @@ export function createRouter(
       })();
     }
   );
+
+  /* Novedades: reads only. Nothing on these paths writes to WhatsApp, and the
+   * store scopes every query to this connector's own account. */
+  router.get('/novedades/status/authors', auth, (_req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        novedadesSuccess(res, await novedades.statusAuthors());
+      } catch (error) {
+        novedadesFailure(res, error);
+      }
+    })();
+  });
+
+  router.get('/novedades/status', auth, (req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        novedadesSuccess(
+          res,
+          await novedades.statuses({
+            author: req.query.author,
+            limit: req.query.limit,
+            cursor: req.query.cursor,
+            includeExpired: req.query.includeExpired,
+            unreadOnly: req.query.unreadOnly,
+            includeDeleted: req.query.includeDeleted,
+            visibility: req.query.visibility,
+          })
+        );
+      } catch (error) {
+        novedadesFailure(res, error);
+      }
+    })();
+  });
+
+  router.get('/novedades/channels', auth, (req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        novedadesSuccess(
+          res,
+          await novedades.channels({ limit: req.query.limit, cursor: req.query.cursor })
+        );
+      } catch (error) {
+        novedadesFailure(res, error);
+      }
+    })();
+  });
+
+  router.get('/novedades/channels/:jid/posts', auth, (req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        novedadesSuccess(
+          res,
+          await novedades.posts({
+            channelJid: req.params.jid,
+            limit: req.query.limit,
+            cursor: req.query.cursor,
+            includeDeleted: req.query.includeDeleted,
+            visibility: req.query.visibility,
+          })
+        );
+      } catch (error) {
+        novedadesFailure(res, error);
+      }
+    })();
+  });
+
+  router.get(
+    '/novedades/channels/:jid/posts/:messageId',
+    auth,
+    (req: AuthenticatedRequest, res: Response) => {
+      void (async () => {
+        try {
+          const item = await novedades.post({
+            channelJid: req.params.jid,
+            messageId: req.params.messageId,
+          });
+          res.json({ ok: true, account: connectorAccount(), item });
+        } catch (error) {
+          novedadesFailure(res, error);
+        }
+      })();
+    }
+  );
+
+  router.get('/novedades/media', auth, (req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        // Status and channel media travel over the live WhatsApp socket, so a
+        // disconnected session answers 503 before any store read; the avatar
+        // kind is a plain https CDN fetch and stays available while offline.
+        const kind = String(req.query.kind ?? '')
+          .trim()
+          .toLowerCase();
+        if (
+          (kind === 'channel' || kind === 'status') &&
+          typeof client.isConnected === 'function' &&
+          !client.isConnected()
+        )
+          throw new NovedadesReaderError(
+            'NOVEDADES_SESSION_DOWN',
+            'This WhatsApp session is not connected, so media cannot be fetched',
+            503
+          );
+        const media = await novedades.media({
+          kind: req.query.kind,
+          jid: req.query.jid,
+          messageId: req.query.messageId,
+        });
+        const raw = ['1', 'true', 'yes'].includes(
+          String(req.query.raw ?? '')
+            .trim()
+            .toLowerCase()
+        );
+        if (raw) {
+          novedadesRawMedia(res, media, req.headers.range);
+          return;
+        }
+        res.json({
+          ok: true,
+          account: connectorAccount(),
+          data: {
+            base64: media.bytes.toString('base64'),
+            size: media.bytes.length,
+            mimeType: media.mimeType,
+            fileName: media.fileName,
+          },
+        });
+      } catch (error) {
+        novedadesFailure(res, error);
+      }
+    })();
+  });
+
   return router;
 }

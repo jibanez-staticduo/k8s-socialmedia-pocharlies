@@ -3,6 +3,10 @@
 import { createPageFetcher, exportConversationText, ChatExportCanceled } from './chat-export.mjs';
 import { installNotificationSettings } from './notification-settings.mjs';
 import { installContactDirectoryUI } from './contact-directory-ui.mjs';
+import { createPollComposer } from './poll-composer.mjs';
+import { createEventComposer } from './event-composer.mjs';
+import { localDayRange } from './message-date.mjs';
+import { createEmojiPicker } from './emoji-picker.mjs';
 
 /*
  * Feature UI for the selected WhatsApp Web inventory.  The module owns the
@@ -35,7 +39,6 @@ export const FEATURE_CONTRACT = Object.freeze({
 });
 
 const STORAGE_PREFIX = 'socialmedia-wa-features:';
-const LOCAL_EMOJIS = ['😀', '😂', '🥹', '😊', '😍', '😎', '🤝', '👏', '🙌', '❤️', '🔥', '👍', '👎', '🎉', '✅', '🙏', '💡', '👀', '😅', '🤔', '😭', '😡', '💚', '✨'];
 const MESSAGE_URL_RE = /https?:\/\/[^\s<]+/gi;
 
 function text(value) {
@@ -400,6 +403,7 @@ export function installFeatureUI({
   setChat = () => {},
   showError = () => {},
   openCamera = () => {},
+  stageFiles = () => false,
   isMessagePinned = () => false,
   onPinsChange = async () => {},
   onOpen = () => {},
@@ -810,6 +814,44 @@ export function installFeatureUI({
     submit.type = 'submit';
     form.append(input.wrapper, scope, submit);
     const results = node('div', 'feature-search-results');
+    const dateForm = node('form', 'feature-search-date');
+    const date = field(documentRef, 'Ir a la fecha', 'date', 'date');
+    const refreshToday = () => {
+      const today = new Date();
+      const pad = value => String(value).padStart(2, '0');
+      date.input.max = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    };
+    refreshToday();
+    date.input.addEventListener('focus', refreshToday);
+    date.input.addEventListener('pointerdown', refreshToday);
+    date.input.addEventListener('input', refreshToday);
+    date.input.required = true;
+    const jump = button(documentRef, 'Ir', 'feature-button'); jump.type = 'submit';
+    const dateStatus = node('p', 'feature-muted'); dateStatus.setAttribute('role', 'status');
+    dateForm.append(date.wrapper, jump, dateStatus);
+    let jumping = false;
+    dateForm.onsubmit = async event => {
+      event.preventDefault(); if (jumping) return;
+      refreshToday();
+      const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
+      const current = () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation;
+      jumping = true; jump.disabled = true; date.input.disabled = true; dateStatus.textContent = 'Buscando...';
+      try {
+        if (date.input.value > date.input.max) throw new Error('Elige una fecha anterior o igual a hoy.');
+        const range = localDayRange(date.input.value);
+        const result = await request('/api/messages/by-date', undefined, {chat: context.chat, ...range});
+        if (!current()) return;
+        if (!result.messageId) {dateStatus.textContent = 'No hay mensajes sincronizados de ese d\u00eda.'; return;}
+        const found = await showHistoricalMessage(text(result.messageId));
+        if (!current()) return;
+        if (found === false) throw new Error('No se pudo cargar el mensaje.');
+        closeModal();
+        const target = runtime.currentMessages.find(message => [message.id, message.waMessageId].some(id => text(id) === text(result.messageId)));
+        const bubble = [...documentRef.querySelectorAll('#messages [data-message-id]')].find(node => node.dataset.messageId === text(target?.id || result.messageId));
+        bubble?.focus?.({preventScroll: true});
+      } catch (error) {if (current()) dateStatus.textContent = error.message || 'No se pudo buscar la fecha.';}
+      finally {jumping = false; jump.disabled = false; date.input.disabled = false;}
+    };
     scope.onchange = () => { ++searchVersion; results.replaceChildren(); };
     form.onsubmit = event => {
       event.preventDefault();
@@ -877,7 +919,7 @@ export function installFeatureUI({
       more.onclick = loadPage;
       void loadPage();
     };
-    modal.body.append(form, results);
+    modal.body.append(form, dateForm, results);
   }
 
   function replyTo(message) {
@@ -973,13 +1015,16 @@ export function installFeatureUI({
   async function reactTo(message, emoji) {
     const result = await mutate('/api/messages/react', { messageId: message.id, emoji }, { refreshMessages: true, success: `Reacción ${emoji} guardada.` });
     if (result) closeModal();
+    return Boolean(result);
   }
 
   function openReactionPicker(message) {
     const modal = openModal('Reaccionar', { opener: documentRef.activeElement });
-    const grid = node('div', 'feature-emoji-grid');
-    for (const emoji of LOCAL_EMOJIS) { const item = button(documentRef, emoji, 'feature-emoji'); item.setAttribute('aria-label', `Reaccionar con ${emoji}`); item.onclick = () => reactTo(message, emoji); grid.append(item); }
-    modal.body.append(grid);
+    const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
+    modal.body.append(createEmojiPicker({documentRef, account: context.account,
+      isCurrent: () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation,
+      onSelect: emoji => reactTo(message, emoji),
+    }));
   }
 
   function openForwardPicker(ids) {
@@ -1336,10 +1381,20 @@ export function installFeatureUI({
     const modal = openModal('Emoji, GIF y stickers', { wide: true });
     const tabs = node('nav', 'feature-picker-tabs');
     const content = node('div', 'feature-picker-content');
-    const renderEmoji = () => { content.replaceChildren(); const grid = node('div', 'feature-emoji-grid'); for (const emoji of LOCAL_EMOJIS) { const item = button(documentRef, emoji, 'feature-emoji'); item.onclick = () => insertEmoji(emoji); grid.append(item); } content.append(grid); };
+    const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
+    const isCurrent = () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation;
+    const renderEmoji = () => { content.replaceChildren(createEmojiPicker({documentRef, account: context.account, isCurrent, onSelect: insertEmoji})); };
     const renderUpload = (kind, accept) => {
-      content.replaceChildren(node('p', 'feature-muted', `Selecciona un archivo local de ${kind}. No se usa un servicio externo.`));
+      content.replaceChildren(node('p', 'feature-muted', kind === 'GIF' ? 'El GIF se prepara junto al mensaje para revisarlo antes de enviar.' : `Selecciona un archivo local de ${kind}. No se usa un servicio externo.`));
       const input = documentRef.createElement('input'); input.type = 'file'; input.accept = accept; input.setAttribute('aria-label', `Subir ${kind}`);
+      if (kind === 'GIF') {
+        input.onchange = () => {
+          if (!isCurrent() || !input.files?.length) return;
+          if (stageFiles([...input.files])) closeModal();
+        };
+        content.append(input);
+        return;
+      }
       const send = button(documentRef, `Enviar ${kind}`, 'feature-button primary'); send.disabled = true;
       let sendToken = '';
       input.onchange = () => { runtime.composeFile = input.files?.[0] || null; sendToken = ''; send.disabled = !runtime.composeFile; };
@@ -1373,13 +1428,27 @@ export function installFeatureUI({
   function openShare(type) {
     const labels = { contact: 'Compartir contacto', poll: 'Crear encuesta', event: 'Crear evento' };
     const modal = openModal(labels[type] || 'Compartir', { opener: documentRef.activeElement });
+    if (type === 'poll' || type === 'event') {
+      modal.dialog.classList.add('feature-dialog-poll');
+      const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
+      const isCurrent = () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation;
+      const createComposer = type === 'poll' ? createPollComposer : createEventComposer;
+      modal.body.append(createComposer({documentRef, isCurrent,
+        submit: async (payload, sendToken) => {
+          const result = await request('/api/messages/compose', {kind: type, payload, sendToken});
+          if (result.confirmed !== true && result.sent !== true) throw new Error('No se ha confirmado el envío.');
+        },
+        onSent: () => {closeModal(); void loadMessages();},
+      }));
+      return;
+    }
     const form = node('form', 'feature-form');
-    const fields = type === 'contact' ? [field(documentRef, 'Nombre', 'text', 'name'), field(documentRef, 'Número o identificador', 'text', 'address')] : type === 'poll' ? [field(documentRef, 'Pregunta', 'text', 'question'), field(documentRef, 'Opciones separadas por comas', 'text', 'options')] : [field(documentRef, 'Título', 'text', 'title'), field(documentRef, 'Fecha y hora', 'datetime-local', 'dateTime'), field(documentRef, 'Lugar o enlace', 'text', 'location')];
-    const submit = button(documentRef, `Enviar ${type === 'contact' ? 'contacto' : type === 'poll' ? 'encuesta' : 'evento'}`, 'feature-button primary');
+    const fields = [field(documentRef, 'Nombre', 'text', 'name'), field(documentRef, 'Número o identificador', 'text', 'address')];
+    const submit = button(documentRef, 'Enviar contacto', 'feature-button primary');
     submit.type = 'submit';
     for (const item of fields) form.append(item.wrapper); form.append(submit);
     let lastPayload = ''; let sendToken = '';
-    form.onsubmit = async event => { event.preventDefault(); const values = formData(form); if (type === 'poll') values.options = values.options.split(',').map(item => item.trim()).filter(Boolean); const signature = JSON.stringify(values); if (signature !== lastPayload) { sendToken = crypto.randomUUID(); lastPayload = signature; } const result = await mutate('/api/messages/compose', { kind: type, payload: values, sendToken }, { refreshMessages: true, success: 'Contenido preparado para enviar.' }); if (result) closeModal(); };
+    form.onsubmit = async event => { event.preventDefault(); const values = formData(form); const signature = JSON.stringify(values); if (signature !== lastPayload) { sendToken = crypto.randomUUID(); lastPayload = signature; } const result = await mutate('/api/messages/compose', { kind: type, payload: values, sendToken }, { refreshMessages: true, success: 'Contenido preparado para enviar.' }); if (result) closeModal(); };
     modal.body.append(form, node('p', 'feature-muted', 'La entrega queda confirmada por el proveedor; no se muestra como enviada antes de esa respuesta.'));
   }
 

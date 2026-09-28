@@ -275,6 +275,13 @@ async function fulfillApi(route, state) {
     try { chatFor(state, account, chat); } catch { return jsonResponse(route, responseError('Chat is not permitted', 'ACCOUNT_FORBIDDEN'), 403); }
     return jsonResponse(route, { account, chat, messages: clone(state.messages[chat] || []) });
   }
+  if (pathName === '/api/messages/by-date' && request.method() === 'GET') {
+    const chat = url.searchParams.get('chat');
+    if (account !== 'alpha' || chat !== 'alpha-direct') return jsonResponse(route, responseError('Chat is not permitted', 'ACCOUNT_FORBIDDEN'), 403);
+    state.dateStarted = true;
+    if (state.nextDateGate) await state.nextDateGate.promise;
+    return jsonResponse(route, {account, chat, messageId: url.searchParams.get('start').startsWith('2025-01-01') ? 'old-wa' : null});
+  }
   if (pathName === '/api/messages/around' && request.method() === 'GET') {
     const chat = url.searchParams.get('chat');
     const messageId = url.searchParams.get('messageId');
@@ -778,6 +785,66 @@ async function runDesktop(page, state, report) {
     await closeDialog(page);
   });
 
+  await check('date navigation loads historical messages and reports empty synchronized days', async () => {
+    await openChat(page, 'Ana Fixture');
+    await page.locator('#feature-chat-search').click();
+    let search = await dialog(page, /Buscar mensajes/i);
+    await search.getByLabel('Ir a la fecha', {exact:true}).fill('2025-01-02');
+    await search.getByRole('button', {name:'Ir',exact:true}).click();
+    await search.getByRole('status').filter({hasText:'No hay mensajes sincronizados'}).waitFor();
+    await search.getByLabel('Ir a la fecha', {exact:true}).fill('2025-01-01');
+    await search.getByRole('button', {name:'Ir',exact:true}).click();
+    await page.locator('#messages [data-message-id="old-db"]').waitFor();
+    await search.waitFor({state:'detached'});
+    assert.equal(await page.locator('#messages [data-message-id="old-db"]').evaluate(node => document.activeElement === node), true);
+  });
+
+  await check('date navigation refreshes today after the panel crosses midnight', async () => {
+    await openChat(page, 'Ana Fixture');
+    await page.locator('#feature-chat-search').click();
+    const search = await dialog(page, /Buscar mensajes/i);
+    const date = search.getByLabel('Ir a la fecha', {exact:true});
+    const expected = await page.evaluate(() => {
+      const OriginalDate = Date;
+      const tomorrow = new OriginalDate();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      window.restoreDateForTest = () => { window.Date = OriginalDate; };
+      window.Date = class extends OriginalDate {
+        constructor(...args) { super(...(args.length ? args : [tomorrow.getTime()])); }
+        static now() { return tomorrow.getTime(); }
+      };
+      const pad = value => String(value).padStart(2, '0');
+      return `${tomorrow.getFullYear()}-${pad(tomorrow.getMonth() + 1)}-${pad(tomorrow.getDate())}`;
+    });
+    try {
+      await date.focus();
+      assert.equal(await date.getAttribute('max'), expected);
+      await date.fill(expected);
+      assert(await date.evaluate(input => input.validity.valid));
+    } finally {
+      await page.evaluate(() => { window.restoreDateForTest(); delete window.restoreDateForTest; });
+      await closeDialog(page);
+    }
+  });
+
+  await check('late date lookup cannot navigate after the search panel closes', async () => {
+    await openChat(page, 'Ana Fixture');
+    await page.locator('#feature-chat-search').click();
+    const search = await dialog(page, /Buscar mensajes/i);
+    const gate = deferred(); state.nextDateGate = gate; state.dateStarted = false;
+    try {
+      await search.getByLabel('Ir a la fecha', {exact:true}).fill('2025-01-01');
+      await search.getByRole('button', {name:'Ir',exact:true}).click();
+      await waitForCondition(() => state.dateStarted, 'date lookup did not start');
+      assert(await search.getByLabel('Ir a la fecha', {exact:true}).isDisabled());
+      await closeDialog(page);
+      const response = page.waitForResponse(response => response.url().includes('/api/messages/by-date'));
+      gate.resolve(); state.nextDateGate = null; await response;
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('#messages [data-message-id="old-db"]').count(), 0);
+    } finally {gate.resolve(); state.nextDateGate = null;}
+  });
+
   await check('search returns a scoped message result', async () => {
     await openChat(page, 'Ana Fixture');
     await page.locator('#feature-chat-search').click();
@@ -976,7 +1043,7 @@ async function runDesktop(page, state, report) {
     const actions = await dialog(page, /Acciones del mensaje/i);
     await clickDialogButton(actions, 'Reaccionar');
     const picker = await dialog(page, /Reaccionar/i);
-    await picker.locator('button[aria-label^="Reaccionar con"]').first().click();
+    await picker.locator('.emoji-picker-item').first().click();
     await waitForCondition(() => state.log.some(item => item.path === '/api/messages/react' && item.body?.messageId === 'alpha-direct-outgoing'), 'reaction request missing');
   });
 
@@ -1115,7 +1182,8 @@ async function runDesktop(page, state, report) {
     await openChat(page, 'Ana Fixture');
     await page.locator('#feature-emoji').click();
     const picker = await dialog(page, /Emoji, GIF y stickers/i);
-    await picker.locator('.feature-emoji').first().click();
+    await picker.getByRole('searchbox', {name:'Buscar emoji'}).fill('corazon');
+    await picker.locator('.emoji-picker-item').first().click();
     assert((await page.locator('#message').inputValue()).length > 0, 'emoji was not inserted');
     await clickDialogButton(picker, 'GIF local');
     assert.equal(await picker.locator('input[aria-label="Subir GIF"]').count(), 1);
@@ -1124,18 +1192,32 @@ async function runDesktop(page, state, report) {
     await closeDialog(page);
   });
 
+  await check('GIF picked from emoji panel stages with the message caption', async () => {
+    await openChat(page, 'Ana Fixture');
+    await page.locator('#message').fill('GIF con texto');
+    await page.locator('#feature-emoji').click();
+    const picker = await dialog(page, /Emoji, GIF y stickers/i);
+    await clickDialogButton(picker, 'GIF local');
+    await picker.getByLabel('Subir GIF').setInputFiles({name:'animado.gif', mimeType:'image/gif', buffer:Buffer.from('GIF89a\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00;')});
+    await picker.waitFor({state:'detached'});
+    await page.locator('#attachment-preview').getByText('animado.gif').waitFor();
+    assert.equal(await page.locator('#message').inputValue(), 'GIF con texto');
+    await page.locator('#attachment-remove').click();
+    await page.locator('#message').fill('');
+  });
+
   await check('contact, poll and event share pickers post their own type', async () => {
     for (const item of [
       { option: 'Contacto', type: 'contact', values: [['Nombre', 'Ana Compartida'], ['Número o identificador', '+34100000001']] },
-      { option: 'Encuesta', type: 'poll', values: [['Pregunta', '¿Fixture?'], ['Opciones separadas por comas', 'Sí,No']] },
-      { option: 'Evento', type: 'event', values: [['Título', 'Evento Fixture'], ['Lugar o enlace', 'Sala Fixture']] },
+      { option: 'Encuesta', type: 'poll', values: [['Pregunta', '¿Fixture?'], ['Opción 1', 'Sí'], ['Opción 2', 'No']] },
+      { option: 'Evento', type: 'event', values: [['Nombre del evento', 'Evento Fixture'], ['Ubicación (opcional)', 'Sala Fixture']] },
     ]) {
       await openChat(page, 'Ana Fixture');
       await page.locator('#attach').click();
       await page.getByRole('menuitem', { name: item.option, exact: true }).click();
       const share = await dialog(page, new RegExp(item.option, 'i'));
       for (const [label, value] of item.values) await fieldLocator(share, label).fill(value);
-      await share.getByRole('button', { name: new RegExp(`Enviar ${item.type === 'contact' ? 'contacto' : item.type === 'poll' ? 'encuesta' : 'evento'}`) }).click();
+      await share.getByRole('button', { name: item.type === 'event' ? 'Crear evento' : new RegExp(`Enviar ${item.type === 'contact' ? 'contacto' : 'encuesta'}`) }).click();
       await waitForCondition(() => state.log.some(entry => entry.path === '/api/messages/compose' && entry.body?.kind === item.type), `${item.type} share request missing`);
       await closeDialog(page);
     }
@@ -1289,6 +1371,7 @@ async function runDesktop(page, state, report) {
     await openSettings(page);
     await page.locator('#account').selectOption('beta');
     await waitForCondition(() => state.betaChatsStarted, 'delayed beta request did not start');
+    await openSettings(page);
     await page.locator('#account').selectOption('alpha');
     await page.waitForFunction(() => document.querySelector('#chats')?.textContent.includes('Ana Fixture'));
     gate.resolve();
@@ -1335,7 +1418,7 @@ async function runDesktop(page, state, report) {
     await page.waitForFunction(() => document.querySelector('#chats')?.textContent.includes('Older Fixture 649'));
     assert(state.log.some(item => item.path === '/api/chats' && item.query.cursor === '600'));
     await clearReadOnlyDocument(page);
-    await page.locator('#settings-close').click();
+    assert.equal(await page.locator('.rail-settings').evaluate(element => element.open), false);
     await page.locator('#search').fill('Older Fixture 649');
     assert.equal(await page.locator('#chats .chat-item').count(), 1);
     await page.locator('#chats .chat-item').click();

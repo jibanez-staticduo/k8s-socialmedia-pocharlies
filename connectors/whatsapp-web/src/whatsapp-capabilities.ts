@@ -168,31 +168,108 @@ export interface PollMessageInput {
   messageSecret?: Uint8Array;
 }
 
-export function buildPollMessage(
-  input: PollMessageInput
-): Extract<AnyMessageContent, { poll: unknown }> {
-  const name = input.name.trim();
-  const values = input.values.map(value => value.trim()).filter(Boolean);
-  if (!name || values.length < 2) {
+export const POLL_QUESTION_MAX_LENGTH = 255;
+export const POLL_OPTION_MAX_LENGTH = 100;
+export const POLL_MIN_OPTIONS = 2;
+export const POLL_MAX_OPTIONS = 12;
+
+export interface ValidatedPollInput {
+  name: string;
+  values: string[];
+  selectableCount?: number;
+}
+
+/**
+ * The limits the official client enforces, counted the way the provider counts
+ * them: trimmed JavaScript string length. An empty or repeated option is
+ * refused rather than dropped, because otherwise voters would see a list that
+ * is not the one the creator wrote.
+ */
+export function validatePollInput(input: {
+  name: unknown;
+  values: unknown;
+  selectableCount?: unknown;
+}): ValidatedPollInput {
+  const name = typeof input.name === 'string' ? input.name.trim() : '';
+  if (!name) {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'A poll needs a question', {
+      field: 'name',
+    });
+  }
+  if (name.length > POLL_QUESTION_MAX_LENGTH) {
     throw new CapabilityError(
       'INVALID_CAPABILITY_INPUT',
-      'A poll needs a name and at least two options'
+      `The question cannot be longer than ${POLL_QUESTION_MAX_LENGTH} characters`,
+      { field: 'name', maxLength: POLL_QUESTION_MAX_LENGTH, length: name.length }
     );
   }
+  if (!Array.isArray(input.values)) {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Poll options must be a list', {
+      field: 'values',
+    });
+  }
+  if (input.values.length < POLL_MIN_OPTIONS || input.values.length > POLL_MAX_OPTIONS) {
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      `A poll needs between ${POLL_MIN_OPTIONS} and ${POLL_MAX_OPTIONS} options`,
+      { field: 'values', min: POLL_MIN_OPTIONS, max: POLL_MAX_OPTIONS, given: input.values.length }
+    );
+  }
+  const values = input.values.map((value: unknown, index: number) => {
+    if (typeof value !== 'string') {
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', `Option ${index + 1} must be text`, {
+        field: 'values',
+        index,
+      });
+    }
+    const option = value.trim();
+    if (!option) {
+      throw new CapabilityError('INVALID_CAPABILITY_INPUT', `Option ${index + 1} is empty`, {
+        field: 'values',
+        index,
+      });
+    }
+    if (option.length > POLL_OPTION_MAX_LENGTH) {
+      throw new CapabilityError(
+        'INVALID_CAPABILITY_INPUT',
+        `No option can be longer than ${POLL_OPTION_MAX_LENGTH} characters`,
+        { field: 'values', index, maxLength: POLL_OPTION_MAX_LENGTH, length: option.length }
+      );
+    }
+    return option;
+  });
+  if (new Set(values).size !== values.length) {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Poll options cannot repeat', {
+      field: 'values',
+    });
+  }
+  if (input.selectableCount === undefined || input.selectableCount === null) {
+    return { name, values };
+  }
+  const selectableCount = Number(input.selectableCount);
   if (
-    input.selectableCount !== undefined &&
-    (!Number.isInteger(input.selectableCount) || input.selectableCount < 1)
+    !Number.isInteger(selectableCount) ||
+    selectableCount < 1 ||
+    selectableCount > values.length
   ) {
     throw new CapabilityError(
       'INVALID_CAPABILITY_INPUT',
-      'Poll selectableCount must be a positive integer'
+      `selectableCount must be between 1 and the number of options (${values.length})`,
+      { field: 'selectableCount', max: values.length, given: input.selectableCount }
     );
   }
+  return { name, values, selectableCount };
+}
+
+export function buildPollMessage(
+  input: PollMessageInput
+): Extract<AnyMessageContent, { poll: unknown }> {
+  const { name, values, selectableCount } = validatePollInput(input);
   return {
     poll: {
       name,
       values,
-      ...(input.selectableCount === undefined ? {} : { selectableCount: input.selectableCount }),
+      ...(selectableCount === undefined ? {} : { selectableCount }),
       ...(input.messageSecret ? { messageSecret: input.messageSecret } : {}),
     },
   } as Extract<AnyMessageContent, { poll: unknown }>;
@@ -203,10 +280,66 @@ export interface EventMessageInput {
   description?: string;
   startDate: Date;
   endDate?: Date;
-  location?: { degreesLatitude: number; degreesLongitude: number; name?: string };
+  location?: EventLocationInput;
   call?: 'audio' | 'video';
   isCancelled?: boolean;
   extraGuestsAllowed?: boolean;
+}
+
+export interface EventLocationInput {
+  degreesLatitude?: number;
+  degreesLongitude?: number;
+  name?: string;
+}
+
+/**
+ * The official event form offers a free-text place, and rc13 copies
+ * `eventMessage.location` straight into the proto, whose coordinates are
+ * optional. So a name alone is a complete place, a coordinate pair alone is a
+ * map pin, and a blank location means the creator left the field empty.
+ * Coordinates are never invented for a name-only place.
+ */
+export function validateEventLocation(location: unknown): EventLocationInput | undefined {
+  if (location === undefined || location === null) return undefined;
+  if (typeof location !== 'object' || Array.isArray(location)) {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Event location must be an object', {
+      field: 'location',
+    });
+  }
+  const raw = location as Record<string, unknown>;
+  const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+  const hasLatitude = raw.degreesLatitude !== undefined && raw.degreesLatitude !== null;
+  const hasLongitude = raw.degreesLongitude !== undefined && raw.degreesLongitude !== null;
+  if (!hasLatitude && !hasLongitude) {
+    if (!name) return undefined;
+    return { name };
+  }
+  if (hasLatitude !== hasLongitude) {
+    throw new CapabilityError(
+      'INVALID_CAPABILITY_INPUT',
+      'Event location needs both coordinates or neither',
+      { field: 'location' }
+    );
+  }
+  const coordinate = (value: unknown): number =>
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim()
+        ? Number(value)
+        : Number.NaN;
+  const degreesLatitude = coordinate(raw.degreesLatitude);
+  const degreesLongitude = coordinate(raw.degreesLongitude);
+  if (!Number.isFinite(degreesLatitude) || degreesLatitude < -90 || degreesLatitude > 90) {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Event latitude must be -90 to 90', {
+      field: 'location',
+    });
+  }
+  if (!Number.isFinite(degreesLongitude) || degreesLongitude < -180 || degreesLongitude > 180) {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Event longitude must be -180 to 180', {
+      field: 'location',
+    });
+  }
+  return { degreesLatitude, degreesLongitude, ...(name ? { name } : {}) };
 }
 
 export function buildEventMessage(
@@ -222,23 +355,26 @@ export function buildEventMessage(
   if (input.endDate && Number.isNaN(input.endDate.getTime())) {
     throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Event endDate must be valid');
   }
-  if (
-    input.location &&
-    (!Number.isFinite(input.location.degreesLatitude) ||
-      !Number.isFinite(input.location.degreesLongitude))
-  ) {
+  if (input.endDate && input.endDate.getTime() < input.startDate.getTime()) {
     throw new CapabilityError(
       'INVALID_CAPABILITY_INPUT',
-      'Event location coordinates must be finite numbers'
+      'Event endDate cannot be before startDate'
     );
   }
+  if (input.description !== undefined && typeof input.description !== 'string') {
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Event description must be text', {
+      field: 'description',
+    });
+  }
+  const description = input.description?.trim();
+  const location = validateEventLocation(input.location);
   return {
     event: {
       name,
-      ...(input.description === undefined ? {} : { description: input.description }),
+      ...(description ? { description } : {}),
       startDate: input.startDate,
       ...(input.endDate ? { endDate: input.endDate } : {}),
-      ...(input.location ? { location: input.location } : {}),
+      ...(location ? { location } : {}),
       ...(input.call ? { call: input.call } : {}),
       ...(input.isCancelled === undefined ? {} : { isCancelled: input.isCancelled }),
       ...(input.extraGuestsAllowed === undefined

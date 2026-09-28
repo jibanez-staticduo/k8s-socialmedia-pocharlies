@@ -570,20 +570,41 @@ function boundedLimit(value: unknown, fallback = 500): number {
 }
 
 export async function listNovedadesChannels(
-  options: { limit?: number } = {}
+  options: {
+    limit?: number;
+    /**
+     * Keyset cursor for deterministic paging: the previous page's last channel.
+     * Sorting is `lower(name), channel_jid`, so equal names still advance.
+     */
+    after?: { name: string; jid: string } | null;
+  } = {}
 ): Promise<StoredNovedadesChannel[]> {
   const limit = boundedLimit(options.limit);
+  const params: unknown[] = [connectorAccount()];
+  let where = 'account = $1';
+  if (options.after) {
+    params.push(String(options.after.name ?? '').toLowerCase(), String(options.after.jid));
+    where += `
+      AND (lower(name) > $2 OR (lower(name) = $2 AND channel_jid > $3))`;
+  }
+  params.push(limit);
   const result = await pool().query(
-    `SELECT account, channel_jid, name, description, owner_jid, role, verification,
+    `${CHANNEL_SELECT}
+      WHERE ${where}
+      ORDER BY lower(name), channel_jid
+      LIMIT $${params.length}`,
+    params
+  );
+  return (result.rows as NovedadesChannelRow[]).map(mapChannelRow);
+}
+
+const CHANNEL_SELECT = `SELECT account, channel_jid, name, description, owner_jid, role, verification,
             avatar_url, invite_code, subscriber_count, creation_timestamp_ms, mute_state,
             raw_metadata
-       FROM whatsapp_novedades_channels
-      WHERE account = $1
-      ORDER BY lower(name)
-      LIMIT $2`,
-    [connectorAccount(), limit]
-  );
-  return (result.rows as NovedadesChannelRow[]).map(row => ({
+       FROM whatsapp_novedades_channels`;
+
+function mapChannelRow(row: NovedadesChannelRow): StoredNovedadesChannel {
+  return {
     account: String(row.account),
     jid: String(row.channel_jid),
     name: String(row.name),
@@ -598,7 +619,24 @@ export async function listNovedadesChannels(
       row.creation_timestamp_ms == null ? null : Number(row.creation_timestamp_ms),
     muteState: row.mute_state ?? null,
     rawMetadata: row.raw_metadata == null ? null : deserializeDurableValue(row.raw_metadata),
-  }));
+  };
+}
+
+/**
+ * One channel row for THIS account, exactly. Used by the read paths (avatar
+ * download, post-list channel header) so they never have to scan a page of
+ * channels hoping the wanted JID is inside it.
+ */
+export async function getNovedadesChannel(
+  channelJidValue: string
+): Promise<StoredNovedadesChannel | undefined> {
+  const channel = channelJid(channelJidValue);
+  const result = await pool().query(
+    `${CHANNEL_SELECT} WHERE account = $1 AND channel_jid = $2 LIMIT 1`,
+    [connectorAccount(), channel]
+  );
+  const row = result.rows[0] as NovedadesChannelRow | undefined;
+  return row ? mapChannelRow(row) : undefined;
 }
 
 /* --------------------------------------------------------------------------
@@ -997,6 +1035,13 @@ export async function listNovedadesMessages(
   options: {
     limit?: number;
     beforeTimestampMs?: number | null;
+    /**
+     * Keyset cursor (previous page's last item). The tie-breaker on
+     * `message_id` is what guarantees progress when more rows than `limit`
+     * share one exact timestamp; a timestamp-only cursor would keep returning
+     * the same page forever.
+     */
+    after?: { timestampMs: number | null; id: string } | null;
     includeDeleted?: boolean;
     includeSuperseded?: boolean;
     /** Default 'visible'; use 'all' to include events/unknown rows. */
@@ -1011,6 +1056,26 @@ export async function listNovedadesMessages(
     params.push(before);
     where += ` AND message_timestamp_ms < $${params.length}`;
   }
+  if (options.after) {
+    const cursorId = textId(options.after.id, 'after.id');
+    const cursorTs =
+      options.after.timestampMs === null
+        ? null
+        : optionalTimestampMs(options.after.timestampMs, 'after.timestampMs');
+    params.push(cursorTs, cursorId);
+    const tsParam = `$${params.length - 1}`;
+    const idParam = `$${params.length}`;
+    // Rows without a timestamp sort last, ordered by id descending, so the
+    // tail needs its own branch instead of a NULL comparison that never matches.
+    where += `
+      AND (CASE
+             WHEN ${tsParam}::bigint IS NULL
+               THEN (message_timestamp_ms IS NULL AND message_id < ${idParam})
+             ELSE message_timestamp_ms IS NULL
+               OR message_timestamp_ms < ${tsParam}::bigint
+               OR (message_timestamp_ms = ${tsParam}::bigint AND message_id < ${idParam})
+           END)`;
+  }
   if (options.includeDeleted !== true) where += ' AND NOT is_deleted';
   if (!options.includeSuperseded) where += ' AND superseded_by IS NULL';
   const visibility = options.visibility ?? 'visible';
@@ -1023,7 +1088,7 @@ export async function listNovedadesMessages(
     `SELECT *
        FROM whatsapp_novedades_messages
       WHERE ${where}
-      ORDER BY message_timestamp_ms DESC NULLS LAST, updated_at DESC
+      ORDER BY message_timestamp_ms DESC NULLS LAST, message_id DESC
       LIMIT $${params.length}`,
     params
   );
@@ -1446,6 +1511,16 @@ export interface NovedadesStatusQuery {
   /** Default 'visible'; use 'all' to include events/unknown rows. */
   visibility?: NovedadesVisibility | 'all';
   limit?: number;
+  /**
+   * Keyset cursor (previous page's last status). Paging uses the message's own
+   * epoch-milliseconds column rather than `posted_at`: `posted_at` is a
+   * microsecond `timestamptz`, and the ISO strings handed to callers are only
+   * millisecond precise, so a cursor built from them could silently skip or
+   * repeat a row. `timestampMs` is null when that status had no posting
+   * timestamp at all, which is the `NULLS LAST` tail; the id tie-breaker keeps
+   * paging moving across identical timestamps.
+   */
+  after?: { timestampMs: number | null; id: string } | null;
 }
 
 export async function listNovedadesStatus(
@@ -1456,6 +1531,21 @@ export async function listNovedadesStatus(
   if (options.authorJids?.length) {
     params.push(options.authorJids.map(author => normalizedAuthor(author, 'authorJids[]')));
     where += ` AND author_jid = ANY($${params.length}::text[])`;
+  }
+  if (options.after) {
+    const cursorId = textId(options.after.id, 'after.id');
+    const cursorTs = optionalTimestampMs(options.after.timestampMs, 'after.timestampMs');
+    params.push(cursorTs, cursorId);
+    const tsParam = `$${params.length - 1}`;
+    const idParam = `$${params.length}`;
+    where += `
+      AND (CASE
+             WHEN ${tsParam}::bigint IS NULL
+               THEN (message_timestamp_ms IS NULL AND wa_message_id < ${idParam})
+             ELSE message_timestamp_ms IS NULL
+               OR message_timestamp_ms < ${tsParam}::bigint
+               OR (message_timestamp_ms = ${tsParam}::bigint AND wa_message_id < ${idParam})
+           END)`;
   }
   if (!options.includeExpired) where += ' AND expires_at > now()';
   if (options.unreadOnly) where += ' AND seen_at IS NULL';
@@ -1470,11 +1560,49 @@ export async function listNovedadesStatus(
     `SELECT *
        FROM whatsapp_novedades_status
       WHERE ${where}
-      ORDER BY posted_at DESC NULLS LAST
+      ORDER BY message_timestamp_ms DESC NULLS LAST, wa_message_id DESC
       LIMIT $${params.length}`,
     params
   );
   return (result.rows as NovedadesStatusRow[]).map(mapStatusRow);
+}
+
+/**
+ * One status row, exactly, for THIS account + author + message id. The media
+ * path needs this: scanning a page of statuses and hoping the wanted id is in
+ * it silently turns a real status into a 404 once the author posts more than
+ * the window holds. Defaults stay conservative (active, visible, not deleted);
+ * a caller that wants an expired or deleted row must ask for it.
+ */
+export async function getNovedadesStatus(
+  authorJidValue: string,
+  messageId: string,
+  options: {
+    includeExpired?: boolean;
+    includeDeleted?: boolean;
+    /** Default 'visible'; use 'all' to include events/unknown rows. */
+    visibility?: NovedadesVisibility | 'all';
+  } = {}
+): Promise<StoredNovedadesStatus | undefined> {
+  const params: unknown[] = [
+    connectorAccount(),
+    normalizedAuthor(authorJidValue, 'authorJid'),
+    textId(messageId, 'messageId'),
+  ];
+  let where = 'account = $1 AND author_jid = $2 AND wa_message_id = $3';
+  if (!options.includeExpired) where += ' AND expires_at > now()';
+  if (options.includeDeleted !== true) where += ' AND NOT is_deleted';
+  const visibility = options.visibility ?? 'visible';
+  if (visibility !== 'all') {
+    params.push(visibility);
+    where += ` AND visibility = $${params.length}`;
+  }
+  const result = await pool().query(
+    `SELECT * FROM whatsapp_novedades_status WHERE ${where} LIMIT 1`,
+    params
+  );
+  const row = result.rows[0] as NovedadesStatusRow | undefined;
+  return row ? mapStatusRow(row) : undefined;
 }
 
 export interface NovedadesStatusAuthorSummary {

@@ -39,8 +39,9 @@ The audit is ongoing; this document is not a claim of complete parity.
   On desktop it is a centered modal occupying 80% of the viewport, rather
   than a narrow side drawer; the reference header combines tabs with search,
   ordering, selection and close controls.
-- The authenticated Windows reference session remains available through Agent
-  Jake. New chat searches name, number or username and exposes New group,
+- The authenticated Windows reference session was reconnected and inspected
+  through Agent Jake on September 28. New chat searches name, number or
+  username and exposes New group,
   New contact and New community before the contact directory.
 - Official Privacy separates last-seen visibility (all, contacts, exclusions,
   nobody) from online visibility (all or the last-seen rule). It also exposes
@@ -73,17 +74,19 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Quote reply, edit, delete, forward and selection | Existing | Official menu details and limits |
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
-| Pinned messages and event RSVP | Pending | Provider contracts, ingestion and UI |
+| Pinned messages and event RSVP | Partial | Deployed 5adcb7f; this candidate adds uncertainty recovery and indexed history reads. Real-provider write acceptance remains unverified |
 | Search and media/link/document gallery per chat | Partial | Global media browser deployed 8ad9dd9; advanced message-search filters and media multiselect/duration ordering remain |
 | Composer optimistic sends, paste and voice recording | Verified | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
-| Emoji / GIF / stickers | Partial | Full picker/search, sticker creation and packs |
+| Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
 | Location and live location | Partial | Received locations render; sending not implemented |
 | Link and map previews | Existing | Reference QA and failure states |
+| Image viewer navigation | In validation | Previous/next buttons and keyboard arrows traverse images in the loaded chat window; download link and label update with selection; Escape restores opener focus. Older unloaded images still require history/gallery paging |
 | New chats / contact creation | Verified | Directory deployed 8ad9dd9; both accounts pass read-only authenticated browser QA; extended drawer scenarios remain in development |
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
 | Settings drawer / wallpaper / spellcheck / Enter preference | Verified | Desktop/mobile, light/dark, persistence |
+| Emoji substitution / upload quality / automatic downloads | Pending | Official Chats settings verified September 28: text-to-emoji switch, Standard/HD upload choices and separate Photos/Audio/Videos/Documents download toggles; no equivalent controls yet |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
 | Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
@@ -118,86 +121,32 @@ not assumptions about the newest documentation, determines the contract.
   An absent publication audience must never mean all contacts.
 - Provider privacy can withhold photos, presence and last-seen information.
   Display unavailable information honestly, without invented values.
-- Pin-message documentation currently differs from the installed rc13 source:
-  this version accepts `{ pin: messageKey, type, time }`, not nested pin
-  options. Its protobuf enum uses `PIN_FOR_ALL=1`, `UNPIN_FOR_ALL=2`; the
-  public README example suggesting `0` for unpin must not be copied. Allowed
-  durations are 24 hours, 7 days and 30 days. Pin persistence/UI is still pending.
-  The working-tree adapter and durable reader pass nine tests plus TypeScript against the
-  installed generator and protobuf: flat send contract, correct unpin enum,
-  wrapped payloads, latest-action expiry, deterministic unpin precedence and
-  chat isolation, legacy group IDs, all-page reduction and pagination failures.
-  The reader reconstructs pins from durable raw payloads within the selected
-  account/chat and reports local-partial coverage. It is not yet wired to the
-  UI and is excluded from the RSVP release candidate. The authenticated
-  connector `/messages/pins` and app `/api/messages/pins` now expose scoped
-  reads. The app resolves provider IDs to locally stored messages, omits
-  deleted/unavailable targets, filters expired entries and rejects malformed
-  results. Ten focused connector tests and 33 app API tests pass; no real pin
-  action was sent. A working-tree visual bar now cycles between up to three
-  pins and opens the original message, clears on account/chat changes, discards
-  late responses and removes expired pins without waiting for polling. Synthetic
-  browser tests cover navigation, concurrent reads, expiry and four layouts.
-  Pin/unpin controls now use the official duration choices and stable tokens;
-  the connector claims before relay and refuses uncertain/conflicting retries.
-  Pin protocol envelopes stay outside the conversation message list. The full
-  selected-feature browser suite passes 43 checks including pin, bar refresh
-  and unpin; 14 focused connector tests, 34 app API tests and TypeScript pass.
-  Independent review, complete regression, publication and deployment remain
-  pending. No real WhatsApp pin or unpin was sent during QA.
-  The isolated combined events/pins candidate builds both images and passes
-  317 app tests, 268 connector tests, TypeScript, the 43-check feature browser
-  suite and dedicated event/pin browser suites. Subsequent review corrected
-  outgoing-pin storage to use canonical LID/phone resolution; its new direct
-  client regression passes. Verified LID/phone aliases now also resolve during
-  pin reads and sending without admitting other contacts. The refreshed
-  connector image passes all 270 tests and TypeScript. Independent review and
-  publication remain pending; live acceptance remains unverified.
-  A disposable PostgreSQL 17 fixture now traverses 1,201 direct/wrapped pin
-  actions without duplication or account/chat leakage and returns the latest
-  three active targets. The fixture exits successfully and its temporary
-  container is stopped. Dedicated browser screenshots were inspected for light
-  mobile and dark desktop; the bar retains readable contrast and bounded text.
-  Forced post-mutation pin refreshes supersede pending older reads; a browser
-  regression verifies that an older empty response cannot undo the newly
-  confirmed bar. Pin reservation tests also verify payload, operation-kind and
-  account isolation. Both focused suites pass.
-- Event RSVP needs a version-specific adapter. In installed rc13,
-  `process-message.js` emits `eventResponses` entries with `response` and
-  `senderTimestampMs`, whereas the protobuf declares `eventResponseMessage`
-  and `timestampMs`; the aggregation helper reads another field,
-  `eventResponse`. Do not copy the current documentation's aggregation or
-  decryption signatures without normalizing the installed runtime shape.
-  A local normalization/aggregation adapter now passes ten tests against rc13
-  (including a protobuf encode/decode round trip), plus TypeScript. It keeps
-  PN/LID identities distinct, ignores malformed replies and selects the latest
-  captured attendance per responder. A synthetic encrypted RSVP round trip uses
-  the installed decryptor and verifies binding to the event and responder; this
-  does not prove live WhatsApp acceptance. A regression also rejects inherited
-  object-property names as attendance values before encryption. The adapter is not yet wired into ingest;
-  RSVP controls and sending now exist in the working tree but remain undeployed.
-  Captured ciphertext can now be decrypted with account-local LID-to-PN
-  resolution, while rejecting different event/chat scopes. The durable reader
-  pages encrypted replies by stable message ID instead of truncating the first
-  window. Its disposable PostgreSQL 17 fixture traverses 1,201 direct/wrapped
-  responses with no duplicates, missing rows or cross-account/chat/event rows;
-  the durable-store unit suite passes 13 tests. A read service now resolves
-  missing keys/identities explicitly and combines latest responses across pages.
-  The connector exposes authenticated `/messages/event/results`; the app's
-  `/api/messages/event/results` resolves the stored message inside the selected
-  account/chat and projects only counts and the owner's attendance. The read
-  endpoint is independent of sending permissions and does not slow the initial
-  chat history request. The event card opens results on demand and supports
-  going/not-going/maybe and permitted extra guests. Pending responses disable
-  duplicate actions; failed retries reuse the same token. Connector reservations
-  bind the token to account/chat/event/attendance/guests, claim before relay and
-  retain uncertain outcomes without automatic replay. Incoming ciphertext stays
-  outside chat messages; old raw response types are excluded from visible queries.
-  Validation: 252 connector tests, 325 app tests and TypeScript pass. Synthetic
-  Playwright checks reading, immediate send feedback, retry-token reuse, account
-  switching and four light/dark desktop/mobile layouts. Visual inspection improved
-  title placement and browser-local date formatting. Independent review and exact
-  release validation remain pending. No real RSVP was sent.
+- Pin-message documentation differs from the installed rc13 source: this
+  version accepts `{ pin: messageKey, type, time }`, not nested pin options.
+  Its enum uses `PIN_FOR_ALL=1`, `UNPIN_FOR_ALL=2`; the README's unpin value
+  `0` is incorrect for this version. Allowed durations are 24 hours, 7 days
+  and 30 days. The adapter, authenticated read/write routes and UI are wired
+  in the published candidate. Pin protocol envelopes stay outside chat history.
+  Reads use all-page account/chat-scoped raw history, including verified PN/LID
+  aliases, and report local-partial coverage. Latest-action reduction applies
+  expiry after unpin resolution, preventing old pins from reappearing. The UI
+  cycles the latest three pins, opens the source message and removes expired
+  entries. Forced refreshes supersede stale pending reads. Send reservations
+  bind account/chat/target/action/duration and refuse uncertain replay.
+- Event RSVP needs a version-specific adapter. Installed rc13 emits responses
+  with `response` and `senderTimestampMs`; its protobuf and aggregation helper
+  use different field names. The adapter normalizes this shape, decrypts
+  captured replies within account/chat/event scope and keeps each responder's
+  latest attendance. Missing keys/identity produce explicit unavailability;
+  partial history never pretends to be a complete provider census. Authenticated
+  routes and event cards are wired in the published candidate. The card loads
+  results on demand and supports going/not-going/maybe and allowed companions,
+  preserving the owner's selected companion count. Stable payload-bound tokens
+  and pre-relay claims prevent uncertain retries from silently resending.
+  Encrypted response envelopes are excluded from visible chat history.
+- These adapters pass synthetic tests against the installed provider code;
+  real WhatsApp acceptance of pin/unpin and RSVP remains unverified because
+  production QA does not send real mutations. See the candidate validation below.
 
 ## Validation and release
 
@@ -400,23 +349,110 @@ commit; fork CI `36356628284` and upstream PR CI `36356631847` both pass
 on the exact `8ad9dd9` head. Novedades API/UI and RSVP are not
 part of this release.
 
-## Event attendance candidate (not deployed)
+## Events and pinned messages deployment (`5adcb7f`)
 
-Event cards now expose on-demand synchronized attendance and controls for
-going, not going, maybe and allowed companions. The current user's companion
-count is preserved when reopening the card. Results explicitly describe the
-locally captured history as partial; missing encryption keys or identity are
-reported as unavailable, not as zero confirmed attendees.
+Published on fork main and PR74 in `1e7a0d5`, with CI formatting correction
+`5adcb7f`. Fork CI `36362818169` passes lint, tests, build, manifests, contract
+surface, app and S3 checks. The formatting correction preserves the emitted
+JavaScript syntax trees in all ten affected modules. Upstream PR CI `36362822264` also passes on the same head. Independent
+review found no release blockers; follow-up work covers uncertain RSVP recovery
+and indexed reads for large histories.
 
-The connector decrypts captured replies in account/chat/event scope, paginates
-all stored replies and keeps each participant's latest response. Encrypted
-response envelopes do not appear as standalone chat messages. Sending binds
-the idempotency token to the response payload and claims it before transport;
-an uncertain outcome cannot silently trigger another relay with the same token.
+The exact isolated candidate passes 317 app tests, 270 connector tests and
+TypeScript. The selected-feature Playwright suite passes 43 checks, including
+pin, banner refresh and unpin. Dedicated event/pin browser suites cover retry
+tokens, account switches, stale responses, expiry, source navigation and four
+light/dark desktop/mobile layouts. Separate disposable PostgreSQL 17 fixtures
+traverse 1,201 wrapped/direct RSVP replies and 1,201 pin actions without account
+or chat leakage. No real RSVP, pin or unpin was sent during QA.
 
-The isolated RSVP candidate passes 315 app tests, 252 connector tests and
-TypeScript validation. Synthetic Playwright checks cover reading, sending
-feedback, retry-token reuse, account switching during a request and four
-theme/viewport layouts. No real attendance response was sent during QA.
-Independent review, publication and authenticated deployment checks are still
-pending. The unfinished Novedades reader/UI is excluded from this candidate.
+Images `socialmedia-whatsapp-app:5adcb7f` and
+`socialmedia-whatsapp-connector:5adcb7f` are built from the published commit.
+The unfinished Novedades reader/UI is excluded. The app and both account
+connectors are deployed at this exact revision and healthy. Authenticated
+read-only browser QA checks both accounts, contact directories, all three media
+library tabs and scoped pin endpoints for 11 conversations, with zero writes
+and page errors. No events or pins were present in the sampled conversations,
+so real-provider RSVP/pin acceptance remains unverified.
+
+## Fresh official comparison (September 28)
+
+- In-chat search includes an "Ir a la fecha" calendar, with previous/next month
+  navigation and future dates disabled. The working tree adds an accessible
+  browser date picker and jumps to the first synchronized message of that local
+  day. The API uses an exclusive UTC interval scoped to account/chat aliases;
+  23/25-hour daylight-saving days are covered. Synthetic browser QA checks
+  historical navigation, empty days, focus and late-response cancellation
+  (47 selected-feature checks pass, including a panel left open across midnight).
+  A read-only PostgreSQL fixture verifies
+  exact day boundaries, alias coverage and filtering of deleted/protocol messages
+  and other accounts/chats/platforms against the actual query.
+  The calendar currently uses the browser's native presentation.
+- Event creation offers name, optional description, start date/time, optional
+  end date/time and a free-text location. Call links are outside this audit.
+  The working-tree event form now includes description and optional end-date
+  controls, browser-local timezone conversion and a named location. Dedicated
+  browser tests cover retries, context changes and four layouts; draft tests
+  cover daylight-saving transitions. Publication awaits connector integration.
+- Poll creation uses individual option rows, reordering and a multiple-answer
+  toggle enabled by default. It also offers anonymous voters and a closing
+  time. Official FAQ limits are question 255 characters, up to 12 options,
+  and 100 characters per option (https://faq.whatsapp.com/796470361614974).
+  Installed rc13 `PollMessageOptions` has name/values/selectableCount/secret
+  and announcement-group fields; anonymous/closing-time transport is not yet
+  verified and must not be represented by nonfunctional switches.
+- The working-tree poll composer now provides separate rows, add/remove/reorder,
+  single/multiple answers, provider limits, pending state and payload-bound retry
+  tokens. API validation preserves commas within options. Synthetic browser QA
+  passes option controls, duplicate-submit prevention, retry tokens, stale
+  account context rejection and four theme/viewport layouts. Connector durable
+  idempotency, independent review, publication and deployment remain pending.
+- Official event and poll dialogs were opened and closed without creating or
+  publishing anything. Private message contents are not part of this audit.
+
+The app integration snapshot builds successfully and its packaged production
+files pass all 346 app tests. This is an uncommitted integration candidate,
+not evidence of publication or deployment of the new composers, date lookup
+or Novedades UI. Connector completion and independent review remain pending.
+
+Further UI verification adds previous/next image navigation within the loaded
+chat window, with keyboard arrows, matching download links and Escape/focus
+restoration (26 renderer tests and browser DOM integration pass). Full desktop
+and mobile visual QA found and fixed Settings remaining open over the chat list
+after changing accounts. Its obsolete AI request assertion now checks the
+existing streaming/turn-ID contract. The complete visual suite passes with no
+page or console errors; these follow-up changes remain uncommitted.
+
+Independent review of the in-progress connector confirmed two release gates:
+poll/event creation routes must consume the stable send token rather than call
+the provider directly, and named event locations must not fabricate NaN
+coordinates. Both are assigned to the structured-send integration; this working
+tree must not be deployed until the corrected routes and provider fixtures pass.
+
+The emoji/reaction picker now uses a self-hosted, version-pinned Emojibase 17
+catalog (1,914 base emojis plus skin variants), with Spanish labels, accent-insensitive
+Spanish/English search, category navigation, skin-tone preference and per-account
+recent selections. Browser tests cover keyboard navigation, variant selection,
+failed-load retry, concurrent/stale selection guards and four light/dark
+desktop/mobile layouts with no external requests or page errors. The light
+mobile screenshot was visually inspected. Selecting a local GIF from the picker
+now stages it in the unified composer so the user can review it with the text
+caption before sending; sticker upload still uses its separate creation flow.
+The integrated selected-feature suite passes 47 checks and the full app suite
+passes 351 tests. These changes are still in the working tree; online GIF
+discovery and sticker packs remain pending. The upload path now converts a
+staged `image/gif` to MP4 with `gifPlayback` even without `featureKind`, while
+preserving its caption, quote, digest and send token. A contract test covers
+that path; no real GIF was sent during QA.
+
+Current integration candidate (September 28): the connector passes 327 tests,
+TypeScript and lint with no errors. Disposable PostgreSQL 17 fixtures verify
+the indexed pin/RSVP cursors with 200,000 ordinary messages and 1,201 cases of
+each type, including account/chat isolation. The app passes 351 tests.
+Synthetic browser QA covers the emoji picker, poll/event forms, date search,
+Novedades author/channel navigation, mobile close controls, rapid channel
+switching, expiration of open statuses, image navigation and account isolation.
+Novedades lists are based on synchronized data and may omit unseen historical
+statuses; no provider mutation was performed. Real-provider acceptance of structured sends and RSVP,
+full WhatsApp parity, fork CI, PR CI and deployment remain unverified for this
+candidate until publication.

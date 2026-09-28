@@ -3,7 +3,7 @@
 /* Optional browser integration test. The QA container supplies Playwright. */
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,12 +19,17 @@ const server = createServer(async (request, response) => {
   const path = new URL(request.url || '/', 'http://fixture.local').pathname;
   if (path === '/') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end('<!doctype html><html><body></body></html>');
+    response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles.css"></head><body></body></html>');
     return;
   }
-  if (path === '/message-render.mjs') {
-    response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
-    response.end(await readFile(join(publicDir, 'message-render.mjs')));
+  if (path === '/message-render.mjs' || path === '/styles.css') {
+    response.writeHead(200, { 'content-type': path.endsWith('.css') ? 'text/css' : 'text/javascript; charset=utf-8' });
+    response.end(await readFile(join(publicDir, path.slice(1))));
+    return;
+  }
+  if (path.endsWith('.png')) {
+    response.writeHead(200, {'content-type':'image/svg+xml'});
+    response.end('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="800" height="600" fill="#a3c0aa"/><circle cx="400" cy="270" r="130" fill="#efca79"/><path d="M0 600L290 310 500 600Z" fill="#426754"/></svg>');
     return;
   }
   response.writeHead(404);
@@ -91,6 +96,38 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.media-viewer-close')), true);
   await page.evaluate(() => document.querySelector('.media-viewer-close').click());
   assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.media-image-button')), true);
+  await page.evaluate(async () => {
+    const renderer = await import('/message-render.mjs');
+    const chat = document.createElement('section'); chat.id = 'messages';
+    for (const name of ['first.png', 'second.png', 'third.png']) chat.append(renderer.createAttachmentElement({url:`/${name}`,mimeType:'image/png',name}));
+    document.body.append(chat);
+    chat.querySelector('.media-image-button').click();
+  });
+  assert(await page.getByRole('button', {name:'Imagen anterior',exact:true}).isDisabled());
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'second.png');
+  assert.equal(await page.locator('.media-viewer-actions a').getAttribute('href'), `${new URL(page.url()).origin}/second.png`);
+  assert.equal(await page.locator('.media-viewer-counter').textContent(), '2 / 3');
+  for (const theme of ['light','dark']) for (const width of [1200,390]) {
+    await page.setViewportSize({width,height:844});
+    await page.evaluate(theme => document.body.dataset.theme = theme, theme);
+    for (const name of ['Imagen anterior','Imagen siguiente','Cerrar imagen']) {
+      const box = await page.getByRole('button',{name,exact:true}).boundingBox();
+      assert(box && box.x >= 0 && box.y >= 0 && box.x + box.width <= width && box.y + box.height <= 844);
+    }
+    if (process.env.UI_OUTPUT_DIR) {
+      await mkdir(process.env.UI_OUTPUT_DIR,{recursive:true});
+      await page.screenshot({path:join(process.env.UI_OUTPUT_DIR,`viewer-${theme}-${width}.png`)});
+    }
+  }
+  await page.getByRole('button', {name:'Imagen siguiente',exact:true}).click();
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'third.png');
+  assert(await page.getByRole('button', {name:'Imagen siguiente',exact:true}).isDisabled());
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'second.png');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.media-viewer').count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#messages .media-image-button')), true);
   console.log('PASS message-render DOM integration', JSON.stringify(result));
 } finally {
   await browser.close();

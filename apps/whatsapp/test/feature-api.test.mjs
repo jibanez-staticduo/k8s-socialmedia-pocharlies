@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +10,100 @@ import { publicMessageMetadata, publicPollResults, publicEventResults } from '..
 import { MESSAGE_VISIBLE_SQL } from '../lib/chat-names.mjs';
 
 const auth = `Basic ${Buffer.from('operator:password').toString('base64')}`;
+
+test('GIF upload converts to MP4 and preserves caption, reply and source identity', async t => {
+  const outbound = [];
+  const gif = Buffer.from('47494638396101000100800000ffffff0000002c00000000010001000002024401003b', 'hex');
+  const {request} = await fixture(t, {fetchImpl: async (url, options) => {
+    outbound.push({url, body: JSON.parse(options.body)});
+    return Response.json({messageId: 'gif-receipt'});
+  }});
+  const body = {account: 'secondary', chat: 'secondary-chat', name: 'selected.gif', mimeType: 'image/gif',
+    data: gif.toString('base64'), caption: '  Hello GIF  ', replyToMessageId: '22222222-2222-2222-2222-222222222222',
+    sendToken: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'};
+  const response = await request('/api/upload', body);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).messageId, 'gif-receipt');
+  assert.equal(outbound.length, 1);
+  assert.equal(outbound[0].url, 'http://secondary-connector/api/v1/messages/media/send');
+  const sent = outbound[0].body;
+  assert.equal(sent.conversationId, 'secondary-chat');
+  assert.equal(sent.kind, 'gif');
+  assert.equal(sent.gifPlayback, true);
+  assert.equal(sent.fileName, 'selected.mp4');
+  assert.equal(sent.caption, 'Hello GIF');
+  assert.equal(sent.replyTo, 'wa-secondary-1');
+  assert.equal(sent.sourceMimeType, 'image/gif');
+  assert.equal(sent.sourceDigest, createHash('sha256').update(gif).digest('hex'));
+  assert.equal(sent.sendToken, body.sendToken);
+  assert.match(sent.fileUrl, /^data:video\/mp4;base64,/);
+  assert.equal(Buffer.from(sent.fileUrl.split(',')[1], 'base64').subarray(4, 8).toString(), 'ftyp');
+});
+
+test('date navigation scopes chat aliases and uses exclusive UTC day boundaries', async t => {
+  const calls = []; const db = fixtureDatabase(calls); const original = db.query;
+  db.query = async (sql, args) => {
+    if (sql.includes('m.wa_timestamp >= $3::timestamptz')) {
+      calls.push({sql, args});
+      assert(sql.includes('m.account=$1 AND m.conversation_id=ANY($2::text[])'));
+      assert(sql.includes(MESSAGE_VISIBLE_SQL));
+      assert(sql.includes('NOT m.is_deleted'));
+      assert(sql.includes('m.wa_timestamp < $4::timestamptz'));
+      assert(sql.includes('ORDER BY m.wa_timestamp ASC, m.id ASC LIMIT 1'));
+      return {rows: args[2] === '2026-09-22T22:00:00.000Z' ? [{id:'stored', wa_message_id:'target'}] : []};
+    }
+    return original(sql, args);
+  };
+  const {request} = await fixture(t, {db});
+  const endpoint = '/api/messages/by-date?account=secondary&chat=secondary-chat';
+  const range = '&start=2026-09-22T22:00:00.000Z&end=2026-09-23T22:00:00.000Z';
+  assert.equal((await request(endpoint.replace('account=secondary', 'account=personal') + range)).status, 404);
+  assert.equal((await request(endpoint + '&start=invalid&end=invalid')).status, 400);
+  const response = await request(endpoint + range);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {account:'secondary', chat:'secondary-chat', messageId:'target'});
+  const scoped = calls.find(call => call.sql.includes('m.wa_timestamp >= $3::timestamptz'));
+  assert.deepEqual(scoped.args, ['secondary', ['secondary-chat'], '2026-09-22T22:00:00.000Z', '2026-09-23T22:00:00.000Z']);
+  const empty = await request(endpoint + '&start=2026-09-24T22:00:00.000Z&end=2026-09-25T22:00:00.000Z');
+  assert.equal((await empty.json()).messageId, null);
+});
+
+test('event creation sends explicit instants, end date, description, named location and retry token', async t => {
+  const calls = [];
+  const {request} = await fixture(t, {fetchImpl: async (url, options) => {
+    calls.push({url, body: JSON.parse(options.body)}); return Response.json({ok: true, sent: true, messageId: 'event'});
+  }});
+  const body = {account: 'secondary', chat: 'secondary-chat', kind: 'event', sendToken: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    payload: {title: 'Picnic', description: 'Bring lunch', location: 'Park', dateTime: '2026-09-30T18:00+02:00', endDateTime: '2026-09-30T20:00+02:00'}};
+  assert.equal((await request('/api/messages/compose', {...body, account: 'personal'})).status, 404);
+  assert.equal((await request('/api/messages/compose', {...body, payload: {...body.payload, dateTime: '2026-09-30T18:00'}})).status, 400);
+  assert.equal((await request('/api/messages/compose', {...body, payload: {...body.payload, endDateTime: '2026-09-29T18:00Z'}})).status, 400);
+  assert.equal(calls.length, 0);
+  assert.equal((await request('/api/messages/compose', body)).status, 200);
+  assert.deepEqual(calls, [{url: 'http://secondary-connector/api/v1/messages/event', body: {name: 'Picnic', description: 'Bring lunch',
+    location: {name: 'Park'}, startDate: '2026-09-30T16:00:00.000Z', endDate: '2026-09-30T18:00:00.000Z', conversationId: 'secondary-chat', sendToken: body.sendToken}}]);
+});
+
+test('poll creation preserves option rows, validates provider limits and forwards the scoped retry token', async t => {
+  const calls = [];
+  const {request} = await fixture(t, {fetchImpl: async (url, options) => {
+    calls.push({url, body: JSON.parse(options.body)});
+    return Response.json({ok: true, sent: true, messageId: 'new-poll'});
+  }});
+  const body = {account: 'secondary', chat: 'secondary-chat', kind: 'poll',
+    sendToken: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    payload: {question: 'Menu?', options: ['Pasta, ensalada', 'Arroz'], selectableCount: 1}};
+  assert.equal((await request('/api/messages/compose', {...body, account: 'personal'})).status, 404);
+  for (const payload of [{...body.payload, options: ['A']}, {...body.payload, options: ['A', ' A ']},
+    {...body.payload, question: 'x'.repeat(256)}, {...body.payload, selectableCount: 3}]) {
+    assert.equal((await request('/api/messages/compose', {...body, payload})).status, 400);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await request('/api/messages/compose', body)).status, 200);
+  assert.deepEqual(calls, [{url: 'http://secondary-connector/api/v1/messages/poll', body: {
+    conversationId: 'secondary-chat', name: 'Menu?', values: ['Pasta, ensalada', 'Arroz'], selectableCount: 1, sendToken: body.sendToken,
+  }}]);
+});
 
 test('pinned message reads resolve stored targets inside the selected account and reject malformed provider data', async t => {
   const upstream = [];

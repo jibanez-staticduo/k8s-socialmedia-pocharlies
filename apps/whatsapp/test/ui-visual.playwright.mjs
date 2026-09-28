@@ -243,6 +243,7 @@ async function selectAccount(page, value) {
   }
   await page.locator('#account').selectOption(value);
   await page.waitForFunction(expected => document.querySelector('#account')?.value === expected, value);
+  assert.equal(await settings.evaluate(element => element.open), false, 'account change left settings covering the chat list');
   await page.waitForFunction(expected => document.querySelector('#chats')?.textContent.includes(expected), value === 'beta' ? 'Bruno Fixture' : 'Ana Fixture');
 }
 
@@ -461,7 +462,8 @@ async function assertComposerAndAi(page, requestLog) {
   await page.locator('#ai-send').click();
   await page.locator('.ai-bubble-in').getByText('Respuesta IA fixture').waitFor();
   const aiRequest = requestLog.findLast(entry => entry.path === '/api/ai/chat');
-  assert.deepEqual(aiRequest?.body, { account: 'alpha', chat: 'alpha-chat', message: 'Resume este fixture', allowPropose: true, allowSend: true });
+  assert.match(aiRequest?.body?.turnId || '', /^[0-9a-f-]{36}$/i);
+  assert.deepEqual(aiRequest?.body, { account: 'alpha', chat: 'alpha-chat', message: 'Resume este fixture', allowPropose: true, allowSend: true, stream: true, turnId: aiRequest.body.turnId });
   assert.equal(await page.locator('#ai-use-draft').isEnabled(), true, 'AI draft action stayed disabled');
   await page.locator('#ai-use-draft').click();
   assert.equal(await page.locator('#message').inputValue(), 'draft-alpha\n\nRespuesta IA fixture para revisar.', 'the draft action did not extend the typed draft');

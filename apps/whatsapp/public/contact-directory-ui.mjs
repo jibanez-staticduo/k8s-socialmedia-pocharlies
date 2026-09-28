@@ -208,6 +208,15 @@ export function installContactDirectoryUI({
     state.closed = true;
   }
 
+  // Escape closes the drawer from anywhere, the way the official client and the
+  // other panels of this app do. The search field stops the event first, so
+  // there it only clears what was typed.
+  function onDocumentKey(event) {
+    if (state.closed || event.key !== 'Escape') return;
+    event.preventDefault();
+    close();
+  }
+
   function setStatus(message, kind = 'info') {
     if (!state.status) return;
     state.status.textContent = text(message);
@@ -365,6 +374,7 @@ export function installContactDirectoryUI({
     clearScheduled(state.debounce);
     if (typeof windowRef?.clearInterval === 'function') windowRef.clearInterval(state.poll);
     else clearInterval(state.poll);
+    documentRef.removeEventListener?.('keydown', onDocumentKey);
     client.invalidate();
     destroy();
     if (restoreFocus && state.opener?.isConnected !== false) state.opener.focus?.();
@@ -455,7 +465,6 @@ export function installContactDirectoryUI({
     closeButton.onclick = () => close();
     overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
     panel.addEventListener('keydown', event => {
-      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); return; }
       if (event.key !== 'Tab') return;
       const focusable = [...panel.querySelectorAll('button:not([disabled]), input:not([disabled])')]
         .filter(element => !element.closest('[hidden]'));
@@ -480,6 +489,7 @@ export function installContactDirectoryUI({
       if (state.closed) return;
       if (getEpoch() !== state.epoch) { state.epoch = getEpoch(); state.entries = []; void loadNext({ replace: true }); }
     }, CONTEXT_POLL_MS);
+    documentRef.addEventListener('keydown', onDocumentKey);
 
     void loadNext({ replace: true });
     // The panel is already visible and focus has not moved yet: same contract as the other rail panels.

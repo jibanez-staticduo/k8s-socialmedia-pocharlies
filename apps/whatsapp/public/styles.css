@@ -21,6 +21,24 @@
   --danger: #ff9d9d;
 }
 
+.emoji-picker { display: flex; flex-direction: column; gap: 10px; min-width: 0; color: var(--text); }
+.emoji-picker-toolbar { display: flex; gap: 8px; }
+.emoji-picker-search { min-width: 0; flex: 1; }
+.emoji-picker-tone { max-width: 130px; }
+.emoji-picker-toolbar input, .emoji-picker-toolbar select { border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); color: var(--text); padding: 10px; }
+.emoji-picker-categories { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 5px; }
+.emoji-picker-category { flex: 0 0 auto; border: 0; border-bottom: 3px solid transparent; padding: 8px; background: transparent; color: var(--muted-strong); border-radius: 6px; }
+.emoji-picker-category[aria-pressed="true"] { border-bottom-color: var(--accent); color: var(--accent); background: var(--surface-raised); }
+.emoji-picker-status { margin: 0; font-size: 12px; color: var(--muted-strong); }
+.emoji-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); align-content: start; gap: 3px; max-height: min(350px, 45dvh); overflow-y: auto; overscroll-behavior: contain; }
+.emoji-picker-item { position: relative; min-height: 42px; padding: 5px; border: 0; border-radius: 8px; font-size: 27px; line-height: 1.2; background: transparent; color: var(--text); cursor: pointer; }
+.emoji-picker-item:hover { background: var(--surface-raised); }
+.emoji-picker-item:focus-visible, .emoji-picker-category:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.emoji-picker-has-variants::after { content: ''; position: absolute; right: 3px; bottom: 3px; border-left: 5px solid transparent; border-bottom: 5px solid var(--muted); }
+.emoji-picker-variants:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 9px; padding: 8px; max-height: 180px; overflow-y: auto; }
+.emoji-picker-variants > strong { flex: 1; }
+.emoji-picker-variants > button:not(.emoji-picker-item) { border: 0; background: var(--surface-raised); color: var(--text); padding: 7px; border-radius: 6px; }
+
 @font-face {
   font-family: "Roboto Variable";
   font-style: normal;
@@ -919,6 +937,7 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
   inset: 0;
   z-index: 100;
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   place-items: center;
   gap: 14px;
   background: rgba(0, 0, 0, .82);
@@ -937,6 +956,11 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
 }
 
 .media-viewer-close { position: absolute; top: 16px; right: 16px; }
+.media-viewer-previous, .media-viewer-next { position:absolute; top:50%; width:44px; height:44px; border:0; border-radius:50%; background:#222d; color:#fff; font-size:32px; cursor:pointer; }
+.media-viewer-previous { left:12px; }
+.media-viewer-next { right:12px; }
+.media-viewer-previous:disabled, .media-viewer-next:disabled { opacity:.3; cursor:default; }
+.media-viewer-counter { position:absolute; top:24px; left:24px; color:#fff; font-size:14px; }
 
 .message-date,
 .date-chip {
@@ -1608,3 +1632,30 @@ button.message-poll-option:hover, .message-poll-option.is-selected { border-colo
 .pinned-message-link strong { color: var(--accent); font-size: 12px; }
 .pinned-message-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .pinned-message-next { border: 0; background: transparent; color: var(--muted-strong); padding: 6px; cursor: pointer; white-space: nowrap; }
+
+.poll-fields { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 1rem; }
+.poll-fields h3 { margin: 0; font-size: 1rem; color: var(--text); }
+.poll-option-list { display: grid; gap: .75rem; }
+.poll-option-row { display: flex; gap: .5rem; align-items: end; min-width: 0; }
+.poll-option-row > label { flex: 1; min-width: 0; }
+.poll-option-row input { width: 100%; min-width: 0; box-sizing: border-box; }
+.poll-option-controls { display: flex; gap: .25rem; padding-bottom: .1rem; }
+.poll-option-controls button { padding: .5rem; min-width: 2rem; }
+.poll-multiple { display: flex; align-items: center; gap: .75rem; padding-block: .75rem; border-top: 1px solid var(--line); }
+.poll-multiple input { appearance: none; flex: 0 0 36px; width: 36px; height: 20px; margin: 0; border-radius: 12px; border: 1px solid var(--muted); background: var(--muted); position: relative; cursor: pointer; }
+.poll-multiple input::before { content: ''; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface); transition: transform .12s ease; }
+.poll-multiple input:checked { background: var(--accent); border-color: var(--accent); }
+.poll-multiple input:checked::before { transform: translateX(16px); }
+.poll-multiple input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.poll-composer-status { color: var(--danger, #b3261e); margin: 0; }
+.poll-composer textarea { resize: vertical; min-height: 4.5rem; max-height: 12rem; }
+.feature-dialog-poll .feature-dialog-body { background: var(--surface); }
+.poll-composer .feature-button:not(.primary) { background: transparent; color: var(--muted-strong); }
+.poll-composer .feature-button:not(.primary):hover:not(:disabled) { background: var(--surface-raised); color: var(--text); }
+.poll-composer .poll-fields > .feature-button { border: 1px dashed var(--line); border-radius: 8px; color: var(--accent); }
+body[data-theme="light"] .poll-composer > .primary { color: #fff; }
+.event-composer textarea { resize: vertical; min-height: 5rem; max-height: 12rem; }
+body[data-theme="light"] .event-composer > .primary { color: #fff; }
+.feature-search-date { display:flex; flex-wrap:wrap; align-items:end; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
+.feature-search-date .feature-field { flex:1; min-width:160px; }
+.feature-search-date [role="status"] { flex-basis:100%; margin:0; }
