@@ -1515,6 +1515,15 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(body.account); const chat = safeChatId(body.chat || (pathChat ? decodeURIComponent(pathChat) : null));
         const conversation = await conversationFor(a, chat); const providerChat = providerChatId(conversation);
         const action = String(body.action || path.match(/\/(read|unread|archive|unarchive|pin|unpin|mute|unmute)$/)?.[1] || (path === '/api/chat/read' ? 'read' : body.archived === true ? 'archive' : body.archived === false ? 'unarchive' : '')).toLowerCase();
+        if (action === 'block' || action === 'unblock') {
+          if (conversation.is_group || !/^\d+@(c\.us|s\.whatsapp\.net|lid)$/.test(providerChat)) throw fail(400, 'A direct contact is required');
+          const blocked = action === 'block';
+          const result = await featureConnector(a, `/chats/${encodeURIComponent(providerChat)}/block`, {
+            method: 'POST', body: { blocked }, requireSending: true,
+          });
+          if (result.blocked !== blocked || result.confirmed !== true) throw fail(502, 'Contact block state was not confirmed');
+          return json(200, { account: a.accountId, chat, action, blocked, confirmed: true, source: 'provider' });
+        }
         if (!['read', 'unread', 'archive', 'unarchive', 'pin', 'unpin', 'mute', 'unmute', 'starred', 'unstarred', 'favorite', 'unfavorite', 'list'].includes(action)) throw fail(400, 'Invalid chat action');
         if (['starred', 'unstarred'].includes(action)) {
           const message = await actionMessage(a, chat, body);

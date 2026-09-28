@@ -107,6 +107,7 @@ SELECT c.id,
            END,
            regexp_replace(c.id, '^[^:]+:', '')
          )
+         WHEN saved_contact.name IS NOT NULL THEN saved_contact.name
          WHEN c.name IS NOT NULL
           AND BTRIM(c.name) <> ''
           AND c.name <> c.id
@@ -159,6 +160,24 @@ SELECT c.id,
        COALESCE(last_message.wa_timestamp, c.last_message_at)::text AS "_sortTimestamp",
        last_message.direction = 'OUTBOUND' AS "fromMe"
 FROM conversations c
+LEFT JOIN LATERAL (
+  SELECT BTRIM(wc.name) AS name
+  FROM whatsapp_contacts wc
+  WHERE wc.account = c.account
+    AND wc.jid = ANY(ARRAY[
+      regexp_replace(c.id, '^[^:]+:', ''),
+      regexp_replace(regexp_replace(c.id, '^[^:]+:', ''), '@c\\.us$', '@s.whatsapp.net'),
+      regexp_replace(regexp_replace(c.id, '^[^:]+:', ''), '@s\\.whatsapp\\.net$', '@c.us'),
+      regexp_replace(c.wa_chat_id, '^[^:]+:', ''),
+      regexp_replace(regexp_replace(c.wa_chat_id, '^[^:]+:', ''), '@c\\.us$', '@s.whatsapp.net'),
+      regexp_replace(regexp_replace(c.wa_chat_id, '^[^:]+:', ''), '@s\\.whatsapp\\.net$', '@c.us')
+    ])
+    AND wc.name IS NOT NULL AND BTRIM(wc.name) <> ''
+    AND BTRIM(wc.name) !~ '@(lid|c\\.us|s\\.whatsapp\\.net|g\\.us)$'
+  ORDER BY wc.updated_at DESC NULLS LAST,
+           (wc.jid = regexp_replace(c.id, '^[^:]+:', '')) DESC
+  LIMIT 1
+) saved_contact ON COALESCE(c.is_group, false) = false
 LEFT JOIN LATERAL (
   SELECT array_agg(pn.id ORDER BY pn.id) AS ids,
          (array_agg(pn.name ORDER BY

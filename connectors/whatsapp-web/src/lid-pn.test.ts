@@ -168,6 +168,46 @@ test('contact identity keeps address-book name separate from push name and alias
       pushName: 'Perfil',
     }
   );
+  assert.deepEqual(
+    whatsappContactIdentity({ id: '34600111222@s.whatsapp.net', verifiedName: 'Empresa', notify: 'Perfil' }),
+    { ids: ['34600111222@s.whatsapp.net'], name: undefined, pushName: 'Perfil' }
+  );
+});
+
+test('history contacts persist an emoji saved name for LID and PN aliases within one account', async () => {
+  const { calls, restore } = stubPoolQuery();
+  try {
+    process.env.CONNECTOR_ACCOUNT = 'professional';
+    const { BaileysClient } = await loadClientModule();
+    const client = new BaileysClient('/tmp/socialmedia-history-contact-name-test', 'test-key');
+    const chatStore = (client as any).chatStore as Map<string, any>;
+    chatStore.set('12025550123@lid', {
+      id: '12025550123@lid', rawJid: '12025550123@lid', name: 'Ada profile',
+      isGroup: false, unreadCount: 0, timestamp: 0,
+    });
+    await (client as any).applyHistoryContacts([{
+      id: '12025550123@lid', phoneNumber: '34600111222@s.whatsapp.net',
+      name: 'Ada ❤️💍', notify: 'Ada profile',
+    }]);
+    assert.equal(chatStore.get('12025550123@lid').name, 'Ada ❤️💍');
+    const saved = calls.filter(call => /INSERT INTO whatsapp_contacts/i.test(call.sql));
+    assert.equal(saved.length, 2);
+    assert(saved.every(call => call.params[0] === 'professional'));
+    assert(saved.every(call => call.params[3] === 'Ada ❤️💍'));
+    const conversations = calls.filter(call => /^\s*UPDATE conversations/i.test(call.sql));
+    assert.equal(conversations.length, 2);
+    assert(conversations.every(call => call.params[3] === 'professional' && call.params[4] === true));
+    assert(conversations.some(call => (call.params[0] as string[]).includes('professional:12025550123@lid')));
+    assert(conversations.some(call => (call.params[0] as string[]).includes('professional:34600111222@c.us')));
+
+    await (client as any).applyHistoryContacts([{
+      id: '12025550123@lid', notify: 'New profile',
+    }]);
+    assert.equal(chatStore.get('12025550123@lid').name, 'Ada ❤️💍');
+    assert.equal(calls.filter(call => /^\s*UPDATE conversations/i.test(call.sql)).at(-1)?.params[4], false);
+  } finally {
+    restore();
+  }
 });
 
 test('saved contact names outrank push names while later saved names replace them', async () => {

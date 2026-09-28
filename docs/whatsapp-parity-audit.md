@@ -68,15 +68,15 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | --- | --- | --- |
 | Accounts, independent chat identity, Hermes sessions | Existing | Regression coverage across account changes |
 | Chat filters, archived, favorites and lists | Partial | Bulk archive/mute/read deployed 8ad9dd9; provider synchronization of lists remains |
-| Pinned ordering and mute marker | Verified | Synthetic browser QA; deployed |
+| Pinned ordering, pin and mute markers | In validation | Synthetic browser QA passes; pending deployment |
 | Full available message history | Verified | Cursor paging, scroll preservation and concurrent polling covered |
 | More than 500 chats | Verified | Deployed 0e7762c: 243 Node 22 tests, 41 browser checks, 650 active/50 archived PG fixture; both accounts pass read-only live QA |
 | Quote reply, edit, delete, forward and selection | Existing | Official menu details and limits |
 | Copy message / jump from quote to original | Verified | Browser keyboard and historical quote tests |
 | Reactions and polls | Existing | Full emoji picker; current official results/detail UX |
-| Pinned messages and event RSVP | Partial | Deployed 5adcb7f; this candidate adds uncertainty recovery and indexed history reads. Real-provider write acceptance remains unverified |
-| Search and media/link/document gallery per chat | In validation | Sidebar search now queries account-scoped message history with cursor paging and opens the exact result, including unloaded chats. Global media browser deployed 8ad9dd9; advanced filters and media multiselect/duration ordering remain |
-| Composer optimistic sends, paste and voice recording | Verified | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass |
+| Pinned messages and event RSVP | Partial | The pin bar works for captured events, but live storage has no pin events and Baileys exposes no current-pin query. Historical backfill is not guaranteed; real-provider write acceptance remains unverified |
+| Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Advanced filters and media multiselect/duration ordering remain |
+| Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
 | Location and live location | Partial | Received locations render; sending not implemented |
@@ -85,8 +85,8 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | New chats / contact creation | Verified | Directory deployed 8ad9dd9; both accounts pass read-only authenticated browser QA; extended drawer scenarios remain in development |
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
-| Settings drawer / wallpaper / spellcheck / Enter preference | Verified | Desktop/mobile, light/dark, persistence |
-| Emoji substitution / upload quality / automatic downloads | In validation | Emoji replacement is deployed. Image Standard/HD preprocessing and per-account quality selection pass synthetic tests; Baileys has no native HD flag, and video remains source quality. Four account-scoped download switches are under adversarial cache/network review before release |
+| Settings drawer / wallpaper / spellcheck / Enter preference | Partial | Desktop/mobile, light/dark and persistence tested; composer Enter behavior under correction |
+| Emoji substitution / upload quality / automatic downloads | Partial | Standard/HD image processing and four account-scoped download switches deployed 1f46b8f with bounded cancellation/cache tests. Baileys has no native HD badge, video remains source quality, and real-provider HD acceptance is unverified |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
 | Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
@@ -97,8 +97,9 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Partial | Account/author-scoped persistence and expiry deployed b727ce6; catalogue/viewer and explicit publishing audience remain |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
-| Chat export / clear / delete / lock | Partial | TXT export of synchronized history verified; clear/delete/lock pending |
-| Accessibility and responsive layouts | Ongoing | Keyboard, focus, small screens and contrasts across features |
+| Chat list options and contact names | Partial | Official context-menu actions and saved-name precedence under correction; current live contact name lacks the official saved Unicode/emoji value |
+| Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
+| Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
 
 ## Verified provider boundaries
 
@@ -490,3 +491,25 @@ An independent reviewer reproduced the three download race/focus fixes. QA is
 synthetic: no real image, GIF, or message was sent during this validation, and
 provider acceptance of HD-transformed images remains unverified. Other rows
 above remain open; this does not establish full WhatsApp parity.
+
+## Follow-up: chat controls, saved names, and mobile install
+
+The next candidate adds a contextual menu to each chat row for supported
+archive, mute, pin, unread, favorite, and list actions. Blocking a direct
+contact has a provider-confirmed, account-scoped backend; no real contact was
+blocked in QA. Clear/delete cannot be offered safely until provider changes
+and local history stay in sync. Baileys 7.0.0-rc13 does not expose a public
+chat-lock operation. Existing pinned-message UI is data-limited: the live
+database has no captured pin events, and Baileys cannot query the current pin
+state directly. A history backfill may help but cannot guarantee the event or
+original message will be available.
+
+Saved WhatsApp contact names now take precedence over chat titles, including
+Unicode and emoji names, and history contacts are ingested per account. A
+previously paired account may need a targeted backfill because the original
+contact snapshot was discarded. The composer uses Enter to send and
+Shift+Enter for a newline by default, with the existing alternate Enter
+preference preserved. Mobile layout uses a full-width chat/list, safe-area
+spacing and 16px inputs while keeping accessible pinch zoom. PNG icons,
+standalone manifest and Apple metadata enable Home Screen installation; an
+iPhone device install still requires real-world verification.

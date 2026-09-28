@@ -11,6 +11,7 @@ import {
 } from '../baileys-client';
 import { QRHandler } from '../qr-handler';
 import { createHMACAuth, AuthenticatedRequest } from './auth';
+import { contactBlockJid, ContactBlockError } from '../contact-block';
 import {
   connectorAccount,
   createWhatsAppManualOpenRequest,
@@ -267,6 +268,12 @@ function errorMessage(error: unknown): string {
 }
 
 function capabilityErrorResponse(res: Response, error: unknown): void {
+  if (error instanceof ContactBlockError) {
+    res
+      .status(error.status)
+      .json({ ok: false, error: { code: 'CONTACT_BLOCK_ERROR', message: error.message } });
+    return;
+  }
   if (error instanceof EventSendError || error instanceof PinSendError) {
     res
       .status(error.status)
@@ -1853,6 +1860,34 @@ export function createRouter(
       })();
     }
   );
+
+  router.post('/chats/:chatId/block', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        if (
+          process.env.ENABLE_SENDING !== 'true' ||
+          process.env.EMERGENCY_DISABLE_SENDING === 'true'
+        ) {
+          res.status(403).json({
+            ok: false,
+            error: { code: 'SENDING_DISABLED', message: 'Sending is disabled' },
+          });
+          return;
+        }
+        const jid = contactBlockJid(req.params.chatId);
+        if (typeof req.body?.blocked !== 'boolean') {
+          res.status(400).json({
+            ok: false,
+            error: { code: 'INVALID_REQUEST', message: 'blocked must be boolean' },
+          });
+          return;
+        }
+        res.json({ ok: true, ...(await client.blockContact(jid, req.body.blocked)) });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
 
   router.post('/chats/:chatId/modify', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {

@@ -162,6 +162,12 @@ function renderChats() {
     const details = node('span', 'chat-details');
     const nameRow = node('span', 'chat-name-row');
     nameRow.append(node('span', 'chat-name', chat.name || chat.id));
+    if (featureUI?.isChatPinned?.(chat) || chat.pinned === true || chat.isPinned === true) {
+      const pin = node('span', 'chat-pin');
+      pin.setAttribute('aria-label', 'Chat fijado');
+      pin.title = 'Chat fijado';
+      nameRow.append(pin);
+    }
     if (chat.muted === true || chat.isMuted === true) {
       const muted = node('span', 'chat-muted', 'Silenciado');
       muted.setAttribute('aria-label', 'Chat silenciado');
@@ -173,7 +179,17 @@ function renderChats() {
     button.append(details);
     if (Number(chat.unread) > 0 || chat.unread === true) button.append(node('span', 'badge', String(chat.unread === true ? '' : chat.unread)));
     button.onclick = () => selectChat(chat);
-    $('chats').append(button);
+    const row = node('div', 'chat-row');
+    const menu = node('button', 'chat-row-menu', '⌄');
+    menu.type = 'button';
+    menu.setAttribute('aria-label', `Opciones de ${chat.name || chat.id}`);
+    menu.setAttribute('aria-haspopup', 'menu');
+    const openMenu = event => { event.preventDefault(); featureUI?.openSidebarChatMenu(chat, menu); };
+    menu.onclick = openMenu;
+    row.oncontextmenu = openMenu;
+    button.onkeydown = event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openMenu(event); };
+    row.append(button, menu);
+    $('chats').append(row);
   }
   $('chat-status').textContent = !state.chats.length ? (filter === 'archived' ? 'No hay chats archivados.' : 'Todavía no hay chats sincronizados para esta cuenta.') : !chats.length ? 'No hay conversaciones que coincidan.' : '';
 }
@@ -583,10 +599,23 @@ async function sendPlannedMessages(items) {
     }
   }
 }
+function enterToSendEnabled() { return safeLocalStorage()?.getItem('wa-enter-to-send') !== 'false'; }
+const compactComposerHint = matchMedia('(max-width: 560px)');
+function updateMessageComposerHint(enabled = enterToSendEnabled()) {
+  const message = $('message');
+  const hint = enabled
+    ? 'Enter para enviar · Shift+Enter para nueva línea'
+    : 'Ctrl/Cmd+Enter para enviar · Enter para nueva línea';
+  message.placeholder = compactComposerHint.matches ? 'Escribe un mensaje' : hint;
+  message.title = hint;
+  message.setAttribute('aria-description', hint);
+  message.enterKeyHint = enabled ? 'send' : 'enter';
+}
+updateMessageComposerHint();
+document.addEventListener('wa:enter-to-send-change', event => updateMessageComposerHint(event.detail?.enabled ?? enterToSendEnabled()));
+compactComposerHint.addEventListener?.('change', () => updateMessageComposerHint());
 $('message').onkeydown = event => {
-  let enterToSend = true;
-  try { enterToSend = localStorage.getItem('wa-enter-to-send') !== 'false'; } catch {}
-  if (shouldSubmitMessageKey(event, enterToSend, matchMedia('(pointer: coarse)').matches)) {
+  if (event.keyCode !== 229 && shouldSubmitMessageKey(event, enterToSendEnabled(), false)) {
     event.preventDefault();
     $('composer').requestSubmit();
   }

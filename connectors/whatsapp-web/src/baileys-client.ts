@@ -1,4 +1,5 @@
 import { parseMediaQuality, prepareImageQuality, type MediaQuality } from './media-quality';
+import { ContactBlockError, setContactBlocked } from './contact-block';
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
 import {
@@ -600,8 +601,8 @@ export function whatsappContactIdentity(contact: unknown): WhatsAppContactIdenti
   };
   return {
     ids,
-    name: candidate('name', 'verifiedName'),
-    pushName: pushCandidate('notify', 'pushName', 'push_name'),
+    name: candidate('name'),
+    pushName: pushCandidate('notify', 'pushName', 'push_name', 'verifiedName'),
   };
 }
 
@@ -1025,8 +1026,9 @@ export class BaileysClient extends EventEmitter {
       }
     });
 
-    sock.ev.on('messaging-history.set', async ({ chats, messages, isLatest }) => {
+    sock.ev.on('messaging-history.set', async ({ chats, contacts, messages, isLatest }) => {
       // chats: Chat[] (Baileys type). Refresh in-memory chat store.
+      const chatNameWrites: Promise<unknown>[] = [];
       for (const c of chats) {
         if (!c.id) continue;
         if (novedadesKind({ remoteJid: c.id })) continue;
@@ -1035,14 +1037,18 @@ export class BaileysClient extends EventEmitter {
         this.chatStore.set(norm, {
           id: norm,
           rawJid: c.id,
-          name: c.name || c.id,
+          name: !isGroup ? this.savedContactNameFor(c.id, norm) || c.name || c.id : c.name || c.id,
           isGroup,
           unreadCount: c.unreadCount || 0,
           timestamp: Number(c.conversationTimestamp || 0),
           archived: typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
-          void setConversationName(norm, c.name).catch(() => {});
+          chatNameWrites.push(
+            setConversationName(norm, c.name, {
+              authoritative: isGroup,
+            }).catch(() => {})
+          );
         }
         // Persist real unread + archived from the history snapshot.
         const archived = typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined;
@@ -1052,6 +1058,10 @@ export class BaileysClient extends EventEmitter {
           unreadCount: c.unreadCount || 0,
         }).catch(() => {});
       }
+      // A history snapshot carries saved contact names independently of chat
+      // titles. Persist them before messages can recreate an older title.
+      await Promise.all(chatNameWrites);
+      await this.applyHistoryContacts(contacts || []);
       if (!this.historySyncOnLogin && Date.now() > this.historyBackfillRequestedUntil) return;
       this.logger.info(
         `history.set received chats=${chats.length} messages=${messages.length} isLatest=${isLatest}`
@@ -1106,9 +1116,13 @@ export class BaileysClient extends EventEmitter {
           if (typeof (u as any).pinned === 'boolean') prev.pinned = (u as any).pinned;
           if (typeof (u as any).mute === 'number') prev.muteUntil = Number((u as any).mute);
           if ((u as any).name) {
-            prev.name = (u as any).name;
+            prev.name = !prev.isGroup
+              ? this.savedContactNameFor(u.id, norm) || (u as any).name
+              : (u as any).name;
             if (!isWhatsAppJidLikeName(prev.name, norm)) {
-              void setConversationName(norm, prev.name).catch(() => {});
+              void setConversationName(norm, prev.name, {
+                authoritative: prev.isGroup || !!this.savedContactNameFor(u.id, norm),
+              }).catch(() => {});
             }
           }
           this.emit('chat-update', {
@@ -1138,14 +1152,18 @@ export class BaileysClient extends EventEmitter {
         this.chatStore.set(norm, {
           id: norm,
           rawJid: c.id,
-          name: c.name || c.id,
+          name: !isJidGroup(c.id)
+            ? this.savedContactNameFor(c.id, norm) || c.name || c.id
+            : c.name || c.id,
           isGroup: !!isJidGroup(c.id),
           unreadCount: c.unreadCount || 0,
           timestamp: Number(c.conversationTimestamp || 0),
           archived: typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
-          void setConversationName(norm, c.name).catch(() => {});
+          void setConversationName(norm, this.savedContactNameFor(c.id, norm) || c.name, {
+            authoritative: !!isJidGroup(c.id) || !!this.savedContactNameFor(c.id, norm),
+          }).catch(() => {});
         }
         // Persist real unread badge + archived flag (fire-and-forget).
         const archived = typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined;
@@ -1366,10 +1384,21 @@ export class BaileysClient extends EventEmitter {
     return records.find(record => record.source === 'saved')?.name || records[0]?.name;
   }
 
-  private applyContactIdentity(contact: unknown): void {
+  private savedContactNameFor(...ids: string[]): string | undefined {
+    const aliases = this.mergeContactAliases(ids);
+    return Array.from(aliases)
+      .map(alias => this.contactNames.get(alias))
+      .find(record => record?.source === 'saved')?.name;
+  }
+
+  private async applyHistoryContacts(contacts: unknown[]): Promise<void> {
+    await Promise.all(contacts.map(contact => this.applyContactIdentity(contact)));
+  }
+
+  private applyContactIdentity(contact: unknown): Promise<void> {
     const identity = whatsappContactIdentity(contact);
     const displayName = identity.name || identity.pushName;
-    if (!displayName || !identity.ids.length) return;
+    if (!displayName || !identity.ids.length) return Promise.resolve();
 
     const source: WhatsAppContactNameSource = identity.name ? 'saved' : 'push';
     const prepared = identity.ids.map(originalId =>
@@ -1381,7 +1410,9 @@ export class BaileysClient extends EventEmitter {
       displayName,
       source
     );
-    if (!effective) return;
+    if (!effective) return Promise.resolve();
+
+    const writes: Promise<unknown>[] = [];
 
     for (let index = 0; index < prepared.length; index += 1) {
       const rawId = prepared[index];
@@ -1393,9 +1424,11 @@ export class BaileysClient extends EventEmitter {
         // Contact events can arrive before the chat snapshot after a restart.
         // Persist the candidate independently so an authoritative rename is
         // not lost when the in-memory chat store is still empty.
-        void setConversationName(normalizedId, displayName, {
-          authoritative: source === 'saved',
-        }).catch(() => {});
+        writes.push(
+          setConversationName(normalizedId, displayName, {
+            authoritative: source === 'saved',
+          }).catch(() => {})
+        );
       }
       if (chat && !chat.isGroup) {
         if (source === 'saved' || isWhatsAppJidLikeName(chat.name, normalizedId)) {
@@ -1403,29 +1436,34 @@ export class BaileysClient extends EventEmitter {
         }
       }
 
-      void ensureParticipant({
-        id: normalizedId,
-        name: effectiveName,
-        pushName: identity.pushName,
-        phone: this.phoneFromJid(rawId),
-      })
-        .then(() =>
-          source === 'saved'
-            ? setParticipantName(normalizedId, effectiveName, identity.pushName)
-            : undefined
-        )
-        .catch(error => {
-          this.logger.debug?.(`contact name persist failed: ${error?.message || error}`);
-        });
-      void storeContact({
-        jid: rawId,
-        phone: this.phoneFromJid(rawId),
-        name: identity.name,
-        pushName: identity.pushName,
-      }).catch(error => {
-        this.logger.debug?.(`contact durable persist failed: ${error?.message || error}`);
-      });
+      writes.push(
+        ensureParticipant({
+          id: normalizedId,
+          name: effectiveName,
+          pushName: identity.pushName,
+          phone: this.phoneFromJid(rawId),
+        })
+          .then(() =>
+            source === 'saved'
+              ? setParticipantName(normalizedId, effectiveName, identity.pushName)
+              : undefined
+          )
+          .catch(error => {
+            this.logger.debug?.(`contact name persist failed: ${error?.message || error}`);
+          })
+      );
+      writes.push(
+        storeContact({
+          jid: rawId,
+          phone: this.phoneFromJid(rawId),
+          name: identity.name,
+          pushName: identity.pushName,
+        }).catch(error => {
+          this.logger.debug?.(`contact durable persist failed: ${error?.message || error}`);
+        })
+      );
     }
+    return Promise.all(writes).then(() => undefined);
   }
 
   private handleQR(qr: string): void {
@@ -3443,6 +3481,13 @@ export class BaileysClient extends EventEmitter {
       this.logger.warn('Event relayed; local persistence is pending');
     }
     return relayedId;
+  }
+
+  async blockContact(chatId: string, blocked: boolean) {
+    if (!this.sock || !this.isConnected()) {
+      throw new ContactBlockError('WhatsApp is not connected', 503);
+    }
+    return setContactBlocked(this.sock, chatId, blocked);
   }
 
   async modifyChat(

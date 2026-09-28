@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { CHAT_LIST_ACTIVE_SQL, CHAT_LIST_ARCHIVED_SQL, CHAT_LIST_SQL, MESSAGE_LIST_SQL } from '../lib/chat-names.mjs';
+import { readContactDirectory } from '../lib/contact-directory.mjs';
 
 const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
 await client.connect();
@@ -12,7 +13,9 @@ try {
     CREATE TEMP TABLE conversations (id text, wa_chat_id text, account text, name text,
       is_group boolean, archived boolean DEFAULT false, avatar_url text,
       unread_count integer DEFAULT 0, last_message_at timestamptz DEFAULT now());
-    CREATE TEMP TABLE participants (id text, account text, name text, push_name text);
+    CREATE TEMP TABLE participants (id text, account text, name text, push_name text, profile_pic_url text);
+    CREATE TEMP TABLE whatsapp_contacts (account text, jid text, name text, push_name text,
+      updated_at timestamptz DEFAULT now());
     CREATE TEMP TABLE messages (id text, wa_message_id text, account text, conversation_id text,
       sender_wa_id text, content text, platform text DEFAULT 'whatsapp',
       is_deleted boolean DEFAULT false, direction text, wa_timestamp timestamptz DEFAULT now(),
@@ -63,6 +66,36 @@ try {
   assert.equal(a.find(x => x.id === 'a:out@lid').fromMe, true);
   assert.equal(a.find(x => x.id === 'a:123@lid').fromMe, false);
   assert.ok(a.filter(x => !['a:new@c.us', 'a:1234567890@broadcast'].includes(x.id)).every(x => x.timestamp instanceof Date));
+  await client.query(`
+    UPDATE conversations SET wa_chat_id='12025550123@s.whatsapp.net' WHERE id='a:123@lid';
+    INSERT INTO whatsapp_contacts (account,jid,name,push_name) VALUES
+      ('a','12025550123@s.whatsapp.net','Ada ❤️💍','Ada profile'),
+      ('a','789@s.whatsapp.net','Saved ❤️','Saved profile'),
+      ('b','12025550123@s.whatsapp.net',NULL,'Other profile');
+  `);
+  const namedA = (await client.query(CHAT_LIST_SQL, ['a'])).rows;
+  assert.equal(namedA.find(x => x.id === 'a:123@lid').name, 'Ada ❤️💍');
+  assert.equal(namedA.find(x => x.id === 'a:789@c.us').name, 'Saved ❤️');
+  assert.equal((await client.query(CHAT_LIST_SQL, ['b'])).rows[0].name, 'Friend B');
+  await client.query(`UPDATE whatsapp_contacts SET name='Ada renamed 💍' WHERE account='a' AND jid='12025550123@s.whatsapp.net'`);
+  assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.find(x => x.id === 'a:123@lid').name, 'Ada renamed 💍');
+  await client.query(`
+    INSERT INTO whatsapp_contacts (account,jid,name,push_name,updated_at)
+    VALUES ('a','123@lid','Old saved name',NULL,'2026-09-01');
+  `);
+  assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.find(x => x.id === 'a:123@lid').name, 'Ada renamed 💍');
+  const directory = await readContactDirectory({
+    account: 'a', params: new URLSearchParams({ q: 'Ada renamed' }),
+    query: async (sql, args) => (await client.query(sql, args)).rows,
+  });
+  assert.equal(directory.contacts.length, 1);
+  assert.equal(directory.contacts[0].label, 'Ada renamed 💍');
+  assert.equal(directory.contacts[0].chatId, 'a:123@lid');
+  const otherDirectory = await readContactDirectory({
+    account: 'b', params: new URLSearchParams({ q: 'Ada renamed' }),
+    query: async (sql, args) => (await client.query(sql, args)).rows,
+  });
+  assert.equal(otherDirectory.contacts.length, 0);
   assert.equal((await client.query(MESSAGE_LIST_SQL, ['a', ['a:123@lid']])).rows[0].senderName, 'Friend A');
   assert.equal((await client.query(MESSAGE_LIST_SQL, ['b', ['a:123@lid']])).rows.length, 0);
   assert.equal((await client.query(MESSAGE_LIST_SQL, ['a', ['a:out@lid']])).rows[0].senderName, null);

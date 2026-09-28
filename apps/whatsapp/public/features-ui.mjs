@@ -1162,6 +1162,86 @@ export function installFeatureUI({
     if (result) updateChatFlags(runtime.chat, { [fieldName]: !currentValue });
   }
 
+  function openSidebarChatMenu(chat, opener) {
+    const account = runtime.account;
+    if (!account || !chat?.id) return;
+    const modal = openModal('Opciones de conversación', { opener, variant: 'menu' });
+    opener?.setAttribute('aria-expanded', 'true');
+    runtime.modal.onClose = () => opener?.setAttribute('aria-expanded', 'false');
+    modal.dialog.setAttribute('role', 'menu');
+    modal.dialog.setAttribute('aria-label', `Opciones de ${chat.name || chat.id}`);
+    modal.dialog.removeAttribute('aria-labelledby');
+    const actions = node('div', 'feature-action-grid');
+    modal.body.append(actions);
+    const perform = async (action, flags, extra = {}, path = '/api/chat-actions') => {
+      closeModal();
+      if (runtime.account !== account) return;
+      const unreadKey = `${account}:${chat.id}`;
+      const previousUnreadKey = runtime.manualUnreadKey;
+      if (action === 'unread' && runtime.chat === chat.id) runtime.manualUnreadKey = unreadKey;
+      try {
+        const result = await request(path, { account, chat: chat.id, action, ...extra });
+        if (runtime.account !== account) return;
+        if (action === 'read' && runtime.manualUnreadKey === unreadKey) runtime.manualUnreadKey = '';
+        if (flags) updateChatFlags(chat.id, flags);
+        if (action === 'list') savePrefs(value => ({ ...value, lists: value.lists.map(list => list.name === extra.list ? { ...list, chatIds: [...new Set([...list.chatIds, chat.id])] } : list) }));
+        await loadChats();
+        if (runtime.account === account) toast('Preferencia actualizada.');
+        return result;
+      } catch (error) {
+        if (runtime.account === account) {
+          if (action === 'unread' && runtime.manualUnreadKey === unreadKey) runtime.manualUnreadKey = previousUnreadKey;
+          showError(error);
+        }
+      }
+    };
+    const add = (container, label, callback) => {
+      const item = button(documentRef, label, 'feature-button subtle');
+      item.setAttribute('role', 'menuitem'); item.tabIndex = -1;
+      item.onclick = callback; container.append(item); return item;
+    };
+    let submenu = null;
+    let parentItem = null;
+    const collapse = () => { submenu?.remove(); submenu = null; parentItem?.setAttribute('aria-expanded', 'false'); };
+    const branch = (label, entries) => {
+      const item = add(actions, `${label} ›`, () => {
+        collapse(); parentItem = item;
+        submenu = node('div', 'feature-chat-submenu'); submenu.setAttribute('role', 'menu'); submenu.setAttribute('aria-label', label);
+        item.setAttribute('aria-expanded', 'true');
+        entries.forEach(([name, action]) => add(submenu, name, action));
+        item.after(submenu); submenu.querySelector('button')?.focus();
+      });
+      item.setAttribute('aria-haspopup', 'menu'); item.setAttribute('aria-expanded', 'false');
+    };
+    const archived = chatIsArchived(chat, prefs());
+    add(actions, archived ? 'Desarchivar chat' : 'Archivar chat', () => perform(archived ? 'unarchive' : 'archive', { archived: !archived }));
+    if (chatIsMuted(chat, prefs())) add(actions, 'Activar notificaciones', () => perform('unmute', { muted: false }));
+    else branch('Silenciar notificaciones', [
+      ['8 horas', () => perform('mute', { muted: true }, { durationMs: 8 * 60 * 60 * 1000 })],
+      ['1 semana', () => perform('mute', { muted: true }, { durationMs: 7 * 24 * 60 * 60 * 1000 })],
+    ]);
+    const pinned = chatIsPinned(chat, prefs());
+    add(actions, pinned ? 'Desfijar chat' : 'Fijar chat', () => perform(pinned ? 'unpin' : 'pin', { pinned: !pinned }));
+    const unread = Number(chat.unread) > 0 || chat.unread === true;
+    add(actions, unread ? 'Marcar como leído' : 'Marcar como no leído', () => perform(unread ? 'read' : 'unread', { unread: unread ? 0 : 1 }));
+    const favorite = chatIsFavorite(chat, prefs());
+    add(actions, favorite ? 'Quitar de favoritos' : 'Añadir a favoritos', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
+    const lists = prefs().lists.filter(list => !list.chatIds.includes(chat.id));
+    if (lists.length) branch('Añadir a lista', lists.map(list => [list.name, () => perform('list', null, { list: list.name, id: chat.id }, '/api/lists')]));
+    modal.dialog.addEventListener('keydown', event => {
+      if (event.key === 'Tab') { closeModal(); return; }
+      if (event.key === 'ArrowLeft' || (event.key === 'Escape' && submenu)) {
+        event.preventDefault(); event.stopPropagation(); collapse(); parentItem?.focus(); return;
+      }
+      if (event.key === 'ArrowRight' && documentRef.activeElement?.getAttribute('aria-haspopup') === 'menu') { event.preventDefault(); documentRef.activeElement.click(); return; }
+      const scope = submenu?.contains(documentRef.activeElement) ? submenu : actions;
+      const items = [...scope.children].filter(item => item.getAttribute('role') === 'menuitem');
+      const index = items.indexOf(documentRef.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : event.key === 'ArrowDown' ? (index + 1) % items.length : event.key === 'ArrowUp' ? (index + items.length - 1) % items.length : -1;
+      if (next >= 0) { event.preventDefault(); items[next]?.focus(); }
+    });
+  }
+
   function openChatMenu() {
     if (!runtime.chat) return;
     const modal = openModal('Opciones de conversación', { opener: documentRef.activeElement, variant: 'menu' });
@@ -1748,6 +1828,8 @@ export function installFeatureUI({
     openInfo,
     openSearch,
     openChatMenu,
+    openSidebarChatMenu,
+    isChatPinned: chat => chatIsPinned(chat, prefs()),
     /** Close every features dialog from the app shell (rail panels are mutually exclusive). */
     closePanels: () => { runtime.closeAttachMenu?.(); closeContactDirectory(); closeModal(); },
     setView,

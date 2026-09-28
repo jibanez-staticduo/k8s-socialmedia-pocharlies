@@ -148,7 +148,7 @@ merged AS (
   SELECT r.key,
          max(r.phone) AS phone,
          max(r.lid) AS lid,
-         (array_agg(r.name ORDER BY (r.name IS NULL), r.origin_rank))[1] AS name,
+         (array_agg(r.name ORDER BY (r.name IS NULL), (r.origin_rank <> 2), r.synced_at DESC NULLS LAST, r.origin_rank))[1] AS name,
          (array_agg(r.push_name ORDER BY (r.push_name IS NULL), r.origin_rank))[1] AS push_name,
          (array_agg(r.chat_id ORDER BY (r.chat_id IS NULL), (r.lid IS NOT NULL) DESC, r.origin_rank, r.chat_id))[1] AS chat_id,
          (array_agg(r.chat_archived ORDER BY (r.chat_id IS NULL), (r.lid IS NOT NULL) DESC, r.origin_rank, r.chat_id) FILTER (WHERE r.chat_id IS NOT NULL))[1] AS chat_archived,
