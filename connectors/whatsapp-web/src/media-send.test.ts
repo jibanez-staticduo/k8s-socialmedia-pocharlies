@@ -6,19 +6,31 @@ import pg from 'pg';
 test('an existing video attachment gains provider duration without redownloading', async () => {
   const client = Object.create(BaileysClient.prototype) as any;
   client.mediaPersistenceLocks = new Map();
-  const queries: Array<{sql: string; params: unknown[]}> = [];
+  const queries: Array<{ sql: string; params: unknown[] }> = [];
   const original = pg.Pool.prototype.query;
   (pg.Pool.prototype as any).query = async (sql: string, params: unknown[] = []) => {
-    queries.push({sql, params});
-    return {rows: [{file_url: 'stored-key', file_size: 42, mime_type: 'video/mp4', file_name: 'clip.mp4'}]};
+    queries.push({ sql, params });
+    return {
+      rows: [
+        { file_url: 'stored-key', file_size: 42, mime_type: 'video/mp4', file_name: 'clip.mp4' },
+      ],
+    };
   };
   try {
-    const result = await client.downloadAndStoreMedia({key: {id: 'message'}, message: {videoMessage: {seconds: 97}}}, 'message', 'VIDEO');
+    const result = await client.downloadAndStoreMedia(
+      { key: { id: 'message' }, message: { videoMessage: { seconds: 97 } } },
+      'message',
+      'VIDEO'
+    );
     assert.equal(result.storageKey, 'stored-key');
     assert.match(queries[1].sql, /SET duration_seconds=COALESCE\(duration_seconds, \$2\)/);
     assert.deepEqual(queries[1].params, ['message', 97]);
     queries.length = 0;
-    await client.downloadAndStoreMedia({key: {id: 'message'}, message: {videoMessage: {seconds: 0}}}, 'message', 'VIDEO');
+    await client.downloadAndStoreMedia(
+      { key: { id: 'message' }, message: { videoMessage: { seconds: 0 } } },
+      'message',
+      'VIDEO'
+    );
     assert.equal(queries.length, 1, 'unknown duration must not overwrite stored metadata');
   } finally {
     (pg.Pool.prototype as any).query = original;
@@ -283,18 +295,35 @@ test('media persistence lock serializes competing echo and local writes', async 
 
 test('quality changes the bytes actually sent, preserves alpha and source, and never upscales', async () => {
   const { default: sharp } = await import('sharp');
-  const input = await sharp({ create: { width: 3200, height: 1800, channels: 3, background: '#865423' } }).png().toBuffer();
+  const input = await sharp({
+    create: { width: 3200, height: 1800, channels: 3, background: '#865423' },
+  })
+    .png()
+    .toBuffer();
   const client = Object.create(BaileysClient.prototype) as any;
   let payload: any;
   let claimed = false;
-  client.sock = { sendMessage: async (_jid: string, value: any) => { payload = value; return {}; } };
+  client.sock = {
+    sendMessage: async (_jid: string, value: any) => {
+      payload = value;
+      return {};
+    },
+  };
   client.toRawJid = (jid: string) => jid;
   client.buildQuotedFromId = async () => undefined;
   const send = async (bytes: Buffer, quality: string, mime = 'image/png') => {
-    await client.sendFile('peer', `data:${mime};base64,${bytes.toString('base64')}`, undefined, { quality, beforeSend: async () => { claimed = true; } });
+    await client.sendFile('peer', `data:${mime};base64,${bytes.toString('base64')}`, undefined, {
+      quality,
+      beforeSend: async () => {
+        claimed = true;
+      },
+    });
     return payload;
   };
-  for (const [quality, width] of [['standard', 1600], ['hd', 2560]] as const) {
+  for (const [quality, width] of [
+    ['standard', 1600],
+    ['hd', 2560],
+  ] as const) {
     const sent = await send(input, quality);
     const meta = await sharp(sent.image).metadata();
     assert.equal(meta.width, width);
@@ -303,20 +332,35 @@ test('quality changes the bytes actually sent, preserves alpha and source, and n
     assert.notDeepEqual(sent.image, input);
   }
   assert.deepEqual((await send(input, 'source')).image, input);
-  const alpha = await sharp({ create: { width: 20, height: 10, channels: 4, background: { r: 1, g: 2, b: 3, alpha: 0.5 } } }).png().toBuffer();
+  const alpha = await sharp({
+    create: { width: 20, height: 10, channels: 4, background: { r: 1, g: 2, b: 3, alpha: 0.5 } },
+  })
+    .png()
+    .toBuffer();
   const transparent = await send(alpha, 'hd');
   const meta = await sharp(transparent.image).metadata();
   assert.equal(meta.width, 20);
   assert.equal(meta.height, 10);
   assert.equal(meta.hasAlpha, true);
   assert.equal(meta.format, 'png');
-  const oriented = await sharp({ create: { width: 100, height: 50, channels: 3, background: '#123456' } }).jpeg().withMetadata({ orientation: 6 }).toBuffer();
+  const oriented = await sharp({
+    create: { width: 100, height: 50, channels: 3, background: '#123456' },
+  })
+    .jpeg()
+    .withMetadata({ orientation: 6 })
+    .toBuffer();
   const rotated = await sharp((await send(oriented, 'standard', 'image/jpeg')).image).metadata();
   assert.equal(rotated.width, 50);
   assert.equal(rotated.height, 100);
   assert.equal(rotated.orientation, undefined);
-  assert.deepEqual((await send(Buffer.from('video'), 'hd', 'video/mp4')).video, Buffer.from('video'));
-  for (const bytes of [Buffer.from('invalid'), Buffer.from('<svg width="10000" height="10000" xmlns="http://www.w3.org/2000/svg"></svg>')]) {
+  assert.deepEqual(
+    (await send(Buffer.from('video'), 'hd', 'video/mp4')).video,
+    Buffer.from('video')
+  );
+  for (const bytes of [
+    Buffer.from('invalid'),
+    Buffer.from('<svg width="10000" height="10000" xmlns="http://www.w3.org/2000/svg"></svg>'),
+  ]) {
     claimed = false;
     await assert.rejects(send(bytes, 'standard'), /Image cannot be processed/);
     assert.equal(claimed, false);
@@ -338,19 +382,31 @@ test('expanded alpha WebP exceeding the inline limit fails before token claim or
     pixels[index] = seed & 255;
   }
   const input = await sharp(pixels, { raw: { width: 2560, height: 2560, channels: 4 } })
-    .webp({ quality: 40 }).toBuffer();
+    .webp({ quality: 40 })
+    .toBuffer();
   assert(input.length < 10 * 1024 * 1024, `WebP fixture size: ${input.length}`);
   const expanded = await sharp(input).png().toBuffer();
   assert(expanded.length > MAX_TRANSFORMED_IMAGE_BYTES, `PNG fixture size: ${expanded.length}`);
   let claimed = false;
   let sent = false;
   const client = Object.create(BaileysClient.prototype) as any;
-  client.sock = { sendMessage: async () => { sent = true; return {}; } };
+  client.sock = {
+    sendMessage: async () => {
+      sent = true;
+      return {};
+    },
+  };
   client.toRawJid = (jid: string) => jid;
   client.buildQuotedFromId = async () => undefined;
-  await assert.rejects(client.sendFile('peer', `data:image/webp;base64,${input.toString('base64')}`, undefined, {
-    quality: 'hd', beforeSend: async () => { claimed = true; },
-  }), /Processed image exceeds 16 MiB; use source quality or send as a document/);
+  await assert.rejects(
+    client.sendFile('peer', `data:image/webp;base64,${input.toString('base64')}`, undefined, {
+      quality: 'hd',
+      beforeSend: async () => {
+        claimed = true;
+      },
+    }),
+    /Processed image exceeds 16 MiB; use source quality or send as a document/
+  );
   assert.equal(claimed, false);
   assert.equal(sent, false);
 });

@@ -2080,7 +2080,16 @@ export class BaileysClient extends EventEmitter {
       await db.query(
         `INSERT INTO attachments (message_id, file_type, mime_type, file_name, file_size, file_url, caption, duration_seconds)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [messageId, fileType, mimeType, fileName, stored.fileSize, stored.storageKey, caption, durationSeconds || null]
+        [
+          messageId,
+          fileType,
+          mimeType,
+          fileName,
+          stored.fileSize,
+          stored.storageKey,
+          caption,
+          durationSeconds || null,
+        ]
       );
       await db.query('COMMIT');
       return { ...stored, mimeType, fileName };
@@ -2105,7 +2114,9 @@ export class BaileysClient extends EventEmitter {
         [messageId]
       );
       if (existing.rows[0]?.file_url) {
-        const rawDuration = Number(msg.message?.videoMessage?.seconds ?? msg.message?.audioMessage?.seconds);
+        const rawDuration = Number(
+          msg.message?.videoMessage?.seconds ?? msg.message?.audioMessage?.seconds
+        );
         if (Number.isSafeInteger(rawDuration) && rawDuration > 0 && rawDuration <= 2147483647) {
           await getPool().query(
             'UPDATE attachments SET duration_seconds=COALESCE(duration_seconds, $2) WHERE message_id=$1',
@@ -2154,9 +2165,13 @@ export class BaileysClient extends EventEmitter {
     }
 
     const { mimeType, fileName } = this.mediaMetaFromMessage(msg);
-    const rawDuration = Number(msg.message?.videoMessage?.seconds ?? msg.message?.audioMessage?.seconds);
-    const durationSeconds = Number.isSafeInteger(rawDuration) && rawDuration > 0 && rawDuration <= 2147483647
-      ? rawDuration : undefined;
+    const rawDuration = Number(
+      msg.message?.videoMessage?.seconds ?? msg.message?.audioMessage?.seconds
+    );
+    const durationSeconds =
+      Number.isSafeInteger(rawDuration) && rawDuration > 0 && rawDuration <= 2147483647
+        ? rawDuration
+        : undefined;
 
     const stored = await this.storeMediaBytesOnce(
       messageId,
