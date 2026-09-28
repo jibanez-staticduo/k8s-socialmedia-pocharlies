@@ -451,6 +451,9 @@ export function installFeatureUI({
     modal: null,
     composeFile: null,
     presenceTimer: null,
+    presenceExpiryTimer: null,
+    presenceStream: null,
+    presenceEventVersion: 0,
     presencePending: new Set(),
   };
 
@@ -2023,6 +2026,9 @@ export function installFeatureUI({
 
   function accountChanged(account) {
     clearInterval(runtime.presenceTimer); runtime.presenceTimer = null;
+    clearTimeout(runtime.presenceExpiryTimer); runtime.presenceExpiryTimer = null;
+    runtime.presenceStream?.close(); runtime.presenceStream = null;
+    runtime.presenceEventVersion = 0;
     runtime.closeAttachMenu?.();
     closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
   }
@@ -2042,11 +2048,38 @@ export function installFeatureUI({
 
   function chatChanged(chat) {
     clearInterval(runtime.presenceTimer); runtime.presenceTimer = null;
+    clearTimeout(runtime.presenceExpiryTimer); runtime.presenceExpiryTimer = null;
+    runtime.presenceStream?.close(); runtime.presenceStream = null;
+    runtime.presenceEventVersion = 0;
     runtime.closeAttachMenu?.();
     closeModal(); runtime.generation += 1; runtime.selectedChat = chat; runtime.chat = text(chat?.id); runtime.manualUnreadKey = ''; runtime.currentMessages = []; runtime.currentMessageIds.clear(); runtime.selectedMessageIds.clear(); clearReply(); enhanceMessages();
     if (chat?.isGroup !== true && runtime.chat) {
       const account = runtime.account; const chatId = runtime.chat; const generation = runtime.generation;
       void refreshHeaderPresence(account, chatId, generation, true);
+      if (typeof windowRef?.EventSource === 'function') {
+        const stream = new windowRef.EventSource(`/api/presence/stream?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(chatId)}`);
+        stream.addEventListener('presence', event => {
+          if (runtime.account !== account || runtime.chat !== chatId || runtime.generation !== generation) return;
+          try {
+            const presence = JSON.parse(event.data);
+            const subtitle = documentRef.getElementById('chat-subtitle');
+            if (subtitle && presence?.chatId) {
+              const label = visiblePresenceLabel({ ...presence, available: true });
+              if (!label) return;
+              runtime.presenceEventVersion++;
+              subtitle.textContent = label;
+              clearTimeout(runtime.presenceExpiryTimer);
+              if (['composing', 'recording'].includes(presence.status)) {
+                runtime.presenceExpiryTimer = setTimeout(() => {
+                  if (runtime.account === account && runtime.chat === chatId && runtime.generation === generation)
+                    void refreshHeaderPresence(account, chatId, generation);
+                }, 8_500);
+              }
+            }
+          } catch { /* Ignore malformed provider events; polling remains the fallback. */ }
+        });
+        runtime.presenceStream = stream;
+      }
       runtime.presenceTimer = setInterval(() => { if (!documentRef.hidden) void refreshHeaderPresence(account, chatId, generation); }, 20000);
     }
     void markVisibleRead();
@@ -2057,13 +2090,14 @@ export function installFeatureUI({
     const key = `${account}:${chat}:${generation}`;
     if (!subtitle || runtime.presencePending.has(key) || runtime.account !== account || runtime.chat !== chat || runtime.generation !== generation) return;
     runtime.presencePending.add(key);
+    const eventVersion = runtime.presenceEventVersion;
     try {
       if (subscribe) {
         try { await request('/api/presence/subscribe', { account, chat }); } catch { /* Some providers do not support subscriptions. */ }
       }
       if (runtime.account !== account || runtime.chat !== chat || runtime.generation !== generation) return;
       const presence = await request('/api/presence', undefined, { chat });
-      if (runtime.account === account && runtime.chat === chat && runtime.generation === generation) {
+      if (runtime.account === account && runtime.chat === chat && runtime.generation === generation && runtime.presenceEventVersion === eventVersion) {
         subtitle.textContent = visiblePresenceLabel(presence) || 'Contacto';
       }
     } catch { /* Keep the neutral contact label. */ }

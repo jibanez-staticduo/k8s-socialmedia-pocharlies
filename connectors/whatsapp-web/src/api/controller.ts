@@ -2641,6 +2641,48 @@ export function createRouter(
     })();
   });
 
+  router.get(
+    '/chats/:chatId/presence/stream',
+    auth,
+    (req: AuthenticatedRequest, res: Response): void => {
+      void (async () => {
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        let publish:
+          ((presence: Awaited<ReturnType<typeof client.getPresence>>) => void) | undefined;
+        const close = () => {
+          if (heartbeat) clearInterval(heartbeat);
+          if (publish) client.off('presence-update', publish);
+        };
+        res.once('close', close);
+        try {
+          const initial = await client.getPresence(req.params.chatId);
+          if (res.destroyed) return;
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          });
+          publish = (presence: typeof initial) => {
+            if (presence.chatId === initial.chatId && !res.destroyed)
+              res.write(`event: presence\ndata: ${JSON.stringify(presence)}\n\n`);
+          };
+          heartbeat = setInterval(() => {
+            if (!res.destroyed) res.write(': keepalive\n\n');
+          }, 15_000);
+          client.on('presence-update', publish);
+          publish(initial);
+          await client.subscribePresence(req.params.chatId);
+        } catch (error) {
+          if (!res.headersSent) capabilityErrorResponse(res, error);
+          else if (!res.destroyed) res.end();
+        } finally {
+          if (res.destroyed) close();
+        }
+      })();
+    }
+  );
+
   router.post('/chats/:chatId/presence', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {

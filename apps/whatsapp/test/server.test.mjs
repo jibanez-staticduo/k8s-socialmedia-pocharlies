@@ -146,6 +146,46 @@ test('status audience change is forwarded to the selected account connector', as
   assert.equal(calls[0].url, 'http://connector/api/v1/privacy');
   assert.deepEqual(JSON.parse(calls[0].options.body), { field: 'status', value: 'contacts' });
 });
+test('presence stream is authenticated, chat-scoped and forwards provider events', async t => {
+  const calls = [];
+  const { request } = await fixture(t, { fetchImpl: async (url, options) => {
+    calls.push({url, options});
+    return new Response('event: presence\ndata: {"chatId":"personal-chat","status":"composing"}\n\n', {
+      headers: {'content-type': 'text/event-stream'},
+    });
+  } });
+  const path = '/api/presence/stream?account=personal&chat=personal-chat';
+  assert.equal((await request(path, null, {authorization: ''})).status, 401);
+  assert.equal((await request(path.replace('account=personal', 'account=secondary'))).status, 404);
+  assert.equal((await request(path.replace('chat=personal-chat', 'chat=other-chat'))).status, 404);
+  assert.equal(calls.length, 0);
+  const response = await request(path);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/event-stream/);
+  assert.match(await response.text(), /"status":"composing"/);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/chats\/personal-chat\/presence\/stream$/);
+  assert.match(calls[0].options.headers['x-connector-signature'], /^sha256=[a-f0-9]{64}$/);
+});
+test('closing a presence stream aborts its upstream connector request', async t => {
+  let signal;
+  const { app } = await fixture(t, { fetchImpl: async (_url, options) => {
+    signal = options.signal;
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('event: presence\ndata: {"status":"available"}\n\n')); },
+    }), {headers: {'content-type': 'text/event-stream'}});
+  } });
+  const abort = new AbortController();
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  const response = await fetch(`${base}/api/presence/stream?account=personal&chat=personal-chat`, {
+    headers: {authorization: auth}, signal: abort.signal,
+  });
+  assert.equal(response.status, 200);
+  assert.match(new TextDecoder().decode((await response.body.getReader().read()).value), /available/);
+  abort.abort();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(signal.aborted, true);
+});
 test('connector requests are signed; success requires provider message ID', async t => {
   let outbound;
   const { request } = await fixture(t, { fetchImpl: async (url, options) => { outbound = { url, options }; return Response.json({ messageId: 'provider-id' }); } });

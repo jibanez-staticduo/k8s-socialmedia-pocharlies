@@ -81,7 +81,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Pinned messages and event RSVP | Partial | The pin bar works for captured events, but live storage has no pin events and Baileys exposes no current-pin query. Historical backfill is not guaranteed; real-provider write acceptance remains unverified |
 | Search and media/link/document gallery per chat | Partial | Sidebar account-scoped message search, cursor paging and exact-result navigation deployed 1f46b8f. Global media search matches saved and push names of senders, captions and file names, including results across media, documents and links. Global-library multiselect supports download, delete, star and forward with synthetic QA; longest-first sorting uses stored audio/video duration where available. Older attachments without saved duration retain timestamp order after known-duration clips |
 | Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
-| Camera, media editing and view-once | Partial | Camera capture/cleanup tested; view-once image/video sends pass synthetic app, browser and connector QA. Crop/rotate/annotation and real-provider confirmation remain |
+| Camera, media editing and view-once | In validation | Camera capture/cleanup tested; view-once image/video sends pass synthetic app, browser and connector QA. Draft JPEG/PNG/WebP photos can be cropped, rotated, drawn on and annotated with text before sending, with undo/redo and per-file captions/view-once preserved in synthetic browser QA. Exact visual parity, real-provider delivery and iPhone editing remain unverified |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
 | Location and live location | Partial | Received locations render; the authenticated WhatsApp Web attachment menu inspected on 28 Sep 2026 has no location-send action |
 | Link and map previews | Existing | Reference QA and failure states |
@@ -96,8 +96,8 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Privacy and disappearing messages | Partial | Online/group-add and status-audience fields are available; existing exclusions remain visible without inventing their members. Blocked-list viewing and confirmed unblock are deployed. Exclusion editor and About visibility remain |
 | Notifications | Partial | Account-scoped message/group/sound/preview preferences deployed 8ad9dd9; reaction/status notifications and closed-tab push remain |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
-| Presence | Partial | Composing/recording labels in validation; live event delivery remains |
-| Real-time updates | Partial | Authenticated events; current message/presence polling remains |
+| Presence | In validation | Account/chat-scoped presence events reach the open header over authenticated SSE, with polling fallback; typing/recording indicators expire after 8 seconds and stream listeners are released on disconnect. Real-provider delivery and privacy behavior remain unverified |
+| Real-time updates | Partial | Presence has an event stream; messages still refresh by polling |
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Partial | Account/author-scoped catalogue and viewer are available; saved contact names resolve by account. Text/image/video publishing to explicitly selected contacts passes synthetic app, connector and browser tests; real-provider delivery and complete historical coverage remain unverified |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
@@ -629,3 +629,12 @@ true, preserving existing normal-send fingerprints. Synthetic browser QA checks
 a mixed media/document batch and the mobile composer; app and connector suites
 pass without sending real media. Provider acceptance and how received view-once
 messages appear in historical storage still need live read-only verification.
+
+Presence now has an authenticated stream from the connector through the app to
+the open direct chat. The connector subscribes to the provider and forwards
+only snapshots for the requested chat; the app validates account and chat
+access before opening its signed upstream stream. Browser QA verifies immediate
+typing labels, stream teardown on chat change, and that a late polling response
+cannot overwrite a newer event. The existing 20-second read remains a fallback
+and corrects stale states. Connector and proxy tests use synthetic events; live
+provider delivery and NPM streaming behavior still require observation.

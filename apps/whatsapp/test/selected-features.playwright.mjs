@@ -390,6 +390,12 @@ async function fulfillApi(route, state) {
 
   if (pathName === '/api/presence' && request.method() === 'GET') {
     const chat = url.searchParams.get('chat') || '';
+    if (state.nextPresenceGate) {
+      const gate = state.nextPresenceGate;
+      state.nextPresenceGate = null;
+      state.presenceStarted = true;
+      await gate.promise;
+    }
     return jsonResponse(route, { account, chat, state: chat === 'alpha-direct' ? state.directPresence : 'unknown', lastSeen: null, available: chat === 'alpha-direct' && state.directPresence !== 'unknown' });
   }
   if (pathName === '/api/contact-block' && request.method() === 'GET') {
@@ -1352,11 +1358,25 @@ async function runDesktop(page, state, report) {
   await check('header presence is scoped and unknown contacts stay neutral', async () => {
     await openChat(page, 'Ana Fixture');
     await page.waitForFunction(() => document.querySelector('#chat-subtitle')?.textContent === 'En línea');
+    const streamUrl = await page.evaluate(() => window.__presenceStreams.at(-1)?.url);
+    assert.match(streamUrl, /account=alpha&chat=alpha-direct/);
+    await page.evaluate(() => window.__presenceStreams.at(-1).emit({chatId:'alpha-direct', status:'composing'}));
+    await page.waitForFunction(() => document.querySelector('#chat-subtitle')?.textContent === 'Escribiendo…');
+    const gate = deferred(); state.nextPresenceGate = gate; state.presenceStarted = false;
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await waitForCondition(() => state.presenceStarted, 'presence fallback request did not start');
+    await page.evaluate(() => window.__presenceStreams.at(-1).emit({chatId:'alpha-direct', status:'recording'}));
+    const fallbackResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/presence');
+    gate.resolve();
+    await fallbackResponse;
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('#chat-subtitle').textContent(), 'Grabando audio…');
     state.directPresence = 'unknown';
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await page.waitForFunction(() => document.querySelector('#chat-subtitle')?.textContent === 'Contacto');
     await openChat(page, 'Equipo Fixture');
     assert.equal(await page.locator('#chat-subtitle').textContent(), 'Grupo');
+    assert.equal(await page.evaluate(() => window.__presenceStreams.at(-1).closed), true);
     state.directPresence = 'online';
     await openChat(page, 'Ana Fixture');
     await page.waitForFunction(() => document.querySelector('#chat-subtitle')?.textContent === 'En línea');
@@ -1538,6 +1558,14 @@ async function runMobile(browser, baseUrl, report) {
       constructor(title, options = {}) { window.__fixtureNotifications.push({ title, body: options.body || '', tag: options.tag || '', silent: options.silent === true }); }
     }
     Object.defineProperty(window, 'Notification', { configurable: true, value: FixtureNotification });
+    window.__presenceStreams = [];
+    class FixtureEventSource {
+      constructor(url) { this.url = url; this.listeners = new Map(); this.closed = false; window.__presenceStreams.push(this); }
+      addEventListener(type, listener) { this.listeners.set(type, listener); }
+      emit(data) { this.listeners.get('presence')?.({data: JSON.stringify(data)}); }
+      close() { this.closed = true; }
+    }
+    Object.defineProperty(window, 'EventSource', { configurable: true, value: FixtureEventSource });
   });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
@@ -1629,6 +1657,14 @@ try {
       constructor(title, options = {}) { window.__fixtureNotifications.push({ title, body: options.body || '', tag: options.tag || '', silent: options.silent === true }); }
     }
     Object.defineProperty(window, 'Notification', { configurable: true, value: FixtureNotification });
+    window.__presenceStreams = [];
+    class FixtureEventSource {
+      constructor(url) { this.url = url; this.listeners = new Map(); this.closed = false; window.__presenceStreams.push(this); }
+      addEventListener(type, listener) { this.listeners.set(type, listener); }
+      emit(data) { this.listeners.get('presence')?.({data: JSON.stringify(data)}); }
+      close() { this.closed = true; }
+    }
+    Object.defineProperty(window, 'EventSource', { configurable: true, value: FixtureEventSource });
   });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);

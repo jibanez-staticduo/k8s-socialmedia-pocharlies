@@ -3882,7 +3882,8 @@ export class BaileysClient extends EventEmitter {
       : undefined;
     const fresh = (key: string) => {
       const value = this.presenceState.get(key);
-      if (value && Date.now() - value.observedAt > 60_000) {
+      const ttl = value?.status === 'composing' || value?.status === 'recording' ? 8_000 : 60_000;
+      if (value && Date.now() - value.observedAt > ttl) {
         this.presenceState.delete(key);
         return undefined;
       }

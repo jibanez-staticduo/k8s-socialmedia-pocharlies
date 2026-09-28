@@ -1858,6 +1858,32 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           return json(200, { account: a.accountId, chat, state: 'unknown', lastSeen: null, available: false, reason: 'provider_unavailable' });
         }
       }
+      if (req.method === 'GET' && path === '/api/presence/stream') {
+        const a = accountParam(url.searchParams.get('account'));
+        const chat = safeChatId(url.searchParams.get('chat'));
+        const conversation = await conversationFor(a, chat);
+        const providerChat = providerChatId(conversation);
+        const abort = new AbortController();
+        res.once('close', () => abort.abort());
+        try {
+          const upstream = await fetchImpl(`${a.connectorUrl.replace(/\/$/, '')}/api/v1/chats/${encodeURIComponent(providerChat)}/presence/stream`, {
+            method: 'GET', headers: signedHeaders({}, env[a.secretEnv]), redirect: 'error', signal: abort.signal,
+          });
+          if (!upstream.ok || !upstream.body || !upstream.headers.get('content-type')?.includes('text/event-stream'))
+            throw featureError(502, 'PRESENCE_STREAM_UNAVAILABLE', 'Presence stream is unavailable');
+          res.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          });
+          await pipeline(Readable.fromWeb(upstream.body), res);
+        } catch (error) {
+          if (!res.headersSent && !abort.signal.aborted) throw error;
+          if (!res.destroyed) res.end();
+        } finally { abort.abort(); }
+        return;
+      }
       if (req.method === 'GET' && path === '/api/notifications') {
         const a = accountParam(url.searchParams.get('account'));
         const rows = await query(

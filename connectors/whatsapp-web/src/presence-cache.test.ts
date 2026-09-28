@@ -14,4 +14,8 @@ test('presence expires instead of showing a stale online status', async () => {
   state.set(key, { status: 'available', observedAt: Date.now() - 61_000 });
   assert.equal((await client.getPresence(chat)).status, 'unknown');
   assert.equal(state.has(key), false);
+
+  state.set(key, { status: 'composing', observedAt: Date.now() - 8_100 });
+  assert.equal((await client.getPresence(chat)).status, 'unknown');
+  assert.equal(state.has(key), false);
 });

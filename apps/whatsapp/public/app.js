@@ -14,12 +14,32 @@ let attachmentTools = null;
 const attachmentReady = import('./composer-attachment.mjs').then(module => { attachmentTools = module; return module; });
 let mediaTools = null;
 let cameraController = null;
+let photoEditor = null;
 const mediaReady = import('./composer-media.mjs').then(module => {
   mediaTools = module;
   cameraController = module.createCameraController({documentRef: document, mediaDevices: navigator.mediaDevices,
     getContext: context, isCurrent: current, onCapture: stageAttachment, showError: error});
   return module;
 });
+const photoEditorReady = import('./photo-editor.mjs').then(module => {
+  photoTools = module;
+  photoEditor = module.createPhotoEditor({documentRef: document,
+    getContext: context, isCurrent: current, showError: error});
+  if (pendingFiles?.length) renderStagedFiles();
+  return module;
+});
+let photoTools = null;
+function applyPhotoEdit(entry, editedFile) {
+  const problem = attachmentTools.attachmentError(editedFile);
+  if (problem) { error(`${entry.file?.name || 'Imagen'}: ${problem}`); return false; }
+  if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
+  entry.file = editedFile;
+  entry.previewUrl = URL.createObjectURL(editedFile);
+  if (!attachmentTools.canViewOnce(editedFile)) entry.viewOnce = false;
+  error();
+  renderStagedFiles();
+  return true;
+}
 let accountRailTools = null;
 const accountRailReady = import('./account-rail.mjs').then(module => { accountRailTools = module; return module; });
 let draftTools = null;
@@ -702,6 +722,13 @@ function renderStagedFiles() {
     remove.type = 'button';
     remove.setAttribute('aria-label', `Quitar ${entry.file.name || 'imagen'} del borrador`);
     remove.onclick = () => removeAttachment(entry.id);
+    if (photoTools?.editableImage(entry.file)) {
+      const edit = node('button', 'composer-attachment-edit', 'Editar');
+      edit.type = 'button';
+      edit.setAttribute('aria-label', `Editar ${entry.file.name || 'imagen'} antes de enviar`);
+      edit.onclick = () => { error(); photoEditor?.open(entry.file, edited => applyPhotoEdit(entry, edited)); };
+      card.append(edit);
+    }
     card.append(label, remove);
     preview.append(card);
   }
@@ -717,6 +744,7 @@ function removeAttachment(id) {
 function cancelAttachment() {
   for (const entry of pendingFiles) if (entry.previewUrl) URL.revokeObjectURL(entry.previewUrl);
   pendingFiles = [];
+  photoEditor?.close?.(false);
   renderStagedFiles();
 }
 function stageAttachment(file, viewOnce = false) {
