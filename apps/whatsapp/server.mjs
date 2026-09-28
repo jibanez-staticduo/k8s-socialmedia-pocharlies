@@ -946,20 +946,20 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   }
 
   /*
-   * Display names for blocked addresses, taken from this account's own stored
+   * Display names for direct-contact addresses, taken from this account's own stored
    * rows and never from the provider. A name is attached only when a stored row
    * clearly means that exact address, so a LID and a phone number cannot borrow
    * each other's title; where nothing is known the browser resolves the title
    * from the chat list it already has. An absent directory table costs a name,
    * not the list.
    *
-   * A blocked address arrives normalized to `@s.whatsapp.net`, but stored rows
+   * A phone address arrives normalized to `@s.whatsapp.net`, but stored rows
    * keep the spelling the provider used at the time, including the legacy
    * `@c.us`. Those two spellings are one phone number, so both are looked up;
    * without the alias a contact saved years ago would show no name at all. A
    * `@lid` has no such alias and stays on its own address.
    */
-  async function blockedContactNames(account, jids) {
+  async function storedContactNames(account, jids) {
     const names = new Map();
     if (!jids.length) return names;
     const prefix = `${account.accountId}:`;
@@ -1247,7 +1247,18 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (req.method === 'GET' && path.startsWith('/api/novedades/')) {
         const a = accountParam(url.searchParams.get('account'));
         const result = await readNovedades({ account: a, path, params: url.searchParams, remote, secret: env[a.secretEnv] });
-        if (result.data) return json(200, result.data);
+        if (result.data) {
+          if (path === '/api/novedades/status/authors') {
+            const authors = result.data.authors;
+            const canonicalJid = jid => jid.replace(/@c\.us$/, '@s.whatsapp.net');
+            const names = await storedContactNames(a, [...new Set(authors.map(author => canonicalJid(author.id)))]);
+            result.data.authors = authors.map(author => ({
+              ...author,
+              name: names.get(canonicalJid(author.id)) || author.name,
+            }));
+          }
+          return json(200, result.data);
+        }
         const output = novedadesMediaResponse(result.media, req.headers['if-range'] ? null : req.headers.range);
         res.writeHead(output.status, output.headers);
         return res.end(output.bytes);
@@ -1657,7 +1668,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (req.method === 'GET' && path === '/api/blocked-contacts') {
         const a = accountParam(url.searchParams.get('account'));
         const blocked = await providerBlocklist(a);
-        const names = await blockedContactNames(a, blocked);
+        const names = await storedContactNames(a, blocked);
         return json(200, {
           account: a.accountId,
           contacts: blocked.map(jid => ({ jid, ...(names.has(jid) ? { name: names.get(jid) } : {}) })),

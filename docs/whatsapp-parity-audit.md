@@ -99,7 +99,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Presence | Partial | Composing/recording labels in validation; live event delivery remains |
 | Real-time updates | Partial | Authenticated events; current message/presence polling remains |
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
-| Status | Partial | Account/author-scoped persistence and expiry deployed b727ce6; catalogue/viewer and explicit publishing audience remain |
+| Status | Partial | Account/author-scoped read-only catalogue and viewer are available; saved contact names resolve by account, including legacy phone aliases. Publishing with an explicit audience and complete historical coverage remain |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
 | Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
