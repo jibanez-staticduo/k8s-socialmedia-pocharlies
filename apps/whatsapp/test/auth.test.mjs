@@ -99,6 +99,7 @@ test('OIDC protects UI/API, validates signed callback claims, and creates an Htt
   for (const asset of ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']) {
     const response = await request(asset);
     assert.equal(response.status, 200, `${asset} must be readable before login for installation`);
+    assert.equal((await request(asset, { method: 'HEAD' })).status, 200, `${asset} HEAD must match GET`);
   }
   const manifest = await (await request('/manifest.webmanifest')).json();
   assert.equal(manifest.display, 'standalone');

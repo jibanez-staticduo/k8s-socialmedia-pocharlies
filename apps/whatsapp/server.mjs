@@ -1100,9 +1100,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         '/icon-512.png': 'image/png',
         '/apple-touch-icon.png': 'image/png',
       };
-      if (req.method === 'GET' && Object.hasOwn(installAssets, path)) {
+      if (['GET', 'HEAD'].includes(req.method) && Object.hasOwn(installAssets, path)) {
         const bytes = await readFile(join(root, 'public', path.slice(1)));
-        res.setHeader('content-type', installAssets[path]); res.end(bytes); return;
+        res.setHeader('content-type', installAssets[path]);
+        res.setHeader('content-length', bytes.length);
+        res.end(req.method === 'HEAD' ? undefined : bytes); return;
       }
       if (auth.oidcEnabled && path === '/auth/login' && req.method === 'GET') {
         const principal = auth.isAuthenticated(req);
