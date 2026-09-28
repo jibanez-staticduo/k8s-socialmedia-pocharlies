@@ -33,7 +33,7 @@ try {
       ? {accounts: [{id: 'personal', label: 'Personal'}, {id: 'secondary', label: 'Secundaria'}], sendingEnabled: true}
       : url.pathname === '/api/chats'
         ? {chats: [{id: `${account}-chat`, name: account === 'personal' ? 'Ana' : 'Bruno', preview: 'Hola', unread: 0, pinned: true}]}
-        : url.pathname === '/api/messages' ? {messages: [{id: 'one', text: 'Hola', timestamp: '2026-09-28T10:00:00Z'}]}
+        : url.pathname === '/api/messages' ? {messages: [{id: 'one', text: 'Hola', timestamp: '2026-09-28T10:00:00Z'}, {id: 'two', text: `https://example.com/${'unbroken'.repeat(90)}`, timestamp: '2026-09-28T10:01:00Z'}]}
           : url.pathname === '/api/models' ? {models: [{id: 'fixture'}], defaultModel: 'fixture'}
             : url.pathname === '/api/ai/session' ? {sessionId: 'fixture', messages: []}
               : {proposals: []};
@@ -49,7 +49,8 @@ try {
     capable: document.querySelector('meta[name="apple-mobile-web-app-capable"]')?.content,
     touchIcon: document.querySelector('link[rel="apple-touch-icon"]')?.getAttribute('href'),
   }));
-  assert(metadata.viewport.includes('width=device-width') && !/user-scalable=no|maximum-scale=1/.test(metadata.viewport));
+  assert(metadata.viewport.includes('width=device-width') && metadata.viewport.includes('viewport-fit=cover'));
+  assert(metadata.viewport.includes('user-scalable=no') && metadata.viewport.includes('maximum-scale=1'));
   assert.equal(metadata.capable, 'yes');
   assert(metadata.touchIcon);
   const manifestResponse = await page.request.get(new URL(manifest, url).href);
@@ -72,12 +73,14 @@ try {
       const rail = rect('.app-rail');
       const sidebar = rect('.chat-sidebar');
       const conversation = rect('.conversation');
-      return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, rail: rail && {x: rail.x, y: rail.y, width: rail.width, height: rail.height}, sidebar: sidebar && {x: sidebar.x, width: sidebar.width}, conversation: conversation && {x: conversation.x, width: conversation.width}};
+      const composer = rect('.composer');
+      return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, rail: rail && {x: rail.x, y: rail.y, width: rail.width, height: rail.height}, sidebar: sidebar && {x: sidebar.x, width: sidebar.width}, conversation: conversation && {x: conversation.x, width: conversation.width}, composer: composer && {y: composer.y, bottom: composer.bottom}};
     });
     assert(state.documentWidth <= state.width + 1 && state.bodyWidth <= state.width + 1, `${label}: horizontal overflow ${JSON.stringify(state)}`);
     return state;
   }
   let state = await geometry('chat list');
+  assert.equal(await page.locator('.app-shell').evaluate(element => getComputedStyle(element).touchAction), 'pan-x pan-y');
   assert(state.rail.y > 400 && state.sidebar.width >= state.width - 1, `Expected full-width list and bottom account navigation: ${JSON.stringify(state)}`);
   assert(state.rail.y + state.rail.height <= state.height + 1, `Bottom navigation is clipped: ${JSON.stringify(state)}`);
   assert.equal(await page.locator('#account-rail button').count(), 2);
@@ -118,6 +121,10 @@ try {
     assert(opened.conversation.width >= width - 1, `${width}px conversation is clipped: ${JSON.stringify(opened)}`);
     await page.getByRole('button', {name: 'Volver a los chats'}).tap();
   }
+  await page.setViewportSize({width: 320, height: 420});
+  await page.locator('#chats .chat-item').first().tap();
+  const shortScreen = await geometry('short mobile viewport with long URL');
+  assert(shortScreen.composer.bottom <= shortScreen.height + 1, `Composer is clipped: ${JSON.stringify(shortScreen)}`);
   assert.deepEqual(errors, []);
   await context.close();
   console.log('PASS mobile PWA: manifest/icons, iPhone touch navigation, accounts, agent, input sizing and overflow');
