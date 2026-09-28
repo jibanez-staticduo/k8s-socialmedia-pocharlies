@@ -19,7 +19,7 @@ try{
 const page=await browser.newPage({viewport:{width:1000,height:800}});
 await page.goto(`http://127.0.0.1:${server.address().port}`);await page.waitForFunction(()=>window.ui);
 const open=()=>page.locator('#opener').click();
-await open(); assert.equal(await page.evaluate(()=>calls.length),0);
+await open(); assert.equal(await page.evaluate(()=>calls.filter(call => call.body !== undefined).length),0);
 await page.keyboard.press('ArrowDown');await page.keyboard.press('ArrowRight');
 assert.equal(await page.locator(':focus').textContent(),'8 horas');
 await page.keyboard.press('Escape');assert.match(await page.locator(':focus').textContent(),/Silenciar/);

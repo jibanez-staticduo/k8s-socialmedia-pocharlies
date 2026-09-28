@@ -1259,6 +1259,37 @@ export function installFeatureUI({
     add(actions, favorite ? 'Quitar de favoritos' : 'Añadir a favoritos', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
     const lists = prefs().lists.filter(list => !list.chatIds.includes(chat.id));
     if (lists.length) branch('Añadir a lista', lists.map(list => [list.name, () => perform('list', null, { list: list.name, id: chat.id }, '/api/lists')]));
+    if (!chat.isGroup) {
+      void request('/api/contact-block', undefined, { account, chat: chat.id }).then(providerBlock => {
+        if (runtime.account !== account || runtime.modal?.body !== modal.body
+          || providerBlock.confirmed !== true || typeof providerBlock.blocked !== 'boolean') return;
+        const blocked = providerBlock.blocked;
+        add(actions, blocked ? 'Desbloquear' : 'Bloquear', () => {
+          const confirmation = openModal(blocked ? 'Desbloquear contacto' : 'Bloquear contacto');
+          confirmation.body.append(node('p', 'feature-description', blocked
+            ? 'Volverás a recibir mensajes de este contacto.'
+            : 'Dejarás de recibir mensajes de este contacto.'));
+          const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
+          cancel.onclick = closeModal;
+          const confirm = button(documentRef, blocked ? 'Desbloquear' : 'Bloquear', 'feature-button primary');
+          confirm.onclick = async () => {
+            if (runtime.account !== account) return;
+            confirm.disabled = true;
+            try {
+              const result = await request('/api/chat-actions', { chat: chat.id, action: blocked ? 'unblock' : 'block' });
+              if (result.confirmed !== true || result.blocked !== !blocked) throw new Error('El proveedor no confirmó el bloqueo.');
+              if (runtime.account === account) { closeModal(); toast('Preferencia actualizada.'); }
+            } catch (error) {
+              if (runtime.account === account) showError(error);
+              if (runtime.modal?.body === confirmation.body) confirm.disabled = false;
+            }
+          };
+          const footer = node('div', 'feature-dialog-actions');
+          footer.append(cancel, confirm);
+          confirmation.body.append(footer);
+        });
+      }).catch(() => {});
+    }
     modal.dialog.addEventListener('keydown', event => {
       if (event.key === 'Tab') { closeModal(); return; }
       if (event.key === 'ArrowLeft' || (event.key === 'Escape' && submenu)) {

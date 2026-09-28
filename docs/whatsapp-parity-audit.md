@@ -79,7 +79,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Composer optimistic sends, paste and voice recording | In validation | Multi-file picker/paste/drop, captions, per-file retry and background batch tests pass; Enter sends and Shift+Enter adds a newline in browser QA |
 | Camera, media editing and view-once | Partial | Camera capture/cleanup tested; crop/rotate/annotation and view-once pending |
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
-| Location and live location | Partial | Received locations render; sending not implemented |
+| Location and live location | Partial | Received locations render; the authenticated WhatsApp Web attachment menu inspected on 28 Sep 2026 has no location-send action |
 | Link and map previews | Existing | Reference QA and failure states |
 | Image viewer navigation | In validation | Previous/next buttons and keyboard arrows traverse images in the loaded chat window; download link and label update with selection; Escape restores opener focus. Older unloaded images still require history/gallery paging |
 | New chats / contact creation | Verified | Directory deployed 8ad9dd9; both accounts pass read-only authenticated browser QA; extended drawer scenarios remain in development |
@@ -97,7 +97,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Partial | Account/author-scoped persistence and expiry deployed b727ce6; catalogue/viewer and explicit publishing audience remain |
 | Channels | Partial | Channel-scoped identity and ingestion deployed b727ce6; catalogue, timeline and provider actions remain |
-| Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Remaining options need provider support |
+| Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
 | Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
 
