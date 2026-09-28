@@ -67,7 +67,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Area | Current state | Remaining work / verification |
 | --- | --- | --- |
 | Accounts, independent chat identity, Hermes sessions | Existing | Regression coverage across account changes |
-| Chat filters, archived, favorites and lists | Partial | Bulk archive/mute/read deployed 8ad9dd9; provider synchronization of lists remains |
+| Chat filters, archived, favorites and lists | Partial | Bulk archive/mute/read deployed 8ad9dd9; context-menu list creation now includes the selected chat after server confirmation. Provider synchronization of lists remains |
 | Pinned ordering, pin and mute markers | Verified | Deployed b46056b: personal snapshot reports three pins and all three render first with icons; secondary reports none. Historical pinned messages are a separate limitation |
 | Full available message history | Verified | Cursor paging, scroll preservation and concurrent polling covered |
 | More than 500 chats | Verified | Deployed 0e7762c: 243 Node 22 tests, 41 browser checks, 650 active/50 archived PG fixture; both accounts pass read-only live QA |
@@ -534,3 +534,11 @@ a newline in the mobile composer as explicit acceptance criteria.
 The check must include a fresh Keycloak login from the Home Screen app: its
 external-domain redirect may leave standalone mode on iOS, which the static
 manifest and Chromium test cannot validate.
+
+On 28 Sep 2026, the authenticated official chat-row menu showed "Añadir a la
+lista" even when no new list had been created, with a "Nueva lista" entry.
+That route opened a create-list drawer with the chosen chat preselected.
+SocialMedia now exposes the same menu path and stages a local list only after
+the account-scoped server membership succeeds. Browser QA covers an empty
+list collection, a rejected membership, and isolation between two accounts.
+Official-provider list synchronization across devices is still absent.

@@ -1258,7 +1258,10 @@ export function installFeatureUI({
     const favorite = chatIsFavorite(chat, prefs());
     add(actions, favorite ? 'Quitar de favoritos' : 'Añadir a favoritos', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
     const lists = prefs().lists.filter(list => !list.chatIds.includes(chat.id));
-    if (lists.length) branch('Añadir a lista', lists.map(list => [list.name, () => perform('list', null, { list: list.name, id: chat.id }, '/api/lists')]));
+    branch('Añadir a la lista', [
+      ...lists.map(list => [list.name, () => perform('list', null, { list: list.name, id: chat.id }, '/api/lists')]),
+      ['Nueva lista', () => openCreateListForChat(account, chat)],
+    ]);
     if (!chat.isGroup) {
       void request('/api/contact-block', undefined, { account, chat: chat.id }).then(providerBlock => {
         if (runtime.account !== account || runtime.modal?.body !== modal.body
@@ -1302,6 +1305,49 @@ export function installFeatureUI({
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : event.key === 'ArrowDown' ? (index + 1) % items.length : event.key === 'ArrowUp' ? (index + items.length - 1) % items.length : -1;
       if (next >= 0) { event.preventDefault(); items[next]?.focus(); }
     });
+  }
+
+  function openCreateListForChat(account, chat) {
+    if (runtime.account !== account) return;
+    const modal = openModal('Crea una nueva lista');
+    const form = node('form', 'feature-form');
+    const name = field(documentRef, 'Nombre de la lista', 'text', 'name');
+    name.input.maxLength = 100;
+    name.input.required = true;
+    const selected = node('p', 'feature-description', `Chat seleccionado: ${chat.name || chat.id}`);
+    const create = button(documentRef, 'Crear lista', 'feature-button primary');
+    create.type = 'submit';
+    const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
+    cancel.onclick = closeModal;
+    form.append(name.wrapper, selected, create, cancel);
+    modal.body.append(form);
+    name.input.focus();
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const listName = name.input.value.trim();
+      if (!listName || runtime.account !== account || create.disabled) return;
+      if (store.read(account).lists.some(list => list.name.toLocaleLowerCase() === listName.toLocaleLowerCase())) {
+        showError(new Error('Ya existe una lista con este nombre.'));
+        return;
+      }
+      create.disabled = true;
+      try {
+        await request('/api/lists', { account, chat: chat.id, action: 'list', list: listName, id: chat.id });
+        store.update(account, value => ({ ...value, lists: value.lists.some(list => list.name.toLocaleLowerCase() === listName.toLocaleLowerCase())
+          ? value.lists.map(list => list.name.toLocaleLowerCase() === listName.toLocaleLowerCase()
+            ? { ...list, chatIds: [...new Set([...list.chatIds, chat.id])] }
+            : list)
+          : [...value.lists, { id: cryptoRandom(), name: listName, chatIds: [chat.id] }] }));
+        if (runtime.account !== account) return;
+        closeModal();
+        renderChats();
+        toast('Lista creada con el chat seleccionado.', 'success');
+      } catch (error) {
+        if (runtime.account === account) showError(error);
+      } finally {
+        if (runtime.account === account && runtime.modal?.body === modal.body) create.disabled = false;
+      }
+    };
   }
 
   function openChatMenu() {
