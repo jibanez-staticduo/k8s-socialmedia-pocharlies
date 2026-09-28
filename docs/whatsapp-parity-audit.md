@@ -86,7 +86,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
 | Settings drawer / wallpaper / spellcheck / Enter preference | Verified | Desktop/mobile, light/dark, persistence |
-| Emoji substitution / upload quality / automatic downloads | Pending | Official Chats settings verified September 28: text-to-emoji switch, Standard/HD upload choices and separate Photos/Audio/Videos/Documents download toggles; no equivalent controls yet |
+| Emoji substitution / upload quality / automatic downloads | Partial | Emoji replacement switch and common typed shortcuts now work locally, with cursor and draft updates verified in browser. Standard/HD upload and separate Photos/Audio/Videos/Documents download toggles remain |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
 | Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
@@ -456,3 +456,10 @@ Novedades lists are based on synchronized data and may omit unseen historical
 statuses; no provider mutation was performed. Real-provider acceptance of structured sends and RSVP,
 full WhatsApp parity, fork CI, PR CI and deployment remain unverified for this
 candidate until publication.
+
+The official Chats settings show "Reemplaza texto con emojis" enabled by
+default. This app change adds that persisted toggle and replaces common
+typed emoticons at the caret without changing pasted text. Synthetic browser
+QA verifies enabled and disabled behavior, draft updates and persistence;
+353 app tests pass. The complete WhatsApp shortcut catalog has not been
+established.

@@ -115,6 +115,15 @@ try {
   await page.locator('input[name="wallpaper"][value="sage"]').check();
   assert.equal(await page.locator('body').getAttribute('data-wallpaper'), 'sage');
   await page.locator('#settings-close').click();
+  await page.locator('#message').fill(':');
+  await page.keyboard.insertText(')');
+  assert.equal(await page.locator('#message').inputValue(), '🙂');
+  await openSettings(page);
+  await page.locator('#settings-emoji-replacement').uncheck();
+  await page.locator('#settings-close').click();
+  await page.locator('#message').fill(':');
+  await page.keyboard.insertText(')');
+  assert.equal(await page.locator('#message').inputValue(), ':)');
   await page.locator('#message').fill('Linea');
   await page.locator('#message').press('Enter');
   assert.equal(await page.locator('#message').inputValue(), 'Linea\n');
@@ -124,6 +133,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('#account option').length === 2);
   await openSettings(page);
   assert.equal(await page.locator('#settings-spellcheck').isChecked(), false);
+  assert.equal(await page.locator('#settings-emoji-replacement').isChecked(), false);
   assert.equal(await page.locator('#settings-enter-send').isChecked(), false);
   assert.equal(await page.locator('input[name="wallpaper"][value="sage"]').isChecked(), true);
   await page.locator('#settings-logout').click();

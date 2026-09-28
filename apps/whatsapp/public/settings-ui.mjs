@@ -1,16 +1,36 @@
 export const SETTINGS_KEYS = Object.freeze({
   spellcheck: 'wa-spellcheck',
+  emojiReplacement: 'wa-emoji-replacement',
   enterToSend: 'wa-enter-to-send',
   wallpaper: 'wa-chat-wallpaper',
 });
 
 const WALLPAPERS = new Set(['default', 'sand', 'sage', 'slate']);
+const EMOJI_SHORTCUTS = [
+  [":'(", '😢'], [':-)', '🙂'], [':)', '🙂'], [':-D', '😄'], [':D', '😄'],
+  [';-)', '😉'], [';)', '😉'], [':-(', '🙁'], [':(', '🙁'],
+  [':-P', '😛'], [':P', '😛'], [':-O', '😮'], [':O', '😮'], ['<3', '❤️'],
+];
+
+export function emojiShortcutAtCaret(value, caret) {
+  if (typeof value !== 'string' || !Number.isInteger(caret) || caret < 0 || caret > value.length) return null;
+  const before = value.slice(0, caret);
+  if (/^[\p{L}\p{N}_]/u.test(value.slice(caret))) return null;
+  for (const [shortcut, emoji] of EMOJI_SHORTCUTS) {
+    if (!before.toLowerCase().endsWith(shortcut.toLowerCase())) continue;
+    const start = caret - shortcut.length;
+    if (start > 0 && !/[\s([{]/u.test(value[start - 1])) continue;
+    return { start, end: caret, emoji };
+  }
+  return null;
+}
 
 export function readSettings(storage) {
   const read = key => { try { return storage?.getItem(key); } catch { return null; } };
   const wallpaper = read(SETTINGS_KEYS.wallpaper);
   return {
     spellcheck: read(SETTINGS_KEYS.spellcheck) !== 'false',
+    emojiReplacement: read(SETTINGS_KEYS.emojiReplacement) !== 'false',
     enterToSend: read(SETTINGS_KEYS.enterToSend) !== 'false',
     wallpaper: WALLPAPERS.has(wallpaper) ? wallpaper : 'default',
   };
@@ -24,6 +44,7 @@ export function initializeSettings(documentRef = document, storage = globalThis.
   if (!details || !panel || !summary || !composer) return;
 
   const spellcheck = documentRef.getElementById('settings-spellcheck');
+  const emojiReplacement = documentRef.getElementById('settings-emoji-replacement');
   const enterToSend = documentRef.getElementById('settings-enter-send');
   const logout = documentRef.getElementById('settings-logout');
   const logoutError = documentRef.getElementById('settings-logout-error');
@@ -33,6 +54,7 @@ export function initializeSettings(documentRef = document, storage = globalThis.
 
   spellcheck.checked = settings.spellcheck;
   composer.spellcheck = settings.spellcheck;
+  emojiReplacement.checked = settings.emojiReplacement;
   enterToSend.checked = settings.enterToSend;
   documentRef.body.dataset.wallpaper = settings.wallpaper;
   wallpaperOptions.find(option => option.value === settings.wallpaper).checked = true;
@@ -40,6 +62,17 @@ export function initializeSettings(documentRef = document, storage = globalThis.
   spellcheck.addEventListener('change', () => {
     composer.spellcheck = spellcheck.checked;
     persist(SETTINGS_KEYS.spellcheck, String(spellcheck.checked));
+  });
+  emojiReplacement.addEventListener('change', () => {
+    persist(SETTINGS_KEYS.emojiReplacement, String(emojiReplacement.checked));
+  });
+  composer.addEventListener('input', event => {
+    if (!emojiReplacement.checked || event.isComposing || event.inputType !== 'insertText') return;
+    if (composer.selectionStart !== composer.selectionEnd) return;
+    const replacement = emojiShortcutAtCaret(composer.value, composer.selectionStart);
+    if (!replacement) return;
+    composer.setRangeText(replacement.emoji, replacement.start, replacement.end, 'end');
+    composer.dispatchEvent(new Event('input', { bubbles: true }));
   });
   enterToSend.addEventListener('change', () => {
     persist(SETTINGS_KEYS.enterToSend, String(enterToSend.checked));
