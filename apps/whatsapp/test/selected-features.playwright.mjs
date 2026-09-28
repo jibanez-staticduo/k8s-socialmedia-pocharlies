@@ -408,7 +408,7 @@ async function fulfillApi(route, state) {
   if (pathName === '/api/favorites/starred' && request.method() === 'GET') return jsonResponse(route, { account, items: clone(state.starred.get(account) || []), nextCursor: null });
   if (pathName === '/api/lists' && request.method() === 'GET') return jsonResponse(route, { account, lists: [...(state.lists.get(account) || [])] });
   if (pathName === '/api/starred' && request.method() === 'GET') return jsonResponse(route, { account, items: clone(state.starred.get(account) || []) });
-  if (pathName === '/api/privacy' && request.method() === 'GET') return jsonResponse(route, { account, profile: 'contact_blacklist', lastSeen: 'all', online: 'match_last_seen', groupsAdd: 'contact_blacklist', readReceipts: true });
+  if (pathName === '/api/privacy' && request.method() === 'GET') return jsonResponse(route, { account, profile: 'contact_blacklist', lastSeen: 'all', online: 'match_last_seen', status: 'contact_blacklist', groupsAdd: 'contact_blacklist', readReceipts: true });
 
   if (pathName === '/api/chat-actions' && request.method() === 'POST') {
     if (state.nextActionGate && body.action === 'archive') {
@@ -811,12 +811,14 @@ async function runDesktop(page, state, report) {
     await clickDialogButton(info, 'Bloquear contacto');
     confirm = await dialog(page, /^Bloquear contacto$/i);
     await clickDialogButton(confirm, 'Bloquear');
+    await page.waitForFunction(() => document.querySelector('.feature-dialog h2')?.textContent?.includes('Información del contacto'));
     info = await dialog(page, /Informaci.n del contacto/i);
     await info.getByRole('button', {name:'Desbloquear contacto'}).waitFor();
     assert.equal(state.log.filter(item => item.path === '/api/chat-actions' && item.body?.action === 'block').length, 1);
     await clickDialogButton(info, 'Desbloquear contacto');
     confirm = await dialog(page, /^Desbloquear contacto$/i);
     await clickDialogButton(confirm, 'Desbloquear');
+    await page.waitForFunction(() => document.querySelector('.feature-dialog h2')?.textContent?.includes('Información del contacto'));
     info = await dialog(page, /Informaci.n del contacto/i);
     await info.getByRole('button', {name:'Bloquear contacto'}).waitFor();
     assert.equal(state.log.filter(item => item.path === '/api/chat-actions' && item.body?.action === 'unblock').length, 1);
@@ -1374,13 +1376,16 @@ async function runDesktop(page, state, report) {
     await page.waitForFunction(() => document.querySelector('select[name="online"]')?.value === 'match_last_seen');
     assert.equal(await privacy.locator('select[name="profile"]').inputValue(), 'contact_blacklist');
     assert.equal(await privacy.locator('select[name="groupsAdd"]').inputValue(), 'contact_blacklist');
+    assert.equal(await privacy.locator('select[name="status"]').inputValue(), 'contact_blacklist');
+    assert.equal(await privacy.locator('select[name="status"] option[value="contact_blacklist"]').evaluate(option => option.disabled), true);
     const beforeSave = state.log.length;
     await privacy.locator('select[name="online"]').selectOption('all');
     await privacy.locator('select[name="groupsAdd"]').selectOption('contacts');
+    await privacy.locator('select[name="status"]').selectOption('contacts');
     await clickDialogButton(privacy, 'Guardar privacidad');
-    await waitForCondition(() => state.log.slice(beforeSave).filter(item => item.path === '/api/privacy' && item.method === 'POST').length === 2, 'privacy changes missing');
+    await waitForCondition(() => state.log.slice(beforeSave).filter(item => item.path === '/api/privacy' && item.method === 'POST').length === 3, 'privacy changes missing');
     const changes = state.log.slice(beforeSave).filter(item => item.path === '/api/privacy' && item.method === 'POST');
-    assert.deepEqual(changes.map(item => item.body.field).sort(), ['groupsAdd', 'online']);
+    assert.deepEqual(changes.map(item => item.body.field).sort(), ['groupsAdd', 'online', 'status']);
     assert(changes.every(item => item.body.account === 'alpha' && !item.body.chat), 'account privacy must not carry a chat');
   });
 

@@ -890,9 +890,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const privacy = {};
     const profile = cleanProviderValue(source.profile || source.profilePicture, 64);
     const lastSeen = cleanProviderValue(source.lastSeen || source.last, 64);
+    const status = cleanProviderValue(source.status, 64);
     const readReceipts = source.readReceipts ?? source.readreceipts;
     if (profile) privacy.profile = profile;
     if (lastSeen) privacy.lastSeen = lastSeen;
+    if (['all', 'contacts', 'contact_blacklist', 'none'].includes(status)) privacy.status = status;
     if (readReceipts === 'all' || readReceipts === 'none') privacy.readReceipts = readReceipts === 'all';
     const online = cleanProviderValue(source.online, 64);
     const groupsAdd = cleanProviderValue(source.groupsAdd || source.groupadd, 64);

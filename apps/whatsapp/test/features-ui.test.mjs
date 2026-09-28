@@ -87,14 +87,24 @@ test('privacy snapshots normalize Baileys keys without inventing missing values'
   assert.deepEqual(normalizePrivacySnapshot({ profile: 'contacts', last: 'none', readreceipts: 'all' }), {
     profile: 'contacts',
     lastSeen: 'none',
+    status: null,
     readReceipts: 'true',
   });
   assert.deepEqual(normalizePrivacySnapshot({ profile: 'unknown', data: { profile: 'none' } }), {
     profile: 'none',
     lastSeen: null,
+    status: null,
     readReceipts: null,
   });
-  assert.deepEqual(normalizePrivacySnapshot({}), { profile: null, lastSeen: null, readReceipts: null });
+  assert.deepEqual(normalizePrivacySnapshot({}), { profile: null, lastSeen: null, status: null, readReceipts: null });
+});
+
+test('status audience preserves an existing exclusion choice and changes only when selected', () => {
+  const initial = normalizePrivacySnapshot({ status: 'contact_blacklist' });
+  assert.equal(initial.status, 'contact_blacklist');
+  assert.deepEqual(privacyChanges(initial, initial), []);
+  assert.deepEqual(privacyChanges(initial, { ...initial, status: 'contacts' }), [{ field: 'status', value: 'contacts' }]);
+  assert.deepEqual(privacyChanges(initial, { ...initial, status: 'invalid' }), []);
 });
 
 test('privacy changes emit only changed connector fields and map receipt values', () => {

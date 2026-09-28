@@ -93,7 +93,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Emoji substitution / upload quality / automatic downloads | Partial | Standard/HD image processing and four account-scoped download switches deployed 1f46b8f with bounded cancellation/cache tests. Baileys has no native HD badge, video remains source quality, and real-provider HD acceptance is unverified |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
-| Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Blocked-list viewing and confirmed unblock pass synthetic account-scoped QA; production read and deployment remain. Exclusion editor and About/status audience remain |
+| Privacy and disappearing messages | Partial | Online/group-add and status-audience fields are available; existing exclusions remain visible without inventing their members. Blocked-list viewing and confirmed unblock are deployed. Exclusion editor and About visibility remain |
 | Notifications | Partial | Account-scoped message/group/sound/preview preferences deployed 8ad9dd9; reaction/status notifications and closed-tab push remain |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
 | Presence | Partial | Composing/recording labels in validation; live event delivery remains |
@@ -586,3 +586,10 @@ state and reconcile on account selection, so they follow the account across
 browsers. Legacy browser-only lists remain visible until explicitly changed.
 These are SocialMedia lists: synchronization with WhatsApp's own lists across
 its clients is still absent.
+
+Status privacy reads the provider's current audience category per account.
+Baileys 7.0.0-rc13 accepts `all`, `contacts`, `contact_blacklist` and `none`;
+the UI can change to the categories that do not require a member editor.
+An existing `contact_blacklist` selection remains visible and unchanged until
+the owner explicitly selects a different category. Editing the excluded
+contacts and publishing a status with an explicit audience are still pending.

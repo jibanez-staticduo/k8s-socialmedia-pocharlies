@@ -247,6 +247,7 @@ export function normalizePrivacySnapshot(value = {}) {
   return {
     profile: privacyVisibility(source.profile ?? source.profilePicture ?? source.profile_picture),
     lastSeen: privacyVisibility(source.lastSeen ?? source.last_seen ?? source.last),
+    status: privacyVisibility(source.status),
     readReceipts: privacyReceipts(source.readReceipts ?? source.read_receipts ?? source.readreceipts),
     ...(['all', 'match_last_seen'].includes(online) ? { online } : {}),
     ...(['all', 'contacts', 'contact_blacklist'].includes(groupsAdd) ? { groupsAdd } : {}),
@@ -260,6 +261,7 @@ export function privacyChanges(initial = {}, current = {}) {
   const changes = [];
   if (after.profile && after.profile !== before.profile) changes.push({ field: 'profilePicture', value: after.profile });
   if (after.lastSeen && after.lastSeen !== before.lastSeen) changes.push({ field: 'lastSeen', value: after.lastSeen });
+  if (after.status && after.status !== before.status) changes.push({ field: 'status', value: after.status });
   if (after.readReceipts && after.readReceipts !== before.readReceipts) changes.push({ field: 'readReceipts', value: after.readReceipts === 'true' ? 'all' : 'none' });
   for (const field of ['online', 'groupsAdd']) if (after[field] && after[field] !== before[field]) changes.push({ field, value: after[field] });
   return changes;
@@ -1807,16 +1809,17 @@ export function installFeatureUI({
     const form = node('form', 'feature-form');
     const profile = documentRef.createElement('select'); profile.name = 'profile'; profile.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'), option(documentRef, 'Nadie', 'none'));
     const lastSeen = documentRef.createElement('select'); lastSeen.name = 'lastSeen'; lastSeen.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'), option(documentRef, 'Nadie', 'none'));
+    const status = documentRef.createElement('select'); status.name = 'status'; status.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'), option(documentRef, 'Nadie', 'none'));
     const online = documentRef.createElement('select'); online.name = 'online'; online.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Igual que la última vez', 'match_last_seen'));
     const groupsAdd = documentRef.createElement('select'); groupsAdd.name = 'groupsAdd'; groupsAdd.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Todos', 'all'), option(documentRef, 'Mis contactos', 'contacts'));
     // Preserve an existing exclusion list; choosing its members needs a separate flow.
-    for (const control of [profile, lastSeen, groupsAdd]) {
+    for (const control of [profile, lastSeen, status, groupsAdd]) {
       const excluded = option(documentRef, 'Mis contactos excepto…', 'contact_blacklist');
       excluded.disabled = true;
       control.append(excluded);
     }
     const receipts = documentRef.createElement('select'); receipts.name = 'readReceipts'; receipts.append(option(documentRef, 'Sin datos', ''), option(documentRef, 'Activados', 'true'), option(documentRef, 'Desactivados', 'false'));
-    for (const [label, control] of [['Foto y perfil', profile], ['Última vez', lastSeen], ['Quién puede verme en línea', online], ['Quién puede añadirme a grupos', groupsAdd], ['Confirmaciones de lectura', receipts]]) { const wrapper = node('label', 'feature-field'); wrapper.append(node('span', '', label), control); form.append(wrapper); }
+    for (const [label, control] of [['Foto y perfil', profile], ['Última vez', lastSeen], ['Quién puede verme en línea', online], ['Quién puede ver mis estados', status], ['Quién puede añadirme a grupos', groupsAdd], ['Confirmaciones de lectura', receipts]]) { const wrapper = node('label', 'feature-field'); wrapper.append(node('span', '', label), control); form.append(wrapper); }
     const submit = button(documentRef, 'Guardar privacidad', 'feature-button primary'); submit.disabled = true; form.append(submit);
     submit.type = 'submit';
     let loaded = false;
@@ -1825,10 +1828,10 @@ export function installFeatureUI({
     form.onsubmit = async event => {
       event.preventDefault();
       if (!loaded || saving || !isCurrent()) return;
-      const current = normalizePrivacySnapshot({ profile: profile.value, lastSeen: lastSeen.value, online: online.value, groupsAdd: groupsAdd.value, readReceipts: receipts.value });
+      const current = normalizePrivacySnapshot({ profile: profile.value, lastSeen: lastSeen.value, online: online.value, status: status.value, groupsAdd: groupsAdd.value, readReceipts: receipts.value });
       const changes = privacyChanges(initial, current);
       saving = true;
-      const controls = [profile, lastSeen, online, groupsAdd, receipts, submit];
+      const controls = [profile, lastSeen, online, status, groupsAdd, receipts, submit];
       controls.forEach(control => { control.disabled = true; });
       let applied = 0;
       try {
@@ -1861,6 +1864,7 @@ export function installFeatureUI({
       profile.value = initial.profile || '';
       lastSeen.value = initial.lastSeen || '';
       online.value = initial.online || '';
+      status.value = initial.status || '';
       groupsAdd.value = initial.groupsAdd || '';
       receipts.value = initial.readReceipts || '';
       loaded = true;

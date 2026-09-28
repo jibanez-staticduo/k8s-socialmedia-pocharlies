@@ -125,13 +125,26 @@ test('emergency gate prevents connector calls', async t => {
 
 test('privacy projects online and group-add settings without inventing missing values', async t => {
   const { request } = await fixture(t, { fetchImpl: async () => Response.json({ ok: true, data: {
-    profile: 'contact_blacklist', online: 'match_last_seen', groupadd: 'contacts', readreceipts: 'all',
+    profile: 'contact_blacklist', online: 'match_last_seen', groupadd: 'contacts', status: 'contact_blacklist', readreceipts: 'all',
   } }) });
   const response = await request('/api/privacy?account=personal');
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).privacy, {
-    profile: 'contact_blacklist', online: 'match_last_seen', groupsAdd: 'contacts', readReceipts: true,
+    profile: 'contact_blacklist', online: 'match_last_seen', groupsAdd: 'contacts', status: 'contact_blacklist', readReceipts: true,
   });
+});
+test('status audience change is forwarded to the selected account connector', async t => {
+  const calls = [];
+  const { request } = await fixture(t, { fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ ok: true, data: { field: 'status', value: 'contacts' } });
+  } });
+  const response = await request('/api/privacy', { account: 'personal', field: 'status', value: 'contacts' });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).confirmed, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://connector/api/v1/privacy');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { field: 'status', value: 'contacts' });
 });
 test('connector requests are signed; success requires provider message ID', async t => {
   let outbound;
