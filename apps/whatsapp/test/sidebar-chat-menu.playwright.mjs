@@ -9,7 +9,7 @@ import {installFeatureUI} from '/features-ui.mjs';
 localStorage.setItem('socialmedia-wa-features:alpha', JSON.stringify({lists:[{id:'work',name:'Trabajo',chatIds:[]}]}));
 window.calls=[]; window.errors=[]; window.fail=false;
 window.target={id:'target',name:'Ana Fixture',pinned:true,unread:0};
-window.ui=installFeatureUI({state:{account:'alpha',chat:'selected'},api:async(path,body)=>{calls.push({path,body});if(window.fail)throw Error('Fallo de prueba');return{};},query:p=>p,getChats:()=>[target],showError:e=>errors.push(e.message)});
+window.ui=installFeatureUI({state:{account:'alpha',chat:'selected'},api:async(path,body)=>{calls.push({path,body});if(window.fail)throw Error('Fallo de prueba');if(path==='/api/lists'&&!body)return{account:'gamma',lists:{Equipo:[]}};return{};},query:p=>p,getChats:()=>[target],showError:e=>errors.push(e.message)});
 document.querySelector('#opener').onclick=()=>ui.openSidebarChatMenu(target,document.querySelector('#opener'));
 </script>`;
 const server=createServer(async(req,res)=>{try {res.setHeader('Content-Type',req.url.endsWith('.css')?'text/css':req.url==='/'?'text/html':'text/javascript');res.end(req.url==='/'?fixture:await readFile(root+req.url.slice(1)));}catch{res.writeHead(404).end();}});
@@ -49,5 +49,9 @@ await page.evaluate(()=>window.fail=true);await open();await page.getByRole('men
 assert.equal(await page.evaluate(()=>target.archived),undefined);assert.deepEqual(await page.evaluate(()=>errors),['Fallo de prueba']);
 await open();await page.getByRole('menu').evaluate(element=>Promise.all(element.getAnimations().map(animation=>animation.finished)));await page.screenshot({path:'/tmp/sidebar-chat-menu.png'});await page.keyboard.press('Escape');assert.equal(await page.locator(':focus').getAttribute('id'),'opener');
 await page.setViewportSize({width:375,height:667});await open();const bounds=await page.getByRole('menu').boundingBox();assert.ok(bounds.x>=0&&bounds.x+bounds.width<=375);
+await page.keyboard.press('Escape');await page.evaluate(()=>{window.fail=false;ui.accountChanged('gamma');});
+await page.waitForFunction(()=>JSON.parse(localStorage.getItem('socialmedia-wa-features:gamma')||'{}').lists?.[0]?.name==='Equipo');
+await open();await page.getByRole('menuitem',{name:'Añadir a la lista ›',exact:true}).click();
+assert.equal(await page.getByRole('menuitem',{name:'Equipo',exact:true}).count(),1,'server list must appear without a browser-local copy');
 console.log('PASS sidebar menu: scoped actions, keyboard submenus, lists, errors, focus and mobile');
 }finally{await browser.close();server.close();}

@@ -72,8 +72,25 @@ export function normalizeFeatureState(value = {}) {
       name: text(item.name).trim(),
       chatIds: uniqueStrings(item.chatIds || item.chats),
     })).filter(item => item.id && item.name),
+    serverListNames: uniqueStrings(source.serverListNames),
     view: ['all', 'unread', 'groups', 'archived', 'favorites', 'starred'].includes(source.view) || array(source.lists).some(list => `list:${list?.id}` === source.view) ? source.view : 'all',
   };
+}
+
+export function reconcileServerLists(localState, serverLists) {
+  const local = normalizeFeatureState(localState);
+  if (!serverLists || typeof serverLists !== 'object' || Array.isArray(serverLists)) return local;
+  const remote = Object.entries(serverLists).filter(([name, chats]) => name && Array.isArray(chats) && chats.every(chat => typeof chat === 'string'));
+  const names = new Set(remote.map(([name]) => name.toLocaleLowerCase()));
+  const previousServerNames = new Set(local.serverListNames.map(name => name.toLocaleLowerCase()));
+  const oldByName = new Map(local.lists.map(list => [list.name.toLocaleLowerCase(), list]));
+  const legacy = local.lists.filter(list => !names.has(list.name.toLocaleLowerCase()) && !previousServerNames.has(list.name.toLocaleLowerCase()));
+  const synced = remote.map(([name, chatIds]) => ({
+    id: oldByName.get(name.toLocaleLowerCase())?.id || `server-${encodeURIComponent(name)}`,
+    name,
+    chatIds: uniqueStrings(chatIds),
+  }));
+  return { ...local, lists: [...legacy, ...synced], serverListNames: remote.map(([name]) => name) };
 }
 
 export function chatIsArchived(chat, localState = {}) {
@@ -436,6 +453,8 @@ export function installFeatureUI({
 
   const root = documentRef.body;
   const node = (tag, className = '', value) => makeElement(documentRef, tag, className, value);
+  const listMutationVersion = new Map();
+  const markListMutation = account => listMutationVersion.set(account, (listMutationVersion.get(account) || 0) + 1);
 
   const notificationSettings = installNotificationSettings({
     documentRef,
@@ -453,6 +472,23 @@ export function installFeatureUI({
     const next = store.update(runtime.account, updater);
     runtime.currentView = next.view;
     return next;
+  }
+
+  async function refreshLists(account) {
+    if (!account) return;
+    const version = listMutationVersion.get(account) || 0;
+    try {
+      const result = await api(query('/api/lists', { account }));
+      if (result?.account !== account || version !== (listMutationVersion.get(account) || 0)
+        || !result.lists || typeof result.lists !== 'object' || Array.isArray(result.lists)) return;
+      const next = store.update(account, value => reconcileServerLists(value, result.lists));
+      if (runtime.account === account) {
+        runtime.currentView = next.view;
+        state.chatFilter = next.view;
+        updateArchiveView();
+        renderChats();
+      }
+    } catch { /* Keep local lists available while the server is unreachable. */ }
   }
 
   function toast(message, kind = 'info') {
@@ -1215,7 +1251,10 @@ export function installFeatureUI({
         if (runtime.account !== account) return;
         if (action === 'read' && runtime.manualUnreadKey === unreadKey) runtime.manualUnreadKey = '';
         if (flags) updateChatFlags(chat.id, flags);
-        if (action === 'list') savePrefs(value => ({ ...value, lists: value.lists.map(list => list.name === extra.list ? { ...list, chatIds: [...new Set([...list.chatIds, chat.id])] } : list) }));
+        if (action === 'list') { markListMutation(account); savePrefs(value => ({ ...value,
+          lists: value.lists.map(list => list.name === extra.list ? { ...list, chatIds: [...new Set([...list.chatIds, chat.id])] } : list),
+          serverListNames: [...new Set([...value.serverListNames, extra.list])],
+        })); }
         await loadChats();
         if (runtime.account === account) toast('Preferencia actualizada.');
         return result;
@@ -1333,7 +1372,8 @@ export function installFeatureUI({
       create.disabled = true;
       try {
         await request('/api/lists', { account, chat: chat.id, action: 'list', list: listName, id: chat.id });
-        store.update(account, value => ({ ...value, lists: value.lists.some(list => list.name.toLocaleLowerCase() === listName.toLocaleLowerCase())
+        markListMutation(account);
+        store.update(account, value => ({ ...value, serverListNames: [...new Set([...value.serverListNames, listName])], lists: value.lists.some(list => list.name.toLocaleLowerCase() === listName.toLocaleLowerCase())
           ? value.lists.map(list => list.name.toLocaleLowerCase() === listName.toLocaleLowerCase()
             ? { ...list, chatIds: [...new Set([...list.chatIds, chat.id])] }
             : list)
@@ -1406,18 +1446,33 @@ export function installFeatureUI({
 
   function openLists() {
     const modal = openModal('Favoritos y listas', { wide: true });
+    const account = runtime.account;
     const current = prefs();
     const form = node('form', 'feature-form');
     const input = field(documentRef, 'Nueva lista', 'text', 'name');
+    input.input.maxLength = 100;
     const submit = button(documentRef, 'Crear lista', 'feature-button primary');
     submit.type = 'submit';
     form.append(input.wrapper, submit);
     form.onsubmit = async event => {
-      event.preventDefault(); const name = input.input.value.trim(); if (!name) return;
-      savePrefs(value => ({ ...value, lists: [...value.lists, { id: cryptoRandom(), name, chatIds: [] }] }));
-      toast('Lista local creada.', 'success'); closeModal(); openLists();
+      event.preventDefault(); const name = input.input.value.trim();
+      if (!name || runtime.account !== account || submit.disabled) return;
+      if (store.read(account).lists.some(list => list.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        showError(new Error('Ya existe una lista con este nombre.')); return;
+      }
+      submit.disabled = true;
+      try {
+        await request('/api/lists', { account, action: 'create-list', list: name }, {}, { includeChat: false });
+        markListMutation(account);
+        store.update(account, value => ({ ...value, lists: [...value.lists, { id: cryptoRandom(), name, chatIds: [] }], serverListNames: [...new Set([...value.serverListNames, name])] }));
+        if (runtime.account === account) { closeModal(); openLists(); toast('Lista creada.', 'success'); }
+      } catch (error) { if (runtime.account === account) showError(error); }
+      finally { if (runtime.account === account && runtime.modal?.body === modal.body) submit.disabled = false; }
     };
-    modal.body.append(form, node('p', 'feature-muted', 'Las listas se guardan en este navegador para esta cuenta. La pertenencia también se registra en el servidor.'));
+    modal.body.append(form, node('p', 'feature-muted', 'Las listas se guardan para esta cuenta en SocialMedia. Las listas antiguas de este navegador se conservan.'));
+    const refresh = button(documentRef, 'Actualizar listas', 'feature-button subtle');
+    refresh.onclick = async () => { await refreshLists(account); if (runtime.account === account && runtime.modal?.body === modal.body) { closeModal(); openLists(); } };
+    modal.body.append(refresh);
     addSection(modal.body, 'Listas guardadas');
     if (!current.lists.length) modal.body.append(node('p', 'feature-muted', 'Todavía no hay listas.'));
     for (const list of current.lists) {
@@ -1426,12 +1481,24 @@ export function installFeatureUI({
       show.onclick = () => { closeModal(); setView(`list:${list.id}`); };
       const addChat = button(documentRef, 'Añadir chat actual', 'feature-button subtle');
       addChat.disabled = !runtime.chat || list.chatIds.includes(runtime.chat);
-      addChat.onclick = async () => { const result = await mutate('/api/lists', { action: 'list', list: list.name, id: runtime.chat }, { success: 'Chat añadido a la lista.' }); if (result) { savePrefs(value => ({ ...value, lists: value.lists.map(item => item.id === list.id ? { ...item, chatIds: [...new Set([...item.chatIds, runtime.chat])] } : item) })); closeModal(); openLists(); } };
+      addChat.onclick = async () => { const result = await mutate('/api/lists', { action: 'list', list: list.name, id: runtime.chat }, { success: 'Chat añadido a la lista.' }); if (result) { markListMutation(account); savePrefs(value => ({ ...value, lists: value.lists.map(item => item.id === list.id ? { ...item, chatIds: [...new Set([...item.chatIds, runtime.chat])] } : item), serverListNames: [...new Set([...value.serverListNames, list.name])] })); closeModal(); openLists(); } };
       const removeChat = button(documentRef, 'Quitar chat actual', 'feature-button subtle');
       removeChat.disabled = !runtime.chat || !list.chatIds.includes(runtime.chat);
-      removeChat.onclick = async () => { const result = await mutate('/api/lists', { action: 'remove-from-list', list: list.name, id: runtime.chat }, { success: 'Chat quitado de la lista.' }); if (result) { savePrefs(value => ({ ...value, lists: value.lists.map(item => item.id === list.id ? { ...item, chatIds: item.chatIds.filter(id => id !== runtime.chat) } : item) })); closeModal(); openLists(); } };
+      removeChat.onclick = async () => { const result = await mutate('/api/lists', { action: 'remove-from-list', list: list.name, id: runtime.chat }, { success: 'Chat quitado de la lista.' }); if (result) { markListMutation(account); savePrefs(value => ({ ...value, lists: value.lists.map(item => item.id === list.id ? { ...item, chatIds: item.chatIds.filter(id => id !== runtime.chat) } : item), serverListNames: [...new Set([...value.serverListNames, list.name])] })); closeModal(); openLists(); } };
       const removeList = button(documentRef, 'Eliminar lista local', 'feature-button subtle');
-      removeList.onclick = () => { if (!windowRef?.confirm?.(`¿Eliminar la lista local ${list.name}?`)) return; savePrefs(value => ({ ...value, view: value.view === `list:${list.id}` ? 'all' : value.view, lists: value.lists.filter(item => item.id !== list.id) })); closeModal(); openLists(); renderChats(); };
+      removeList.textContent = 'Eliminar lista';
+      removeList.onclick = async () => {
+        if (!windowRef?.confirm?.(`¿Eliminar la lista ${list.name}?`) || runtime.account !== account) return;
+        removeList.disabled = true;
+        try {
+          await request('/api/lists', { account, action: 'delete-list', list: list.name }, {}, { includeChat: false });
+          markListMutation(account);
+          const next = store.update(account, value => ({ ...value, view: value.view === `list:${list.id}` ? 'all' : value.view,
+            lists: value.lists.filter(item => item.id !== list.id), serverListNames: value.serverListNames.filter(name => name !== list.name) }));
+          if (runtime.account === account) { runtime.currentView = next.view; state.chatFilter = next.view; updateArchiveView(); closeModal(); openLists(); renderChats(); toast('Lista eliminada.', 'success'); }
+        } catch (error) { if (runtime.account === account) showError(error); }
+        finally { if (runtime.account === account && runtime.modal?.body === modal.body) removeList.disabled = false; }
+      };
       row.append(show, addChat, removeChat, removeList); modal.body.append(row);
     }
   }
@@ -1858,7 +1925,7 @@ export function installFeatureUI({
   function accountChanged(account) {
     clearInterval(runtime.presenceTimer); runtime.presenceTimer = null;
     runtime.closeAttachMenu?.();
-    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView();
+    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
   }
 
   async function markVisibleRead() {

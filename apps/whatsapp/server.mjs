@@ -111,6 +111,12 @@ function cleanProviderValue(value, max = 4096) {
   return value.trim();
 }
 
+function safeListName(value) {
+  const name = required(value, 'list', 100).trim();
+  if (Object.hasOwn(Object.prototype, name)) throw fail(400, 'Invalid list');
+  return name;
+}
+
 function ownerTurnId(value) {
   if (value === undefined) return undefined;
   if (typeof value !== 'string' || !UUID_PATTERN.test(value)) throw fail(400, 'Invalid turnId');
@@ -1573,7 +1579,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (!item) throw fail(400, 'Invalid favorite item');
           const state = await appState.update(a.accountId, current => {
             if (action === 'list') {
-              const name = required(body.list, 'list', 100);
+              const name = safeListName(body.list);
               const values = new Set(current.lists[name] || []); values.add(item); current.lists[name] = [...values];
             } else {
               const values = new Set(current.favorites);
@@ -1991,11 +1997,23 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const body = await bodyJSON(req); const a = accountParam(body.account); const action = String(body.action || body.operation || '').toLowerCase();
         const chat = body.chat ? safeChatId(body.chat) : null;
         if (chat) await conversationFor(a, chat);
-        if (!['favorite', 'unfavorite', 'starred', 'unstarred', 'list', 'remove-from-list'].includes(action)) throw fail(400, 'Invalid local action');
+        if (!['favorite', 'unfavorite', 'starred', 'unstarred', 'list', 'remove-from-list', 'create-list', 'delete-list'].includes(action)) throw fail(400, 'Invalid local action');
+        if (action === 'create-list' || action === 'delete-list') {
+          const name = safeListName(body.list);
+          const state = await appState.update(a.accountId, current => {
+            const existing = Object.keys(current.lists).find(item => item.toLocaleLowerCase() === name.toLocaleLowerCase());
+            if (action === 'create-list') {
+              if (existing) throw fail(409, 'List already exists');
+              current.lists = { ...current.lists, [name]: [] };
+            } else if (existing) delete current.lists[existing];
+            return current;
+          });
+          return json(200, { account: a.accountId, source: 'local', lists: state.lists });
+        }
         const item = required(body.messageId || body.id || chat, 'item', 512);
         const state = await appState.update(a.accountId, current => {
           if (action === 'list' || action === 'remove-from-list') {
-            const name = required(body.list, 'list', 100); const values = new Set(current.lists[name] || []);
+            const name = safeListName(body.list); const values = new Set(current.lists[name] || []);
             if (action === 'list') values.add(item); else values.delete(item); current.lists[name] = [...values];
           } else {
             const target = action.includes('starred') ? current.starred : current.favorites; const values = new Set(target);

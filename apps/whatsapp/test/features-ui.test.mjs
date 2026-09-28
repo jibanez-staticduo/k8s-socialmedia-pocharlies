@@ -12,6 +12,7 @@ import {
   matchesChatView,
   newIncomingMessageIds,
   normalizeFeatureState,
+  reconcileServerLists,
   normalizePrivacySnapshot,
   privacyChanges,
   presenceLabel,
@@ -68,6 +69,18 @@ test('feature preferences normalize invalid entries and persist per account', ()
   assert.equal(store.read('alpha').view, 'archived');
   assert.equal(store.read('beta').archivedChats.length, 0);
   assert.deepEqual(normalizeFeatureState({ view: 'invalid', lists: [{ id: '', name: 'ignored' }] }).lists, []);
+});
+
+test('server list snapshots retain legacy local lists and remove only previously synced lists', () => {
+  const legacy = { id: 'old', name: 'Antes', chatIds: ['local-chat'] };
+  const first = reconcileServerLists({ lists: [legacy] }, { Familia: ['server-chat'] });
+  assert.deepEqual(first.lists, [legacy, { id: 'server-Familia', name: 'Familia', chatIds: ['server-chat'] }]);
+  assert.deepEqual(first.serverListNames, ['Familia']);
+  const renamed = reconcileServerLists(first, { Familia: ['new-chat'], Trabajo: [] });
+  assert.deepEqual(renamed.lists, [legacy, { id: 'server-Familia', name: 'Familia', chatIds: ['new-chat'] }, { id: 'server-Trabajo', name: 'Trabajo', chatIds: [] }]);
+  const deleted = reconcileServerLists(renamed, { Trabajo: [] });
+  assert.deepEqual(deleted.lists, [legacy, { id: 'server-Trabajo', name: 'Trabajo', chatIds: [] }]);
+  assert.deepEqual(reconcileServerLists(deleted, []), deleted, 'invalid snapshots must not erase lists');
 });
 
 test('privacy snapshots normalize Baileys keys without inventing missing values', () => {

@@ -528,8 +528,10 @@ that makes the page feel broken rather than like a mobile app. The existing
 Playwright iPhone emulation verifies layout only at its normal scale; it does
 not reproduce Safari's real pinch zoom or a Home Screen launch. WebKit ignores
 `user-scalable` and scale limits in Safari, so the viewport meta tag alone is
-not a fix. Treat zoom stability and installation/login in standalone mode as
-open until checked on an actual iPhone. Keep Enter to send and Shift+Enter for
+not a fix. The chat surface now cancels Safari gesture and two-finger touch
+events while preserving ordinary one-finger scrolling; the separate image
+viewer remains zoomable. Treat real-device zoom stability and installation/login
+in standalone mode as open until checked on an actual iPhone. Keep Enter to send and Shift+Enter for
 a newline in the mobile composer as explicit acceptance criteria.
 The check must include a fresh Keycloak login from the Home Screen app: its
 external-domain redirect may leave standalone mode on iOS, which the static
@@ -541,4 +543,8 @@ That route opened a create-list drawer with the chosen chat preselected.
 SocialMedia now exposes the same menu path and stages a local list only after
 the account-scoped server membership succeeds. Browser QA covers an empty
 list collection, a rejected membership, and isolation between two accounts.
-Official-provider list synchronization across devices is still absent.
+List names and membership now persist in SocialMedia's account-scoped server
+state and reconcile on account selection, so they follow the account across
+browsers. Legacy browser-only lists remain visible until explicitly changed.
+These are SocialMedia lists: synchronization with WhatsApp's own lists across
+its clients is still absent.

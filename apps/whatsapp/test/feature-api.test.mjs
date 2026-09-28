@@ -307,6 +307,21 @@ test('feature mutations enforce Origin and account/chat ownership before provide
   assert.equal(upstream.length, 0);
 });
 
+test('list creation and deletion persist empty and populated lists per account', async t => {
+  const { request } = await fixture(t);
+  const list = { account: 'secondary', action: 'create-list', list: 'Vacaciones' };
+  assert.equal((await request('/api/lists', list)).status, 200);
+  assert.deepEqual((await (await request('/api/lists?account=secondary')).json()).lists, { Vacaciones: [] });
+  assert.deepEqual((await (await request('/api/lists?account=personal')).json()).lists, {});
+  assert.equal((await request('/api/lists', list)).status, 409);
+  assert.equal((await request('/api/lists', { account: 'secondary', chat: 'personal-chat', action: 'list', list: 'Vacaciones' })).status, 404);
+  assert.equal((await request('/api/lists', { account: 'secondary', chat: 'secondary-chat', action: 'list', list: 'Vacaciones' })).status, 200);
+  assert.deepEqual((await (await request('/api/lists?account=secondary')).json()).lists, { Vacaciones: ['secondary-chat'] });
+  assert.equal((await request('/api/lists', { account: 'secondary', action: 'delete-list', list: 'Vacaciones' })).status, 200);
+  assert.deepEqual((await (await request('/api/lists?account=secondary')).json()).lists, {});
+  assert.equal((await request('/api/lists', { account: 'secondary', action: 'create-list', list: '__proto__' })).status, 400);
+});
+
 test('normal chat list excludes archived rows and archived query exposes them', async t => {
   const { request, database } = await fixture(t);
   database.conversations['personal-chat'].avatar_url = 'https://private.example/avatar?token=secret';
