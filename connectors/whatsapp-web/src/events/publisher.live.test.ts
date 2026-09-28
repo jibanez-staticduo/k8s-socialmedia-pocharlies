@@ -111,7 +111,7 @@ test(
     let subNc: NatsConnection | null = null;
     let subConnected = false;
     let faultAt = '';
-    let subDown = '';
+    let pubDown = '';
     let coldStart = '';
     let coldBack = '';
     let backAt = '';
@@ -203,13 +203,15 @@ test(
         warm.publishMessageReceived(probeEvent(i, 'WARM'));
         await new Promise(resolve => setTimeout(resolve, RATE_MS));
 
-        // The subscriber's own socket is the reliable outage clock: when the
-        // server dies it drops. A warm publisher client may keep buffering
-        // outbound and never flip `connected` — legitimate delivery, but it
-        // would make `warm.isConnected()` a useless signal here.
-        if (faultAt && !subDown && !subConnected) subDown = utc();
+        // Outage clock = the code under test. `watchStatus` flips
+        // `isConnected()` on the client's Disconnect/Reconnect events, so this
+        // measures how long the publisher itself considered NATS dead. (The
+        // subscriber's own socket is useless for this: with the client's
+        // internal reconnect loop its `closed()` never fires during a short
+        // outage, so `subConnected` stayed true throughout.)
+        if (faultAt && !pubDown && !warm.isConnected()) pubDown = utc();
+        if (pubDown && !backAt && warm.isConnected()) backAt = utc();
         if (!subConnected) await ensureSubscriber();
-        if (subDown && !backAt && subConnected) backAt = utc();
       }
 
       // ---- Wait for both retainers to drain ----
@@ -238,7 +240,7 @@ test(
       const warmRetained = warmStats.retained - warmBaseline.retained;
       const receivedInRun = received.count - receivedBaseline;
       const outageSeconds =
-        subDown && backAt ? (new Date(backAt).getTime() - new Date(subDown).getTime()) / 1000 : 0;
+        pubDown && backAt ? (new Date(backAt).getTime() - new Date(pubDown).getTime()) / 1000 : 0;
 
       // ---- CRITERION B EVIDENCE: paste this block verbatim ----------------
       console.log('');
@@ -247,8 +249,8 @@ test(
       console.log(`subject prefix      : ${LIVE_SUBJECT_PREFIX}.> (never whatsapp.* / instagram.*)`);
       console.log(`fault command       : ${FAULT_CMD}`);
       console.log(`fault injected at   : ${faultAt} (warm probe #${FAULT_AT})`);
-      console.log(`subscriber saw down : ${subDown}`);
-      console.log(`subscriber back     : ${backAt || 'n/a'}`);
+      console.log(`publisher saw down  : ${pubDown}`);
+      console.log(`publisher back      : ${backAt || 'n/a'}`);
       console.log(`observed outage     : ${outageSeconds.toFixed(1)} s`);
       console.log(`cold publisher      : started ${coldStart}, connectedAtStart=${coldConnectedAtStart}, drained ${coldBack || 'n/a'}`);
       console.log(`retention window    : ${process.env.NATS_RETENTION_WINDOW_HOURS ?? '6'} h`);
