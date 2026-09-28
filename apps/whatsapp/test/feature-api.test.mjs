@@ -207,9 +207,11 @@ function fixtureDatabase(calls) {
     'personal-chat': [{ id: '11111111-1111-1111-1111-111111111111', wa_message_id: 'wa-personal-1', conversation_id: 'personal-chat', content: 'hello', direction: 'INBOUND', message_type: 'TEXT', is_deleted: false, wa_timestamp: '2026-09-23T08:00:00.000Z' }],
     'secondary-chat': [{ id: '22222222-2222-2222-2222-222222222222', wa_message_id: 'wa-secondary-1', conversation_id: 'secondary-chat', content: 'other', direction: 'INBOUND', message_type: 'TEXT', is_deleted: false, wa_timestamp: '2026-09-23T08:00:00.000Z' }],
   };
+  const attachments = {};
   return {
     conversations,
     messages,
+    attachments,
     query: async (sql, args = []) => {
       calls.push({ sql, args });
       if (/SELECT pn\.id FROM conversations pn/.test(sql)) return { rows: Object.values(conversations)
@@ -239,6 +241,30 @@ function fixtureDatabase(calls) {
         .flatMap(id => messages[id] || [])
         .filter(row => row.id === args[2] || row.wa_message_id === args[2])
         .map(row => ({ id: row.id, wa_timestamp: row.wa_timestamp })) };
+      if (/FROM messages m/.test(sql) && /LEFT JOIN attachments a ON a\.message_id=m\.id/.test(sql)) {
+        let rows = (Array.isArray(args[1]) ? args[1] : [args[1]]).flatMap(id => messages[id] || [])
+          .filter(row => conversations[row.conversation_id]?.account === args[0] && row.is_deleted !== true)
+          .flatMap(row => (attachments[row.id] || [{}]).map(att => ({ ...row, attKey: att.id || '', attachment_id: att.id || null,
+            mime_type: att.mime_type || null, file_name: att.file_name || null, file_size: att.file_size ?? null, caption: att.caption || null })));
+        const typeArg = sql.match(/m\.message_type=\$(\d+)/);
+        if (typeArg) rows = rows.filter(row => row.message_type === args[Number(typeArg[1]) - 1]);
+        if (/m\.message_type IN \('IMAGE','VIDEO'\)/.test(sql)) rows = rows.filter(row => ['IMAGE', 'VIDEO'].includes(row.message_type));
+        if (/m\.message_type='DOCUMENT'/.test(sql)) rows = rows.filter(row => row.message_type === 'DOCUMENT');
+        if (/m\.content ~\* 'https\?/.test(sql)) rows = rows.filter(row => /https?:\/\/\S+/i.test(row.content || ''));
+        const keyset = sql.match(/\(m\.wa_timestamp, m\.id::text, COALESCE\(a\.id::text, ''\)\) < \(\$(\d+)::timestamptz, \$(\d+)::text, \$(\d+)::text\)/);
+        if (keyset) {
+          const [ts, messageId, attachmentId] = [Number(keyset[1]), Number(keyset[2]), Number(keyset[3])].map(n => args[n - 1]);
+          rows = rows.filter(row => row.wa_timestamp < ts || (row.wa_timestamp === ts
+            && (row.id < messageId || (row.id === messageId && row.attKey < attachmentId))));
+        } else {
+          const before = sql.match(/m\.wa_timestamp < \$(\d+)::timestamptz/);
+          if (before) rows = rows.filter(row => row.wa_timestamp < args[Number(before[1]) - 1]);
+        }
+        rows.sort((a, b) => b.wa_timestamp.localeCompare(a.wa_timestamp) || b.id.localeCompare(a.id) || b.attKey.localeCompare(a.attKey));
+        const limit = sql.match(/LIMIT \$(\d+)/);
+        if (limit) rows = rows.slice(0, args[Number(limit[1]) - 1]);
+        return { rows };
+      }
       if (/FROM messages m/.test(sql) && /m\.id,\s*m\.wa_message_id/.test(sql)) {
         let rows = (Array.isArray(args[1]) ? args[1] : [args[1]]).flatMap(id => messages[id] || []);
         if (/AND \(m\.wa_timestamp, m\.id::text\)/.test(sql)) {
@@ -570,6 +596,86 @@ test('link gallery items expose their first safe-looking URL', async t => {
   const item = (await response.json()).items.find(entry => entry.messageId === 'wa-personal-link');
   assert.equal(item.url, 'https://example.test/article');
   assert.equal(item.name, 'https://example.test/article');
+});
+
+const mediaUuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const mediaTimestamp = ts => `2026-09-23T08:${String(ts).padStart(2, '0')}:00.000Z`;
+const loadMediaFixtures = database => {
+  const tie = mediaTimestamp(10);
+  database.messages['personal-chat'].push(
+    ...[1, 2, 3, 4, 5].map(n => ({
+      id: mediaUuid(n), conversation_id: 'personal-chat', content: `image ${n}`, direction: 'INBOUND',
+      message_type: 'IMAGE', is_deleted: false, wa_timestamp: tie,
+    })),
+    { id: mediaUuid(6), conversation_id: 'personal-chat', content: 'older', direction: 'INBOUND', message_type: 'IMAGE', is_deleted: false, wa_timestamp: mediaTimestamp(5) },
+  );
+  database.attachments[mediaUuid(1)] = [
+    { id: mediaUuid(101), mime_type: 'image/jpeg', file_name: 'one-a.jpg', file_size: 11, file_url: null, caption: null },
+    { id: mediaUuid(102), mime_type: 'image/jpeg', file_name: 'one-b.jpg', file_size: 22, file_url: null, caption: null },
+  ];
+};
+const collectMediaPages = async (request, query) => {
+  const items = [];
+  const pages = [];
+  let cursor = null;
+  for (let guard = 0; guard < 25; guard += 1) {
+    const response = await request(`/api/chats/media?${query}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    assert.equal(response.status, 200);
+    const page = await response.json();
+    assert.ok(Array.isArray(page.items));
+    items.push(...page.items.map(item => `${item.messageId}:${item.id}`));
+    pages.push(page.items.length);
+    cursor = page.nextCursor;
+    if (!cursor) return { items, pages };
+  }
+  assert.fail('media pagination never terminated');
+};
+
+test('media pages walk equal timestamps and split attachments without loss or duplicates', async t => {
+  const { request, database } = await fixture(t);
+  loadMediaFixtures(database);
+  const baseline = await (await request('/api/chats/media?account=personal&chat=personal-chat&kind=gallery&limit=200')).json();
+  const expected = baseline.items.map(item => `${item.messageId}:${item.id}`);
+  assert.equal(expected.length, 7);
+  assert.equal(baseline.nextCursor, null);
+  // The message with two attachments must be ordered by attachment id so a page boundary
+  // in the middle of one message cannot drop the second attachment.
+  assert.deepEqual(baseline.items.slice(4, 6).map(item => item.name), ['one-b.jpg', 'one-a.jpg']);
+  for (const limit of [1, 2, 3]) {
+    const walked = await collectMediaPages(request, `account=personal&chat=personal-chat&kind=gallery&limit=${limit}`);
+    assert.deepEqual(walked.items, expected, `limit=${limit}`);
+    assert.equal(new Set(walked.items).size, expected.length, `limit=${limit} duplicated rows`);
+  }
+  const twoEach = await collectMediaPages(request, 'account=personal&chat=personal-chat&kind=gallery&limit=2');
+  assert.deepEqual(twoEach.pages, [2, 2, 2, 1]);
+});
+
+test('media cursors are versioned, scoped, and reject malformed pagination input', async t => {
+  const { request, database } = await fixture(t);
+  loadMediaFixtures(database);
+  const first = await (await request('/api/chats/media?account=personal&chat=personal-chat&kind=gallery&limit=2')).json();
+  assert.ok(first.nextCursor);
+  const decoded = JSON.parse(Buffer.from(first.nextCursor, 'base64url').toString('utf8'));
+  assert.deepEqual(Object.keys(decoded).sort(), ['attachment', 'id', 'scope', 'timestamp', 'v']);
+  assert.equal(decoded.v, 1);
+  assert.match(decoded.scope, /^[0-9a-f]{64}$/);
+  const secondViaCursor = await (await request(`/api/chats/media?account=personal&chat=personal-chat&kind=gallery&limit=2&cursor=${encodeURIComponent(first.nextCursor)}`)).json();
+  const secondViaLegacyBefore = await (await request(`/api/chats/media?account=personal&chat=personal-chat&kind=gallery&limit=2&before=${encodeURIComponent(first.nextCursor)}`)).json();
+  assert.deepEqual(secondViaCursor.items.map(item => item.id), secondViaLegacyBefore.items.map(item => item.id));
+  // Legacy raw timestamps keep working and keep the strict "<" semantics of the old contract.
+  const legacy = await (await request(`/api/chats/media?account=personal&chat=personal-chat&kind=gallery&limit=10&before=${encodeURIComponent(mediaTimestamp(10))}`)).json();
+  assert.deepEqual(legacy.items.map(item => item.text), ['older']);
+  assert.equal(legacy.nextCursor, null);
+  for (const [label, path] of [
+    ['malformed cursor', `/api/chats/media?account=personal&chat=personal-chat&kind=gallery&cursor=${encodeURIComponent('nope!!')}`],
+    ['malformed before', '/api/chats/media?account=personal&chat=personal-chat&kind=gallery&before=not-a-time'],
+    ['oversized cursor', `/api/chats/media?account=personal&chat=personal-chat&kind=gallery&cursor=${'a'.repeat(2049)}`],
+    ['cursor reused across kinds', `/api/chats/media?account=personal&chat=personal-chat&kind=image&cursor=${encodeURIComponent(first.nextCursor)}`],
+    ['cursor reused across chats', `/api/chats/media?account=personal&chat=personal-archived&kind=gallery&cursor=${encodeURIComponent(first.nextCursor)}`],
+  ]) assert.equal((await request(path)).status, 400, label);
+  // Kinds outside the contract are refused before touching the database.
+  assert.equal((await request('/api/chats/media?account=personal&chat=personal-chat&kind=images')).status, 400);
+  assert.equal((await request('/api/chats/media?account=personal&chat=personal-chat&limit=201')).status, 400);
 });
 
 test('local starred state is durable and account scoped', async t => {

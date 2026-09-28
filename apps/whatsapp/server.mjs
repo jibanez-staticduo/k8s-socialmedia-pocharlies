@@ -260,6 +260,28 @@ function decodeMessageCursor(value) {
   if (Number.isFinite(Date.parse(raw))) return { timestamp: new Date(raw).toISOString(), id: null };
   return { timestamp: null, id: raw };
 }
+
+// Media pages are keyed by (wa_timestamp, message id, attachment id): the LEFT JOIN on
+// attachments can emit several rows per message, so the message id alone is not a unique
+// page position. Versioned v1 cursors are bound to their account/chat/kind scope; a bare
+// timestamp stays accepted through `before` for legacy clients (strict `<`, tie-skipping).
+function decodeMediaPageCursor(value, scope, name) {
+  if (typeof value !== 'string' || !value || value.length > 2048) throw fail(400, `Invalid ${name}`);
+  let decoded = null;
+  try { decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); } catch { decoded = null; }
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (decoded !== null && typeof decoded === 'object') {
+    if (decoded.v === 1 && decoded.scope === scope && typeof decoded.timestamp === 'string' && Number.isFinite(Date.parse(decoded.timestamp))
+      && typeof decoded.id === 'string' && uuid.test(decoded.id)
+      && typeof decoded.attachment === 'string' && (decoded.attachment === '' || uuid.test(decoded.attachment))) {
+      return { keyset: true, timestamp: decoded.timestamp, id: decoded.id, attachment: decoded.attachment };
+    }
+    throw fail(400, `Invalid ${name}`);
+  }
+  if (Number.isFinite(Date.parse(value))) return { keyset: false, timestamp: new Date(value).toISOString() };
+  throw fail(400, `Invalid ${name}`);
+}
+
 function replyPreview(row) {
   if (!row.replyToMessageId) return null;
   if (!row.replyAvailable) return { type: null, text: '', senderName: null, available: false };
@@ -1477,24 +1499,40 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const kind = url.searchParams.get('kind') || url.searchParams.get('type') || 'all';
         if (!['all', 'gallery', 'image', 'video', 'document', 'documents', 'link', 'links'].includes(kind)) throw fail(400, 'Invalid media kind');
         const limit = boundedInteger(url.searchParams.get('limit'), 'limit', { max: MAX_PAGE_SIZE, fallback: 50 });
-        const before = url.searchParams.get('before');
+        const scope = createHash('sha256').update(JSON.stringify(['media-v1', a.accountId, conversation.id, kind])).digest('hex');
+        const rawCursor = url.searchParams.get('cursor') ?? url.searchParams.get('before');
+        const pageCursor = rawCursor ? decodeMediaPageCursor(rawCursor, scope, url.searchParams.has('cursor') ? 'cursor' : 'before') : null;
         const args = [a.accountId, readIds];
         const clauses = ["m.account=$1", "m.conversation_id=ANY($2::text[])", "m.platform='whatsapp'", 'NOT m.is_deleted'];
-        if (before) { args.push(before); clauses.push(`m.wa_timestamp < $${args.length}::timestamptz`); }
+        if (pageCursor?.keyset) {
+          args.push(pageCursor.timestamp, pageCursor.id, pageCursor.attachment);
+          clauses.push(`(m.wa_timestamp, m.id::text, COALESCE(a.id::text, '')) < ($${args.length - 2}::timestamptz, $${args.length - 1}::text, $${args.length}::text)`);
+        } else if (pageCursor) {
+          args.push(pageCursor.timestamp);
+          clauses.push(`m.wa_timestamp < $${args.length}::timestamptz`);
+        }
         if (['image', 'video'].includes(kind)) { args.push(kind.toUpperCase()); clauses.push(`m.message_type=$${args.length}`); }
         if (kind === 'gallery') { clauses.push("m.message_type IN ('IMAGE','VIDEO')"); }
         if (['document', 'documents'].includes(kind)) clauses.push("m.message_type='DOCUMENT'");
         if (['link', 'links'].includes(kind)) clauses.push("m.content ~* 'https?://[^[:space:]]+'");
-        args.push(limit);
+        args.push(limit + 1);
         const rows = await query(
           `SELECT m.id,m.wa_message_id,m.content,m.message_type,m.wa_timestamp,
+                  m.wa_timestamp::text AS cursor_timestamp,
                   a.id AS attachment_id,a.mime_type,a.file_name,a.file_size,a.file_url,a.caption
              FROM messages m LEFT JOIN attachments a ON a.message_id=m.id
             WHERE ${clauses.join(' AND ')}
-            ORDER BY m.wa_timestamp DESC LIMIT $${args.length}`,
+            ORDER BY m.wa_timestamp DESC, m.id::text DESC, COALESCE(a.id::text, '') DESC
+            LIMIT $${args.length}`,
           args
         );
-        return json(200, { account: a.accountId, chat, kind, items: rows.map(item => {
+        const page = rows.slice(0, limit);
+        const lastRow = page[page.length - 1];
+        const nextCursor = rows.length > limit && lastRow ? Buffer.from(JSON.stringify({
+          v: 1, scope, timestamp: lastRow.cursor_timestamp || new Date(lastRow.wa_timestamp).toISOString(),
+          id: String(lastRow.id), attachment: lastRow.attachment_id ? String(lastRow.attachment_id) : '',
+        })).toString('base64url') : null;
+        return json(200, { account: a.accountId, chat, kind, items: page.map(item => {
           const itemKind = item.message_type === 'DOCUMENT' ? 'document' : item.message_type === 'IMAGE' || item.message_type === 'VIDEO' || item.message_type === 'AUDIO' || item.message_type === 'STICKER' ? 'media' : 'link';
           const link = itemKind === 'link'
             ? item.content?.match(/https?:\/\/[^\s<]+/i)?.[0]?.replace(/[),.!?;:]+$/, '') || null
@@ -1512,7 +1550,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             url: item.attachment_id ? `/api/media/${encodeURIComponent(item.attachment_id)}?account=${encodeURIComponent(a.accountId)}&chat=${encodeURIComponent(chat)}` : link,
             caption: item.caption || null,
           };
-        }), nextCursor: rows.length === limit ? rows[rows.length - 1]?.wa_timestamp || null : null });
+        }), nextCursor });
       }
       if (req.method === 'GET' && path === '/api/messages/by-date') {
         const a = accountParam(url.searchParams.get('account'));

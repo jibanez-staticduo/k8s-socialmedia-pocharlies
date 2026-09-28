@@ -294,7 +294,17 @@ function renderMessages() {
   if (signature === state.signature) return;
   state.signature = signature;
   if (!visible.length) pane.replaceChildren(node('div', 'welcome', 'No hay mensajes sincronizados en esta conversación.'));
-  else messageRenderer.reconcileMessageList(pane, visible, {showSenderNames: state.selectedChat?.isGroup === true});
+  else messageRenderer.reconcileMessageList(pane, visible, {
+    showSenderNames: state.selectedChat?.isGroup === true,
+    onImageOpen: ({url, name, document: documentRef, opener}) => {
+      const ctx = context();
+      messageRenderer.openImageViewer(url, name, documentRef, opener, async cursor => {
+        if (!current(ctx)) return null;
+        const page = await api(query('/api/chats/media', {chat: ctx.chat, kind: 'image', limit: '200', ...(cursor ? {cursor} : {})}), undefined, undefined, AbortSignal.timeout(30000));
+        return current(ctx) && page.account === ctx.account && page.chat === ctx.chat ? page : null;
+      });
+    },
+  });
   updatePollControls();
   for (const item of pending) {
     const bubble = [...pane.querySelectorAll('.message[data-message-id]')].find(element => element.dataset.messageId === item.id);

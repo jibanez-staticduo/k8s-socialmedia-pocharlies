@@ -422,8 +422,11 @@ export function closeMediaViewer(documentRef = globalThis.document) {
   if (documentRef) closeImageViewer(documentRef);
 }
 
-function openImageViewer(url, name, documentRef, opener) {
+export function openImageViewer(url, name, documentRef, opener, loadPage) {
   if (!documentRef?.body) return;
+  const initialUrl = url?.startsWith('blob:') ? safeViewerUrl(opener) : safeMessageUrl(url, documentRef.baseURI);
+  if (!initialUrl) return;
+  url = initialUrl;
   closeImageViewer(documentRef, false);
   const overlay = makeElement(documentRef, 'div', 'media-viewer');
   overlay.setAttribute('role', 'dialog');
@@ -438,8 +441,22 @@ function openImageViewer(url, name, documentRef, opener) {
   const actions = makeElement(documentRef, 'div', 'media-viewer-actions');
   appendDownload(actions, url, name, documentRef);
   const scope = opener?.closest?.('#messages');
-  const entries = scope ? [...scope.querySelectorAll('.media-image-button')].filter(button => button.dataset.viewerUrl) : [];
+  let entries = scope ? [...scope.querySelectorAll('.media-image-button')].filter(button => button.dataset.viewerUrl) : [];
   let index = entries.indexOf(opener);
+  let displayed = opener;
+  let cursor = null;
+  let remoteReady = false;
+  let loading = null;
+  let historyError = '';
+  const seenCursors = new Set();
+  const entryUrl = entry => entry?.url ? safeMessageUrl(entry.url, documentRef.baseURI) : safeViewerUrl(entry);
+  const entryName = entry => entry?.name || entry?.dataset?.viewerName || 'Imagen';
+  const absoluteUrl = value => { if (!value) return ''; try { return new URL(value, documentRef.baseURI).href; } catch { return ''; } };
+  const sameEntry = (item, shown) => shown?.dataset?.viewerId
+    ? String(item.id) === shown.dataset.viewerId
+    : item.id && shown?.id ? String(item.id) === String(shown.id)
+      : absoluteUrl(item.url) === absoluteUrl(entryUrl(shown));
+  const active = () => mediaViewerStates.get(documentRef)?.overlay === overlay;
   const previous = makeElement(documentRef, 'button', 'media-viewer-previous', '\u2039');
   const next = makeElement(documentRef, 'button', 'media-viewer-next', '\u203a');
   const counter = makeElement(documentRef, 'span', 'media-viewer-counter');
@@ -447,25 +464,59 @@ function openImageViewer(url, name, documentRef, opener) {
   previous.setAttribute('aria-label', 'Imagen anterior'); next.setAttribute('aria-label', 'Imagen siguiente');
   counter.setAttribute('aria-live', 'polite');
   const updateNavigation = () => {
-    previous.disabled = index <= 0; next.disabled = index >= entries.length - 1;
-    counter.textContent = `${index + 1} / ${entries.length}`;
+    previous.disabled = Boolean(loading) || (index <= 0 && !(remoteReady && cursor));
+    next.disabled = Boolean(loading) || index >= entries.length - 1;
+    counter.textContent = historyError || `${index + 1} / ${entries.length}${cursor ? '+' : ''}`;
   };
-  const move = delta => {
+  const fetchOlder = async () => {
+    if (!remoteReady || !cursor || !loadPage) return;
+    if (loading) return loading;
+    historyError = '';
+    loading = (async () => {
+      const requestedCursor = cursor;
+      const result = await loadPage(requestedCursor);
+      if (!active() || !result) return;
+      if (seenCursors.has(requestedCursor) || result.nextCursor === requestedCursor) {
+        cursor = null;
+        return;
+      }
+      seenCursors.add(requestedCursor);
+      const older = (result.items || []).filter(item => item?.url).map(item => ({id: item.id, url: item.url, name: item.name || 'Imagen'}));
+      const unique = older.filter(item => !entries.some(entry => sameEntry(item, entry)));
+      entries.unshift(...unique.reverse());
+      index += unique.length;
+      cursor = result.nextCursor || null;
+      updateNavigation();
+    })().catch(() => { if (active()) historyError = 'No se pudieron cargar más imágenes'; })
+      .finally(() => { loading = null; if (active()) updateNavigation(); });
+    updateNavigation();
+    return loading;
+  };
+  const move = async delta => {
+    if (loading) return;
+    const retained = entries.slice(0, index).filter(entry => !(entry instanceof Element) || entry.isConnected).length;
+    entries = entries.filter(entry => !(entry instanceof Element) || entry.isConnected);
+    index = displayed instanceof Element && !displayed.isConnected
+      ? retained - (delta > 0 ? 1 : 0)
+      : Math.min(retained, entries.length - 1);
+    if (delta < 0 && index === 0) await fetchOlder();
     const target = entries[index + delta];
-    if (!target || !target.isConnected) return;
-    const targetUrl = safeViewerUrl(target);
+    if (!target) { updateNavigation(); return; }
+    const targetUrl = entryUrl(target);
     if (!targetUrl) return;
     index += delta;
-    image.src = targetUrl; image.alt = target.dataset.viewerName || 'Imagen';
+    displayed = target;
+    historyError = '';
+    image.src = targetUrl; image.alt = entryName(target);
     overlay.setAttribute('aria-label', image.alt);
     actions.replaceChildren(); appendDownload(actions, targetUrl, image.alt, documentRef);
     updateNavigation();
   };
-  previous.onclick = () => move(-1); next.onclick = () => move(1);
+  previous.onclick = () => { void move(-1); }; next.onclick = () => { void move(1); };
   const close = () => closeImageViewer(documentRef);
   const onKey = event => {
-    if (entries.length > 1 && index >= 0 && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
-      event.preventDefault(); move(event.key === 'ArrowLeft' ? -1 : 1); return;
+    if (index >= 0 && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      event.preventDefault(); void move(event.key === 'ArrowLeft' ? -1 : 1); return;
     }
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -500,9 +551,35 @@ function openImageViewer(url, name, documentRef, opener) {
   mediaViewerStates.set(documentRef, { overlay, onKey, opener });
   documentRef.addEventListener?.('keydown', onKey);
   overlay.append(closeButton, image, actions);
-  if (entries.length > 1 && index >= 0) {updateNavigation(); overlay.append(previous, next, counter);}
+  if (index >= 0) {updateNavigation(); overlay.append(previous, next, counter);}
   documentRef.body.append(overlay);
   closeButton.focus?.();
+  if (loadPage && index >= 0 && opener?.dataset?.viewerPreviewOnly !== 'true' && (opener?.dataset?.viewerId || !url.startsWith('blob:'))) {
+    counter.setAttribute('aria-busy', 'true');
+    counter.textContent = 'Buscando imágenes…';
+    void (async () => {
+      const all = [];
+      const seen = new Set();
+      let nextCursor = null;
+      let pages = 0;
+      do {
+        const result = await loadPage(nextCursor);
+        if (!active() || !result) return;
+        all.push(...(result.items || []).filter(item => item?.url).map(item => ({id: item.id, url: item.url, name: item.name || 'Imagen'})));
+        nextCursor = result.nextCursor || null;
+        if (nextCursor && seen.has(nextCursor)) return;
+        if (nextCursor) seen.add(nextCursor);
+      } while (nextCursor && ++pages < 20 && !all.some(item => sameEntry(item, displayed)));
+      if (!active() || !all.some(item => sameEntry(item, displayed))) return;
+      entries = all.reverse();
+      index = entries.findIndex(item => sameEntry(item, displayed));
+      displayed = entries[index];
+      cursor = nextCursor;
+      remoteReady = true;
+      updateNavigation();
+    })().catch(() => { if (active()) historyError = 'Historial no disponible'; })
+      .finally(() => { if (active()) { counter.setAttribute('aria-busy', 'false'); if (!remoteReady) updateNavigation(); } });
+  }
 }
 
 function createAudioPlayer(url, name, parent, documentRef) {
@@ -598,6 +675,8 @@ function attachmentMediaNodes(attachment, { documentRef, src, name, parent, onIm
     button.setAttribute('aria-label', `Abrir imagen ${name}`);
     button.dataset.viewerUrl = src;
     button.dataset.viewerName = name;
+    if (attachment?.id != null) button.dataset.viewerId = String(attachment.id);
+    if (attachment?.previewOnly === true) button.dataset.viewerPreviewOnly = 'true';
     if (src.startsWith('blob:')) viewerMediaStates.set(button, { url: src, policy });
     const image = makeElement(documentRef, 'img', 'attachment-image');
     image.src = src;
@@ -940,7 +1019,7 @@ function messageBubbleClass(message) {
   return classes.join(' ');
 }
 
-export function renderMessage(message, { document: documentRef = globalThis.document, showSenderNames = false, mediaPolicy } = {}) {
+export function renderMessage(message, { document: documentRef = globalThis.document, showSenderNames = false, mediaPolicy, onImageOpen } = {}) {
   const fromMe = message?.fromMe === true;
   const bubble = makeElement(documentRef, 'article', messageBubbleClass(message));
   if (message?.id != null) bubble.dataset.messageId = String(message.id);
@@ -1026,7 +1105,7 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     const shownAttachment = text.trim() && text.trim() === textValue(attachment?.caption).trim()
       ? { ...attachment, caption: '' }
       : attachment;
-    bubble.append(createAttachmentElement(shownAttachment, { document: documentRef, mediaPolicy }));
+    bubble.append(createAttachmentElement(shownAttachment, { document: documentRef, mediaPolicy, onImageOpen }));
   }
   if (!text && !attachments.length && !['contact', 'poll', 'event'].includes(metadata.kind)) bubble.append(messageKindLine(documentRef, message?.type, '', { unavailable: !MESSAGE_KINDS[messageType(message?.type)] }));
   const meta = makeElement(documentRef, 'div', 'message-meta');
@@ -1133,7 +1212,7 @@ export function reconcileMessageList(container, messages, options = {}) {
       syncSenderHeader(previous, message, options.showSenderNames === true, documentRef);
       if (container.children?.[cursor] !== previous) container.insertBefore(previous, reference);
     } else {
-      container.insertBefore(renderMessage(message, { document: documentRef, showSenderNames: options.showSenderNames === true, mediaPolicy: options.mediaPolicy }), reference);
+      container.insertBefore(renderMessage(message, { document: documentRef, showSenderNames: options.showSenderNames === true, mediaPolicy: options.mediaPolicy, onImageOpen: options.onImageOpen }), reference);
     }
     cursor += 1;
   }

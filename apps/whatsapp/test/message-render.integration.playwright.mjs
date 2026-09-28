@@ -108,7 +108,7 @@ try {
   await page.evaluate(async () => {
     const renderer = await import('/message-render.mjs');
     const chat = document.createElement('section'); chat.id = 'messages';
-    for (const name of ['first.png', 'second.png', 'third.png']) chat.append(renderer.createAttachmentElement({url:`/${name}`,mimeType:'image/png',name}));
+    for (const name of ['first.png', 'second.png', 'third.png']) chat.append(renderer.createAttachmentElement({id: `id-${name}`, url:`/${name}`,mimeType:'image/png',name}));
     document.body.append(chat);
   });
   await page.waitForFunction(() => document.querySelectorAll('#messages .media-image-button').length === 3);
@@ -138,6 +138,51 @@ try {
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('.media-viewer').count(), 0);
   assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#messages .media-image-button')), true);
+  await page.evaluate(async () => {
+    const renderer = await import('/message-render.mjs');
+    const opener = document.querySelectorAll('#messages .media-image-button')[1];
+    renderer.openImageViewer('/second.png', 'second.png', document, opener, async cursor => cursor
+      ? {items: [{id: 'id-first.png', url: '/first.png', name: 'first.png'}, {id: 'id-older.png', url: '/older.png', name: 'older.png'}], nextCursor: null}
+      : {items: [{id: 'id-third.png', url: '/third.png', name: 'third.png'}, {id: 'id-second.png', url: '/server-second.png', name: 'second.png'}], nextCursor: 'older'});
+  });
+  await page.getByText('1 / 2+', {exact: true}).waitFor();
+  await page.getByRole('button', {name: 'Imagen anterior', exact: true}).click();
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'first.png');
+  await page.getByRole('button', {name: 'Imagen anterior', exact: true}).click();
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'older.png');
+  assert(await page.getByRole('button', {name: 'Imagen anterior', exact: true}).isDisabled());
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.media-viewer').count(), 0);
+  await page.evaluate(async () => {
+    const renderer = await import('/message-render.mjs');
+    const opener = document.querySelector('#messages .media-image-button');
+    renderer.openImageViewer('/first.png', 'first.png', document, opener, () => new Promise(resolve => { window.resolveViewerPage = resolve; }));
+    renderer.closeMediaViewer(document);
+    window.resolveViewerPage({items: [{url: '/stale.png', name: 'stale.png'}], nextCursor: null});
+  });
+  assert.equal(await page.locator('.media-viewer').count(), 0, 'a late page must not reopen a closed viewer');
+  await page.evaluate(async () => {
+    const renderer = await import('/message-render.mjs');
+    const opener = document.querySelectorAll('#messages .media-image-button')[1];
+    renderer.openImageViewer('/second.png', 'second.png', document, opener, async cursor => cursor
+      ? Promise.reject(new Error('Network failed'))
+      : {items: [{id: 'id-second.png', url: '/second.png', name: 'second.png'}], nextCursor: 'older'});
+  });
+  await page.getByText('1 / 1+', {exact: true}).waitFor();
+  await page.getByRole('button', {name: 'Imagen anterior', exact: true}).click();
+  await page.getByText('No se pudieron cargar más imágenes', {exact: true}).waitFor();
+  await page.keyboard.press('Escape');
+  await page.evaluate(async () => {
+    const renderer = await import('/message-render.mjs');
+    const opener = document.querySelectorAll('#messages .media-image-button')[1];
+    renderer.openImageViewer('/second.png', 'second.png', document, opener);
+    document.querySelectorAll('#messages .media-image-button')[0].remove();
+  });
+  await page.getByRole('button', {name: 'Imagen anterior', exact: true}).click();
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'second.png');
+  await page.getByRole('button', {name: 'Imagen siguiente', exact: true}).click();
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'third.png');
+  await page.keyboard.press('Escape');
   console.log('PASS message-render DOM integration', JSON.stringify(result));
 } finally {
   await browser.close();

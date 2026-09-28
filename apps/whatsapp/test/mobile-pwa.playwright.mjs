@@ -28,12 +28,16 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => {
     const url = new URL(route.request().url());
+    if (url.pathname.startsWith('/api/media/')) return route.fulfill({status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64')});
     const account = url.searchParams.get('account') || 'personal';
     const data = url.pathname === '/api/accounts'
       ? {accounts: [{id: 'personal', label: 'Personal'}, {id: 'secondary', label: 'Secundaria'}], sendingEnabled: true}
       : url.pathname === '/api/chats'
         ? {chats: [{id: `${account}-chat`, name: account === 'personal' ? 'Ana' : 'Bruno', preview: 'Hola', unread: 0, pinned: true}]}
-        : url.pathname === '/api/messages' ? {messages: [{id: 'one', text: 'Hola', timestamp: '2026-09-28T10:00:00Z'}, {id: 'two', text: `https://example.com/${'unbroken'.repeat(90)}`, timestamp: '2026-09-28T10:01:00Z'}]}
+        : url.pathname === '/api/messages' ? {messages: [{id: 'one', text: 'Hola', timestamp: '2026-09-28T10:00:00Z'}, {id: 'two', text: `https://example.com/${'unbroken'.repeat(90)}`, timestamp: '2026-09-28T10:01:00Z'}, {id: 'image-current', type: 'IMAGE', timestamp: '2026-09-28T10:02:00Z', attachments: [{id: 'attachment-current', name: 'current.png', mimeType: 'image/png', url: `/api/media/attachment-current?account=${account}&chat=${account}-chat`}]}]}
+          : url.pathname === '/api/chats/media' ? {account, chat: url.searchParams.get('chat'), items: url.searchParams.get('cursor')
+            ? [{id: 'attachment-older', url: `/api/media/attachment-older?account=${account}&chat=${account}-chat`, name: 'older.png'}]
+            : [{id: 'attachment-current', url: `/api/media/attachment-current?account=${account}&chat=${account}-chat`, name: 'current.png'}], nextCursor: url.searchParams.get('cursor') ? null : 'older'}
           : url.pathname === '/api/models' ? {models: [{id: 'fixture'}], defaultModel: 'fixture'}
             : url.pathname === '/api/ai/session' ? {sessionId: 'fixture', messages: []}
               : {proposals: []};
@@ -117,6 +121,12 @@ try {
   await page.waitForFunction(() => document.body.classList.contains('chat-open'));
   state = await geometry('conversation');
   assert(state.conversation.width >= state.width - 1, `Expected full-width conversation: ${JSON.stringify(state)}`);
+  await page.locator('#messages .media-image-button').tap();
+  await page.getByText('1 / 1+', {exact: true}).waitFor();
+  await page.getByRole('button', {name: 'Imagen anterior', exact: true}).tap();
+  await page.locator('.media-viewer-image[alt="older.png"]').waitFor();
+  assert.equal(await page.locator('.media-viewer-image').getAttribute('alt'), 'older.png');
+  await page.getByRole('button', {name: 'Cerrar imagen'}).tap();
   if (process.env.UI_SCREENSHOT_PATH) await page.screenshot({path: `${process.env.UI_SCREENSHOT_PATH}-chat.png`});
   const composerFont = await page.locator('#message').evaluate(element => parseFloat(getComputedStyle(element).fontSize));
   assert(composerFont >= 16, `Composer text too small for iOS focus: ${composerFont}px`);
@@ -150,7 +160,7 @@ try {
   assert(shortScreen.composer.bottom <= shortScreen.height + 1, `Composer is clipped: ${JSON.stringify(shortScreen)}`);
   assert.deepEqual(errors, []);
   await context.close();
-  console.log('PASS mobile PWA: manifest/icons, iPhone touch navigation, accounts, agent, input sizing and overflow');
+  console.log('PASS mobile PWA: manifest/icons, iPhone touch navigation, accounts, historical image viewer, agent, input sizing and overflow');
 } finally {
   await browser.close();
   server.close();

@@ -85,7 +85,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Emoji / GIF / stickers | In validation | Full local emoji catalog with Spanish/English search, categories, skin variants and per-account recents now passes synthetic QA. GIF discovery, sticker creation and packs remain |
 | Location and live location | Partial | Received locations render; the authenticated WhatsApp Web attachment menu inspected on 28 Sep 2026 has no location-send action |
 | Link and map previews | Existing | Reference QA and failure states |
-| Image viewer navigation | In validation | Previous/next buttons and keyboard arrows traverse images in the loaded chat window; download link and label update with selection; Escape restores opener focus. Older unloaded images still require history/gallery paging |
+| Image viewer navigation | In validation | Previous/next buttons and keyboard arrows page through the selected chat's stored images, including older images outside the loaded timeline. The media cursor orders equal timestamps and multiple attachments without skipping rows; synthetic browser/API coverage passes. Historical media absent from storage is still unavailable |
 | New chats / contact creation | Verified | Directory deployed 8ad9dd9; both accounts pass read-only authenticated browser QA; extended drawer scenarios remain in development |
 | Group subject and description editing | Verified | Admin controls/errors tested with provider fixtures; no live mutation |
 | Group member administration | Existing | Invite links, group photo, leave and full settings |
