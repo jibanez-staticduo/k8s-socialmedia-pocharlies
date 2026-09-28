@@ -93,7 +93,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Emoji substitution / upload quality / automatic downloads | Partial | Standard/HD image processing and four account-scoped download switches deployed 1f46b8f with bounded cancellation/cache tests. Baileys has no native HD badge, video remains source quality, and real-provider HD acceptance is unverified |
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
-| Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Exclusion editor, About/status audience and blocked list remain |
+| Privacy and disappearing messages | Partial | Online/group-add fields deployed 8ad9dd9; preserves existing exclusions. Blocked-list viewing and confirmed unblock pass synthetic account-scoped QA; production read and deployment remain. Exclusion editor and About/status audience remain |
 | Notifications | Partial | Account-scoped message/group/sound/preview preferences deployed 8ad9dd9; reaction/status notifications and closed-tab push remain |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
 | Presence | Partial | Composing/recording labels in validation; live event delivery remains |
@@ -498,6 +498,19 @@ above remain open; this does not establish full WhatsApp parity.
 
 ## Follow-up: chat controls, saved names, and mobile install
 
+Blocked-contact follow-up (integration candidate): Privacy now opens an
+account-scoped provider blocklist, including addresses without a local chat.
+Unblock is a separate confirmed action; the browser asks first, the app checks
+the live list again, and the connector confirms the provider state before the
+UI removes the row. App, connector and browser fixtures cover wrong-account
+responses, disconnected providers, invalid JIDs, a stale account switch,
+retry after failure and mobile width. Search and incremental rendering keep large
+lists usable. A canceled confirmation returns to the list; failed writes report
+an uncertain provider state. Legacy phone JIDs and device suffixes share one
+normalization rule, and dual LID/phone entries require both to be cleared before
+success. No real contact was unblocked in QA.
+The production read and deployment are still pending.
+
 Commit 9b3056c adds a contextual menu to each chat row for supported
 archive, mute, pin, unread, favorite, and list actions. Blocking a direct
 contact has a provider-confirmed, account-scoped backend; no real contact was
@@ -523,7 +536,7 @@ previously paired account may need a targeted backfill because the original
 contact snapshot was discarded. The composer uses Enter to send and
 Shift+Enter for a newline by default, with the existing alternate Enter
 preference preserved. Mobile layout uses a full-width chat/list, safe-area
-spacing and 16px inputs while keeping accessible pinch zoom. PNG icons,
+spacing and 16px inputs. PNG icons,
 standalone manifest and Apple metadata enable Home Screen installation; an
 iPhone device install still requires real-world verification.
 
@@ -532,8 +545,8 @@ that makes the page feel broken rather than like a mobile app. The existing
 Playwright iPhone emulation verifies layout only at its normal scale; it does
 not reproduce Safari's real pinch zoom or a Home Screen launch. WebKit ignores
 `user-scalable` and scale limits in Safari, so the viewport meta tag alone is
-not a fix. The chat surface now cancels Safari gesture and two-finger touch
-events while preserving ordinary one-finger scrolling; the separate image
+not a fix. The app and its dialogs now cancel Safari gesture and two-finger
+touch events while preserving ordinary one-finger scrolling; the separate image
 viewer remains zoomable. Treat real-device zoom stability and installation/login
 in standalone mode as open until checked on an actual iPhone. Keep Enter to send and Shift+Enter for
 a newline in the mobile composer as explicit acceptance criteria.

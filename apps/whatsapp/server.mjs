@@ -901,6 +901,111 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     return privacy;
   }
   // ---------------------------------------------------------------------------
+  // Blocked contacts of one account (read the list, unblock one address).
+  //
+  // The list comes from the provider blocklist itself, so it also covers an
+  // address that never had a conversation here. An entry is a provider address,
+  // not a local chat id: Baileys only accepts a user JID in `updateBlockStatus`,
+  // so groups, newsletters and broadcasts are refused before anything leaves.
+  // ---------------------------------------------------------------------------
+  function blockedContactJid(value, name = 'jid') {
+    const raw = required(value, name, 256).trim();
+    const userJid = raw.replace(/^(\d+):\d+@/, '$1@');
+    if (/@(?:g\.us|newsletter|broadcast)$/.test(userJid)) throw fail(400, 'Blocked contacts are direct chats only');
+    if (!/^\d+@(?:c\.us|s\.whatsapp\.net|lid)$/.test(userJid)) throw fail(400, `Invalid ${name}`);
+    return userJid.replace(/@c\.us$/, '@s.whatsapp.net');
+  }
+
+  async function providerBlocklist(account) {
+    const path = '/contacts/blocklist';
+    let result;
+    try {
+      result = await featureConnector(account, path, { method: 'GET' });
+    } catch (error) {
+      // A socket that is down has no answer, which is not the same as an empty
+      // list: reporting none would claim nobody is blocked.
+      if (error?.upstreamStatus === 503) {
+        throw featureError(503, 'SESSION_DOWN', 'This WhatsApp account is not connected, so its blocked list is unavailable', { path });
+      }
+      throw error;
+    }
+    const answeredAccount = cleanProviderValue(result?.account, 128);
+    // A blocklist has no chat ID to cross-check, so its account attribution is mandatory.
+    if (answeredAccount !== account.accountId) {
+      throw featureError(502, 'ACCOUNT_MISMATCH', `WhatsApp connector answered for ${answeredAccount || 'no account'} instead of ${account.accountId}`, { path });
+    }
+    if (result?.confirmed !== true || !Array.isArray(result?.blocked)) {
+      throw featureError(502, 'UPSTREAM_INVALID', 'WhatsApp connector returned an unconfirmed blocked-contact list', { path });
+    }
+    const jids = [];
+    for (const entry of result.blocked) {
+      try { jids.push(blockedContactJid(entry, 'blocked contact')); }
+      catch { /* An address this account cannot block is not shown as blocked. */ }
+    }
+    return [...new Set(jids)].sort();
+  }
+
+  /*
+   * Display names for blocked addresses, taken from this account's own stored
+   * rows and never from the provider. A name is attached only when a stored row
+   * clearly means that exact address, so a LID and a phone number cannot borrow
+   * each other's title; where nothing is known the browser resolves the title
+   * from the chat list it already has. An absent directory table costs a name,
+   * not the list.
+   *
+   * A blocked address arrives normalized to `@s.whatsapp.net`, but stored rows
+   * keep the spelling the provider used at the time, including the legacy
+   * `@c.us`. Those two spellings are one phone number, so both are looked up;
+   * without the alias a contact saved years ago would show no name at all. A
+   * `@lid` has no such alias and stays on its own address.
+   */
+  async function blockedContactNames(account, jids) {
+    const names = new Map();
+    if (!jids.length) return names;
+    const prefix = `${account.accountId}:`;
+    const asLegacyPhone = jid => jid.replace(/@s\.whatsapp\.net$/, '@c.us');
+    const storedIds = [...new Set(jids.flatMap(jid => [
+      jid, asLegacyPhone(jid), `${prefix}${jid}`, `${prefix}${asLegacyPhone(jid)}`,
+    ]))];
+    // The same two spellings, resolved back to the normalized form the caller asked about.
+    const storedAddress = value => {
+      if (typeof value !== 'string' || !value) return null;
+      const bare = value.startsWith(prefix) ? value.slice(prefix.length) : value;
+      return bare.replace(/@c\.us$/, '@s.whatsapp.net');
+    };
+    const sources = [
+      {
+        sql: 'SELECT jid, name, push_name AS "pushName", NULL::text AS "waChatId" FROM whatsapp_contacts WHERE account=$1 AND jid = ANY($2::text[])',
+        args: [account.accountId, storedIds],
+      },
+      {
+        sql: 'SELECT id AS jid, name, NULL::text AS "pushName", wa_chat_id AS "waChatId" FROM conversations WHERE account=$1 AND COALESCE(is_group, false)=false AND (id = ANY($2::text[]) OR wa_chat_id = ANY($3::text[]))',
+        args: [account.accountId, storedIds, storedIds],
+      },
+      {
+        sql: 'SELECT id AS jid, name, push_name AS "pushName", NULL::text AS "waChatId" FROM participants WHERE account=$1 AND id = ANY($2::text[])',
+        args: [account.accountId, storedIds],
+      },
+    ];
+    const storedName = (value, id) => {
+      const name = cleanProviderValue(value, 200);
+      return name && !isJidPlaceholder(name, id) ? name : null;
+    };
+    for (const source of sources) {
+      let rows;
+      try { rows = await query(source.sql, source.args); } catch { continue; }
+      for (const row of rows) {
+        const known = [storedAddress(row.jid), storedAddress(row.waChatId)].filter(Boolean);
+        const jid = jids.find(target => known.includes(target));
+        if (!jid || names.has(jid)) continue;
+        const name = storedName(row.name, row.jid) || storedName(row.pushName, row.jid);
+        if (name) names.set(jid, name);
+      }
+    }
+    return names;
+  }
+
+  // ---------------------------------------------------------------------------
   // Own-account profile (display name, about, profile photo).
   //
   // Reads are provider lookups only; every write goes through the same sending
@@ -1548,6 +1653,46 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const result = await featureConnector(a, `/chats/${encodeURIComponent(providerChat)}/block`, { method: 'GET' });
         if (typeof result.blocked !== 'boolean' || result.confirmed !== true) throw fail(502, 'Contact block state was not confirmed');
         return json(200, { account: a.accountId, chat, blocked: result.blocked, confirmed: true, source: 'provider' });
+      }
+      if (req.method === 'GET' && path === '/api/blocked-contacts') {
+        const a = accountParam(url.searchParams.get('account'));
+        const blocked = await providerBlocklist(a);
+        const names = await blockedContactNames(a, blocked);
+        return json(200, {
+          account: a.accountId,
+          contacts: blocked.map(jid => ({ jid, ...(names.has(jid) ? { name: names.get(jid) } : {}) })),
+          count: blocked.length,
+          confirmed: true,
+          source: 'provider',
+        });
+      }
+      if (req.method === 'POST' && path === '/api/blocked-contacts') {
+        const body = await bodyJSON(req);
+        const a = accountParam(body.account);
+        if (body.action !== 'unblock') throw fail(400, 'action must be unblock');
+        const jid = blockedContactJid(body.jid);
+        // Unblocking changes the live account, so it passes the same gate as a send.
+        if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+        // The browser sends an address it just read in the list, and the provider is
+        // asked again before writing: an address that is not blocked there is never
+        // sent to `updateBlockStatus`, so a mistyped JID cannot unblock a stranger.
+        if (!(await providerBlocklist(a)).includes(jid)) throw fail(409, 'This contact is not blocked for this account');
+        let result;
+        try {
+          result = await featureConnector(a, `/chats/${encodeURIComponent(jid)}/block`, {
+            method: 'POST', body: { blocked: false }, requireSending: true, timeout: FEATURE_SEND_TIMEOUT_MS,
+          });
+        } catch (error) {
+          if (error?.upstreamStatus && error.upstreamStatus >= 400) {
+            throw featureError(502, 'UNBLOCK_UNCONFIRMED', 'No se pudo confirmar si WhatsApp desbloqueó el contacto. Actualiza la lista antes de reintentar.', { path: '/contacts/blocklist' });
+          }
+          throw error;
+        }
+        if (result.blocked !== false || result.confirmed !== true) throw fail(502, 'Contact block state was not confirmed');
+        return json(200, {
+          account: a.accountId, jid, action: 'unblock', blocked: false,
+          changed: result.changed === true, confirmed: true, source: 'provider',
+        });
       }
       if (req.method === 'POST' && (path === '/api/chat-actions' || path === '/api/chats/action' || path === '/api/chat-action' || path === '/api/chat/read' || /^\/api\/chats\/[^/]+\/action$/.test(path) || /^\/api\/chats\/[^/]+\/(?:read|unread|archive|unarchive|pin|unpin|mute|unmute)$/.test(path) || /^\/api\/chats\/(?:read|unread|archive|unarchive|pin|unpin|mute|unmute)$/.test(path))) {
         const body = await bodyJSON(req);

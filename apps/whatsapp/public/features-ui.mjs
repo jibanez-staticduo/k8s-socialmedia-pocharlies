@@ -17,6 +17,7 @@ import { createEmojiPicker } from './emoji-picker.mjs';
 export const FEATURE_CONTRACT = Object.freeze({
   chatInfo: { method: 'GET', path: '/api/chat-details', response: 'name, contact|group, participants, presence, avatarUrl' },
   contactBlock: { method: 'GET', path: '/api/contact-block', response: 'blocked, confirmed, source=provider' },
+  blockedContacts: { method: 'GET/POST', path: '/api/blocked-contacts', response: 'contacts[]; POST action=unblock, jid' },
   chatMedia: { method: 'GET', path: '/api/chats/media', response: 'items[] with kind, url, name, timestamp, nextCursor' },
   search: { method: 'GET', path: '/api/search', response: 'results[] with chatId, chatName, messageId, text, timestamp' },
   messageAround: { method: 'GET', path: '/api/messages/around', response: 'messages[] with targetMessageId' },
@@ -1707,8 +1708,100 @@ export function installFeatureUI({
     modal.body.append(form, node('p', 'feature-muted', 'La entrega queda confirmada por el proveedor; no se muestra como enviada antes de esa respuesta.'));
   }
 
-  async function openPrivacy() {
-    const modal = openModal('Privacidad', { wide: true });
+  async function openBlockedContacts() {
+    const settingsTrigger = documentRef.querySelector('.rail-settings summary');
+    const modal = openModal('Contactos bloqueados', { wide: true, opener: settingsTrigger });
+    const scope = { account: runtime.account, generation: runtime.generation };
+    const isCurrent = () => runtime.account === scope.account && runtime.generation === scope.generation
+      && runtime.modal?.overlay === modal.overlay && modal.overlay.isConnected;
+    const back = button(documentRef, 'Volver a privacidad', 'feature-button subtle');
+    back.onclick = () => openPrivacy(settingsTrigger);
+    const notice = node('p', 'feature-muted', 'Cargando contactos bloqueados…');
+    const retry = button(documentRef, 'Reintentar', 'feature-button subtle');
+    retry.hidden = true;
+    retry.onclick = openBlockedContacts;
+    const search = node('input', 'feature-input');
+    search.type = 'search';
+    search.placeholder = 'Buscar contacto bloqueado';
+    search.setAttribute('aria-label', 'Buscar contacto bloqueado');
+    search.hidden = true;
+    const list = node('div', 'feature-blocked-list');
+    const showMore = button(documentRef, 'Mostrar más', 'feature-button subtle');
+    showMore.hidden = true;
+    modal.body.append(back, notice, retry, search, list, showMore);
+    try {
+      const result = await request('/api/blocked-contacts', undefined, { account: scope.account, chat: '' });
+      if (!isCurrent()) return;
+      if (result.account !== scope.account || result.confirmed !== true || !Array.isArray(result.contacts)) throw new Error('Lista no confirmada por WhatsApp.');
+      notice.textContent = result.contacts.length ? `${result.contacts.length} contacto${result.contacts.length === 1 ? '' : 's'} bloqueado${result.contacts.length === 1 ? '' : 's'}.` : 'No hay contactos bloqueados.';
+      search.hidden = result.contacts.length === 0;
+      let visibleCount = 100;
+      const render = () => {
+        list.replaceChildren();
+        const needle = search.value.trim().toLocaleLowerCase();
+        const matches = result.contacts.filter(contact => `${text(contact?.name)} ${text(contact?.jid)}`.toLocaleLowerCase().includes(needle));
+        showMore.hidden = matches.length <= visibleCount;
+        for (const contact of matches.slice(0, visibleCount)) {
+        const jid = text(contact?.jid).trim();
+        if (!jid) continue;
+        const name = text(contact?.name).trim() || jid.split('@')[0];
+        const row = node('div', 'feature-blocked-row');
+        const identity = node('div', 'feature-blocked-identity');
+        identity.append(node('strong', '', name));
+        if (name !== jid) identity.append(node('small', '', jid));
+        const unblock = button(documentRef, 'Desbloquear', 'feature-button subtle');
+        unblock.setAttribute('aria-label', `Desbloquear a ${name}`);
+        unblock.onclick = () => {
+          if (!isCurrent()) return;
+          const confirm = openModal('Desbloquear contacto', { opener: settingsTrigger });
+          let completed = false;
+          runtime.modal.onClose = () => queueMicrotask(() => {
+            if (!completed && runtime.account === scope.account && runtime.generation === scope.generation && !runtime.modal) void openBlockedContacts();
+          });
+          confirm.body.append(node('p', 'feature-description', `¿Desbloquear a ${name}? Podrá volver a enviarte mensajes.`));
+          const error = node('p', 'feature-muted');
+          error.hidden = true;
+          const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
+          cancel.onclick = closeModal;
+          const action = button(documentRef, 'Desbloquear', 'feature-button primary');
+          action.onclick = async () => {
+            if (runtime.account !== scope.account || runtime.generation !== scope.generation || runtime.modal?.overlay !== confirm.overlay || action.disabled) return;
+            action.disabled = true;
+            try {
+              const updated = await request('/api/blocked-contacts', { jid, action: 'unblock' }, {}, { includeChat: false });
+              if (runtime.account !== scope.account || runtime.generation !== scope.generation || runtime.modal?.overlay !== confirm.overlay) return;
+              if (updated.account !== scope.account || updated.confirmed !== true || updated.blocked !== false) throw new Error('WhatsApp no confirmó el desbloqueo.');
+              completed = true;
+              toast('Contacto desbloqueado.', 'success');
+              void openBlockedContacts();
+            } catch (cause) {
+              if (runtime.modal?.overlay !== confirm.overlay) return;
+              error.textContent = cause?.message || 'No se pudo desbloquear el contacto.';
+              error.hidden = false;
+              action.disabled = false;
+            }
+          };
+          const actions = node('div', 'feature-dialog-actions');
+          actions.append(cancel, action);
+          confirm.body.append(error, actions);
+        };
+        row.append(identity, unblock);
+        list.append(row);
+        }
+      };
+      search.oninput = () => { visibleCount = 100; render(); };
+      showMore.onclick = () => { visibleCount += 100; render(); };
+      render();
+    } catch (cause) {
+      if (isCurrent()) {
+        notice.textContent = cause?.message || 'No se pudieron cargar los contactos bloqueados.';
+        retry.hidden = false;
+      }
+    }
+  }
+
+  async function openPrivacy(opener = documentRef.activeElement) {
+    const modal = openModal('Privacidad', { wide: true, opener: opener?.nodeType === 1 ? opener : documentRef.activeElement });
     const scope = { account: runtime.account, generation: runtime.generation };
     const isCurrent = () => runtime.account === scope.account && runtime.generation === scope.generation && runtime.modal?.overlay === modal.overlay && modal.overlay.isConnected;
     const form = node('form', 'feature-form');
@@ -1758,7 +1851,9 @@ export function installFeatureUI({
       }
     };
     const notice = node('p', 'feature-muted', 'Cargando preferencias…');
-    modal.body.append(notice, form);
+    const blockedContacts = button(documentRef, 'Contactos bloqueados', 'feature-button subtle');
+    blockedContacts.onclick = openBlockedContacts;
+    modal.body.append(notice, form, blockedContacts);
     try {
       const result = await request('/api/privacy', undefined, { chat: '' });
       if (!isCurrent()) return;

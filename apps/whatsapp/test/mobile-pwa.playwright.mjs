@@ -82,6 +82,11 @@ try {
   let state = await geometry('chat list');
   assert.equal(await page.locator('.app-shell').evaluate(element => getComputedStyle(element).touchAction), 'pan-x pan-y');
   const gestureBlocked = await page.locator('.app-shell').evaluate(element => {
+    const modal = document.createElement('div');
+    modal.className = 'feature-modal';
+    const viewer = document.createElement('div');
+    viewer.className = 'media-viewer';
+    document.body.append(modal, viewer);
     const gesture = new Event('gesturestart', {bubbles: true, cancelable: true});
     element.dispatchEvent(gesture);
     const touch = new Event('touchmove', {bubbles: true, cancelable: true});
@@ -90,9 +95,15 @@ try {
     const singleTouch = new Event('touchmove', {bubbles: true, cancelable: true});
     Object.defineProperty(singleTouch, 'touches', {value: [{}]});
     element.dispatchEvent(singleTouch);
-    return {gesture: gesture.defaultPrevented, touch: touch.defaultPrevented, singleTouch: singleTouch.defaultPrevented};
+    const dialogGesture = new Event('gesturestart', {bubbles: true, cancelable: true});
+    modal.dispatchEvent(dialogGesture);
+    const viewerGesture = new Event('gesturestart', {bubbles: true, cancelable: true});
+    viewer.dispatchEvent(viewerGesture);
+    modal.remove();
+    viewer.remove();
+    return {gesture: gesture.defaultPrevented, touch: touch.defaultPrevented, singleTouch: singleTouch.defaultPrevented, dialogGesture: dialogGesture.defaultPrevented, viewerGesture: viewerGesture.defaultPrevented};
   });
-  assert.deepEqual(gestureBlocked, {gesture: true, touch: true, singleTouch: false});
+  assert.deepEqual(gestureBlocked, {gesture: true, touch: true, singleTouch: false, dialogGesture: true, viewerGesture: false});
   assert(state.rail.y > 400 && state.sidebar.width >= state.width - 1, `Expected full-width list and bottom account navigation: ${JSON.stringify(state)}`);
   assert(state.rail.y + state.rail.height <= state.height + 1, `Bottom navigation is clipped: ${JSON.stringify(state)}`);
   assert.equal(await page.locator('#account-rail button').count(), 2);

@@ -21,6 +21,12 @@ const snapshots = {
   beta: { profile: 'contacts', lastSeen: 'all', readReceipts: false, online: 'match_last_seen', groupsAdd: 'all' },
 };
 const writes = [];
+const blocked = { alpha: [{ jid: '111@s.whatsapp.net', name: 'Ana' }], beta: [{ jid: '222@s.whatsapp.net', name: 'Bea' }] };
+const unblockWrites = [];
+let holdNextBlockedGet = false;
+let heldBlockedGet = null;
+let failNextBlockedGet = false;
+let failNextBlockedPost = false;
 let held = null;
 let holdNextGet = false;
 let holdWrites = false;
@@ -39,7 +45,27 @@ const server = createServer((request, response) => {
   if (url.pathname === '/api/accounts') return reply(response, 200, { accounts: [{ id: 'alpha', label: 'Alpha' }, { id: 'beta', label: 'Beta' }], sendingEnabled: true, outboxScope: 'session' });
   if (url.pathname === '/api/chats') return reply(response, 200, { chats: [{ id: '123@s.whatsapp.net', name: 'Ana Fixture', preview: 'Hola', unread: 0, isGroup: false }] });
   if (url.pathname === '/api/messages') return reply(response, 200, { messages: [] });
+  if (url.pathname === '/api/lists') return reply(response, 200, { lists: {} });
   if (url.pathname === '/api/presence' || url.pathname === '/api/presence/subscribe') return reply(response, 200, {});
+  if (url.pathname === '/api/blocked-contacts' && request.method === 'GET') {
+    if (failNextBlockedGet) { failNextBlockedGet = false; return reply(response, 503, {error: 'Proveedor desconectado'}); }
+    const send = () => reply(response, 200, { account, contacts: blocked[account] || [], confirmed: true, source: 'provider' });
+    if (holdNextBlockedGet) { holdNextBlockedGet = false; heldBlockedGet = send; return; }
+    return send();
+  }
+  if (url.pathname === '/api/blocked-contacts' && request.method === 'POST') {
+    if (failNextBlockedPost) { failNextBlockedPost = false; return reply(response, 409, {error: 'No se pudo confirmar el desbloqueo. Actualiza la lista antes de reintentar.'}); }
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      const parsed = JSON.parse(body || '{}');
+      unblockWrites.push(parsed);
+      if (parsed.action !== 'unblock' || !blocked[parsed.account]?.some(item => item.jid === parsed.jid)) return reply(response, 400, {error: 'Invalid contact'});
+      blocked[parsed.account] = blocked[parsed.account].filter(item => item.jid !== parsed.jid);
+      reply(response, 200, {account: parsed.account, jid: parsed.jid, blocked: false, confirmed: true});
+    });
+    return;
+  }
   if (url.pathname === '/api/privacy' && request.method === 'GET') {
     const send = () => reply(response, 200, { account, chat: null, privacy: snapshots[account] || snapshots.alpha });
     if (holdNextGet) { holdNextGet = false; held = send; return; }
@@ -218,6 +244,68 @@ await openPrivacy();
 assert.equal(await page.inputValue('.feature-dialog select[name="profile"]'), 'contacts',
   'la siguiente apertura vuelve a leer los valores reales');
 await page.keyboard.press('Escape');
+
+await openPrivacy();
+await page.getByRole('button', { name: 'Contactos bloqueados' }).click();
+await page.getByRole('button', { name: 'Desbloquear a Bea' }).waitFor();
+if (process.env.UI_SCREENSHOT_PATH) { await page.waitForTimeout(250); await page.screenshot({path: process.env.UI_SCREENSHOT_PATH}); }
+assert.equal(await page.locator('.feature-blocked-row').count(), 1, 'la cuenta beta solo muestra sus bloqueados');
+assert.equal(await page.getByText('111@s.whatsapp.net').count(), 0, 'la lista no filtra contactos de otra cuenta');
+await page.getByRole('button', { name: 'Desbloquear a Bea' }).click();
+assert.equal(unblockWrites.length, 0, 'abrir la confirmacion no modifica contactos');
+await page.getByRole('dialog', { name: 'Desbloquear contacto' }).getByRole('button', { name: 'Cancelar' }).click();
+await page.getByRole('button', { name: 'Desbloquear a Bea' }).waitFor();
+assert.equal(unblockWrites.length, 0, 'cancelar conserva el bloqueo');
+await page.getByRole('button', { name: 'Desbloquear a Bea' }).click();
+failNextBlockedPost = true;
+await page.getByRole('dialog', { name: 'Desbloquear contacto' }).getByRole('button', { name: 'Desbloquear', exact: true }).click();
+await page.getByText('No se pudo confirmar el desbloqueo. Actualiza la lista antes de reintentar.').waitFor();
+assert.equal(await page.getByRole('dialog', { name: 'Desbloquear contacto' }).count(), 1, 'el error permite reintentar en el mismo dialogo');
+await page.getByRole('dialog', { name: 'Desbloquear contacto' }).getByRole('button', { name: 'Desbloquear', exact: true }).click();
+await page.getByText('No hay contactos bloqueados.').waitFor();
+assert.deepEqual(unblockWrites, [{account: 'beta', jid: '222@s.whatsapp.net', action: 'unblock'}]);
+check('bloqueados por cuenta: confirma antes de desbloquear y recarga el estado proveedor');
+await page.setViewportSize({width: 390, height: 844});
+assert.equal(await page.locator('.feature-dialog').evaluate(element => element.getBoundingClientRect().right <= innerWidth + 1), true);
+await page.keyboard.press('Escape');
+await page.setViewportSize({width: 1280, height: 800});
+await openPrivacy();
+holdNextBlockedGet = true;
+await page.getByRole('button', { name: 'Contactos bloqueados' }).click();
+await page.getByText('Cargando contactos bloqueados…').waitFor();
+await page.evaluate(() => document.querySelector('#account-rail button[data-account-id="alpha"]')?.click());
+heldBlockedGet?.();
+await page.waitForTimeout(150);
+assert.equal(await modals(), 0, 'el cambio de cuenta cierra la lista antes de pintar la respuesta vieja');
+await openPrivacy();
+await page.getByRole('button', { name: 'Contactos bloqueados' }).click();
+await page.getByRole('button', { name: 'Desbloquear a Ana' }).waitFor();
+assert.equal(await page.getByText('222@s.whatsapp.net').count(), 0);
+await page.getByRole('button', { name: 'Volver a privacidad' }).click();
+await page.locator('.feature-dialog select[name="profile"]').waitFor();
+await page.keyboard.press('Escape');
+assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.rail-settings summary')), true,
+  'al volver desde bloqueados, Escape restituye el foco a Ajustes');
+check('una respuesta tardia de bloqueados no contamina otra cuenta');
+await openPrivacy();
+failNextBlockedGet = true;
+await page.getByRole('button', { name: 'Contactos bloqueados' }).click();
+await page.getByRole('button', { name: 'Reintentar' }).waitFor();
+assert.match(await page.locator('.feature-dialog .feature-muted').textContent(), /Proveedor desconectado/);
+await page.getByRole('button', { name: 'Reintentar' }).click();
+await page.getByRole('button', { name: 'Desbloquear a Ana' }).waitFor();
+await page.keyboard.press('Escape');
+check('un fallo de proveedor ofrece reintento sin alterar el estado de bloqueo');
+
+blocked.alpha = Array.from({length: 150}, (_, index) => ({jid: `${100000000 + index}@s.whatsapp.net`}));
+await openPrivacy();
+await page.getByRole('button', {name: 'Contactos bloqueados'}).click();
+await page.getByRole('button', {name: 'Mostrar más'}).waitFor();
+assert.equal(await page.locator('.feature-blocked-row').count(), 100, 'la lista grande pinta solo el primer tramo');
+await page.getByRole('searchbox', {name: 'Buscar contacto bloqueado'}).fill('100000149');
+assert.equal(await page.locator('.feature-blocked-row').count(), 1, 'se puede buscar una direccion fuera del primer tramo');
+await page.keyboard.press('Escape');
+check('la lista grande se pinta por tramos y permite buscar en todas las direcciones');
 
 assert.deepEqual(unexpected, [], `rutas de API no previstas: ${unexpected.join(', ')}`);
 check('todas las llamadas de API estan previstas en el fixture');

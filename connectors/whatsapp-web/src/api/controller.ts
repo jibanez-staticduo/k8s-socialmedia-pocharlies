@@ -1872,6 +1872,29 @@ export function createRouter(
     })();
   });
 
+  /*
+   * The whole blocklist of the connected account. One provider read, no contact
+   * lookup and no chat write, so it also covers blocked addresses that never
+   * had a conversation here. `account` names the socket that answered, which is
+   * what lets a multi-account caller refuse another account's list.
+   */
+  router.get('/contacts/blocklist', auth, (_req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const blocked = await client.listBlockedContacts();
+        res.json({
+          ok: true,
+          account: connectorAccount(),
+          blocked,
+          count: blocked.length,
+          confirmed: true,
+        });
+      } catch (error) {
+        capabilityErrorResponse(res, error);
+      }
+    })();
+  });
+
   router.post('/chats/:chatId/block', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {

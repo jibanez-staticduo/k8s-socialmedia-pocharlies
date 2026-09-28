@@ -1,5 +1,6 @@
 import { parseMediaQuality, prepareImageQuality, type MediaQuality } from './media-quality';
 import { ContactBlockError, readContactBlocked, setContactBlocked } from './contact-block';
+import { readBlockedContacts } from './blocked-contacts';
 import { chatPinState } from './chat-pin-state';
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
@@ -3504,6 +3505,18 @@ export class BaileysClient extends EventEmitter {
       throw new ContactBlockError('WhatsApp is not connected', 503);
     }
     return readContactBlocked(this.sock, chatId);
+  }
+
+  /**
+   * Blocked contacts of this account, read live from the provider. One blocklist
+   * IQ: no contact lookup, no conversation read, and no write of any kind, so it
+   * is safe to call for an account whose chats are not indexed locally.
+   */
+  async listBlockedContacts(): Promise<string[]> {
+    if (!this.sock || !this.isConnected()) {
+      throw new ContactBlockError('WhatsApp is not connected', 503);
+    }
+    return readBlockedContacts(this.sock);
   }
 
   async modifyChat(
