@@ -20,14 +20,24 @@ import {
 } from '../application/unread-digest.service';
 import { DraftService } from '../application/draft.service';
 import { DatabaseRepository } from '../infrastructure/database/repository';
-import { generateHMACSignature } from '@mcp-socialmedia/shared';
+import { actorRequestHeaders, generateHMACSignature } from '@mcp-socialmedia/shared';
 import {
-  ACCOUNTS,
+  accountList,
   accountKey,
   normalizeAccount,
   stripAccount,
   type Account,
 } from '../domain/account';
+import { identityBindingEnabled, resolveBoundAccount } from '../domain/identity-bindings';
+import {
+  findAccount,
+  getAccounts,
+  socialAccountId,
+  type AccountChannel,
+  type SocialAccount,
+} from '../domain/account-registry';
+import { ConversationResolver } from '../infrastructure/database/social-accounts';
+import { getRequestActor } from '@mcp-socialmedia/shared';
 import { createHash, createHmac } from 'crypto';
 import { t } from '../infrastructure/i18n/i18n';
 import pino from 'pino';
@@ -226,7 +236,7 @@ export function isLidJid(chatId: unknown): boolean {
 
 /**
  * True when the chatId points at a WhatsApp group (`@g.us`), regardless of any
- * `personal:` / `professional:` account prefix. Canonical reads
+ * `personal:` / `professional:` / `leila:` account prefix. Canonical reads
  * (`social_get_conversation`, `social_resolve_target`, ...) return
  * account-prefixed ids; those must be reduced to the
  * bare jid before they reach the connector, which calls `sock.groupMetadata()`
@@ -241,56 +251,6 @@ export function isGroupJid(chatId: unknown): boolean {
 /** Reduce an account-prefixed WhatsApp id to the bare jid the connector expects. */
 export function bareWhatsAppJid(chatId: string): string {
   return stripAccount(String(chatId).trim()).id;
-}
-
-/**
- * Resolve a professional WhatsApp direct-send chatId into the conversation key
- * to gate on and the jid to actually send to.
- *
- * - LID jids keep their opaque id verbatim: lookupKey = `professional:<lid>`,
- *   sendJid = `<lid>` (Baileys sends to LID natively).
- * - Bare phones / `@c.us` / `@s.whatsapp.net` normalize to a phone jid:
- *   sendJid = `<digits>@s.whatsapp.net`, lookupKey = `professional:<jid>`.
- *
- * Returns null when the id is neither a LID jid nor a normalizable phone jid,
- * so the caller can raise the "valid individual phone or WhatsApp chat ID" error.
- */
-export function resolveProfessionalSendTarget(
-  chatId: unknown,
-  evidence: { phone?: unknown; phoneE164?: unknown; manualOpenUrl?: unknown } = {}
-): {
-  lookupKey: string;
-  lookupKeys: string[];
-  sendJid: string;
-  sourceLidJid?: string;
-  phoneE164?: string;
-  phoneWaJid?: string;
-  manualOpenUrl?: string;
-  phoneEvidenceSource?: TrustedPhoneEvidenceSource;
-} | null {
-  if (isLidJid(chatId)) {
-    const lidJid = stripAccount(String(chatId).trim()).id;
-    const lidLookupKey = accountKey('professional', lidJid);
-    const phone = trustedPhoneEvidence(evidence);
-    if (!phone) {
-      return { lookupKey: lidLookupKey, lookupKeys: [lidLookupKey], sendJid: lidJid };
-    }
-    const phoneLookupKey = accountKey('professional', phone.sendJid);
-    return {
-      lookupKey: lidLookupKey,
-      lookupKeys: [lidLookupKey, phoneLookupKey],
-      sendJid: phone.sendJid,
-      sourceLidJid: lidJid,
-      phoneE164: phone.phoneE164,
-      phoneWaJid: phone.phoneWaJid,
-      manualOpenUrl: phone.manualOpenUrl,
-      phoneEvidenceSource: phone.source,
-    };
-  }
-  const waJid = normalizeDirectWhatsAppJid(chatId);
-  if (!waJid) return null;
-  const lookupKey = accountKey('professional', waJid);
-  return { lookupKey, lookupKeys: [lookupKey], sendJid: waJid };
 }
 
 export function normalizeDirectWhatsAppJid(chatId: unknown): string | null {
@@ -319,6 +279,7 @@ export class MCPServer {
   private draftService: DraftService;
   private repository: DatabaseRepository;
   private dbClient: Pool;
+  private conversationResolver?: ConversationResolver;
   private redisClient: Redis;
   private logger: pino.Logger;
   private connectorUrl: string;
@@ -327,10 +288,6 @@ export class MCPServer {
   private telegramBridgeSecret: string;
   private instagramUrl: string;
   private connectorSecret: string;
-  // Per-account connector routing (personal / professional).
-  private waUrls!: Record<string, string>;
-  private tgUrls!: Record<string, string>;
-  private tgBridgeUrls!: Record<string, string>;
   private inputValidators?: Map<string, ValidateFunction>;
 
   constructor(
@@ -390,25 +347,8 @@ export class MCPServer {
     this.instagramUrl = process.env.INSTAGRAM_CONNECTOR_URL || 'http://instagram-connector:3003';
     this.connectorSecret = _connectorSharedSecret;
 
-    // Account routing. Both WhatsApp accounts are separate Baileys (WhatsApp
-    // Web) connector instances, each linked to its own number/session.
-    // Telegram: two separate connector instances too.
-    this.waUrls = {
-      personal: process.env.WHATSAPP_PERSONAL_URL || this.connectorUrl,
-      professional:
-        process.env.WHATSAPP_PROFESSIONAL_URL || 'http://whatsapp-connector-professional:3001',
-    };
-    this.tgUrls = {
-      personal: process.env.TELEGRAM_PERSONAL_URL || this.telegramUrl,
-      professional:
-        process.env.TELEGRAM_PROFESSIONAL_URL || 'http://telegram-connector-professional:3002',
-    };
-    // Telethon bridge (live unread) is per-account, served by each telegram-sync instance.
-    this.tgBridgeUrls = {
-      personal: this.telegramBridgeUrl,
-      professional:
-        process.env.TELEGRAM_BRIDGE_PROFESSIONAL_URL || 'http://telegram-sync-professional:3080',
-    };
+    // Account routing comes from the account registry (account-registry.ts):
+    // one entry per connector instance, re-read on each call.
 
     this.logger = pino({
       transport: {
@@ -420,36 +360,32 @@ export class MCPServer {
     this.setupHandlers();
   }
 
-  /** WhatsApp connector URL for an account (both are Baileys/WhatsApp Web). */
-  private waUrl(account?: string): string {
-    if (account === undefined) return this.waUrls.personal;
-    const url = this.waUrls[account];
-    if (!url) {
+  /** Registry entry for an account, or a canonical unsupported_capability error. */
+  private registryAccount(channel: AccountChannel, account?: string): SocialAccount {
+    const id = account === undefined ? 'personal' : account;
+    const entry = findAccount(channel, id);
+    if (!entry) {
       throw this.canonicalError(
         'unsupported_capability',
-        `WhatsApp account '${account}' is not configured`
+        `${channel === 'whatsapp' ? 'WhatsApp' : channel === 'telegram' ? 'Telegram' : 'Instagram'} account '${id}' is not configured`
       );
     }
-    return url;
+    return entry;
+  }
+
+  /** WhatsApp connector URL for an account (every one is a Baileys instance). */
+  private waUrl(account?: string): string {
+    return this.registryAccount('whatsapp', account).connectorUrl as string;
   }
 
   /** Telegram connector URL for an account (separate instance per account). */
   private tgUrl(account?: string): string {
-    if (account === undefined) return this.tgUrls.personal;
-    const url = this.tgUrls[account];
-    if (!url) {
-      throw this.canonicalError(
-        'unsupported_capability',
-        `Telegram account '${account}' is not configured`
-      );
-    }
-    return url;
+    return this.registryAccount('telegram', account).connectorUrl as string;
   }
 
   /** Telegram-sync (Telethon) bridge URL for an account — used by live unread. */
   private tgBridgeUrl(account?: string): string {
-    if (account === undefined) return this.tgBridgeUrls.personal;
-    const url = this.tgBridgeUrls[account];
+    const url = this.registryAccount('telegram', account).bridgeUrl;
     if (!url) {
       throw this.canonicalError(
         'unsupported_capability',
@@ -481,10 +417,33 @@ export class MCPServer {
     });
   }
 
+  /**
+   * SC-1144 fase 2 — the single identity-binding gate. Every canonical tool
+   * except social_list_accounts carries `accountId` in its inputSchema, so
+   * this is the one point all account-routed calls pass through (WhatsApp,
+   * Telegram and Instagram alike: the binding is per account, not per channel).
+   *
+   * With SOCIAL_IDENTITY_BINDING off this returns immediately without even
+   * touching the bindings file — the legacy path stays byte-identical.
+   */
+  private applyIdentityBinding(definition: SocialToolDefinition, args: Record<string, any>): void {
+    if (!identityBindingEnabled()) return;
+    const properties = asObject((definition.inputSchema as any)?.properties);
+    if (!('accountId' in properties)) return;
+    const requested =
+      typeof args.accountId === 'string' && args.accountId.trim() ? args.accountId : undefined;
+    // Throws IdentityBindingError (canonicalCode 'forbidden') fail-closed when the
+    // caller has no verified sub, no binding, or asked for an unbound account.
+    // Omitted accountId resolves to the FIRST account of the binding — never the
+    // global 'personal' default.
+    args.accountId = resolveBoundAccount(requested, getRequestActor());
+  }
+
   private async executeCanonicalTool(
     definition: SocialToolDefinition,
     args: Record<string, any>
   ): Promise<any> {
+    this.applyIdentityBinding(definition, args);
     this.validateCanonicalArguments(definition, args);
 
     const execute = async () => {
@@ -962,10 +921,13 @@ export class MCPServer {
     const accountIdValue = normalizeAccount(this.account(args));
     const raw = this.string(args, field);
     const parsed = stripAccount(raw);
-    if (raw.startsWith('professional:') && accountIdValue !== 'professional') {
+    // Generalized from the professional-only guard (SC-1144 fase 2): a target
+    // namespaced to one account must never be served under another — bare
+    // (personal) targets stay allowed on every account, as before.
+    if (parsed.account !== 'personal' && accountIdValue !== parsed.account) {
       throw this.canonicalError(
         'invalid_request',
-        `${field} belongs to the professional WhatsApp namespace but accountId is '${accountIdValue}'`
+        `${field} belongs to the ${parsed.account} WhatsApp namespace but accountId is '${accountIdValue}'`
       );
     }
     return parsed.id;
@@ -988,6 +950,8 @@ export class MCPServer {
 
   private async providerGet(baseUrl: string, path: string, timeoutMs = 30000): Promise<any> {
     const response = await fetch(`${baseUrl}${path}`, {
+      // SC-705: forward the verified caller identity to the connector.
+      headers: actorRequestHeaders(),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
@@ -999,88 +963,13 @@ export class MCPServer {
   private async canonicalListAccounts(args: Record<string, any>): Promise<any> {
     const status = this.legacyResultData(await this.handleMessagingStatus());
     const selectedChannel = args.channel === undefined ? undefined : this.channel(args);
-    const accounts = [
-      {
-        channel: 'whatsapp',
-        accountId: 'personal',
-        transport: 'baileys',
-        capabilities: {
-          conversations: true,
-          messages: true,
-          media: true,
-          send: true,
-          templates: false,
-          groups: true,
-        },
-      },
-      {
-        channel: 'whatsapp',
-        accountId: 'professional',
-        transport: 'baileys',
-        capabilities: {
-          conversations: true,
-          messages: true,
-          media: true,
-          send: true,
-          templates: false,
-          groups: true,
-        },
-      },
-      {
-        channel: 'telegram',
-        accountId: 'personal',
-        transport: 'mtcute',
-        capabilities: {
-          conversations: true,
-          messages: true,
-          media: true,
-          send: true,
-          forums: true,
-          interactions: true,
-        },
-      },
-      {
-        channel: 'telegram',
-        accountId: 'professional',
-        transport: 'mtcute',
-        capabilities: {
-          conversations: true,
-          messages: true,
-          media: true,
-          send: true,
-          forums: true,
-          interactions: true,
-        },
-      },
-      {
-        channel: 'instagram',
-        accountId: 'skirmshop',
-        transport: 'instagram-graph-api',
-        capabilities: {
-          conversations: true,
-          messages: true,
-          media: true,
-          send: true,
-          publish: true,
-          comments: true,
-          insights: true,
-        },
-      },
-      {
-        channel: 'instagram',
-        accountId: 'barbelpapis',
-        transport: 'instagram-graph-api',
-        capabilities: {
-          conversations: true,
-          messages: true,
-          media: true,
-          send: true,
-          publish: true,
-          comments: true,
-          insights: true,
-        },
-      },
-    ]
+    const accounts = getAccounts()
+      .map(item => ({
+        channel: item.channel,
+        accountId: item.accountId,
+        transport: item.transport,
+        capabilities: item.capabilities,
+      }))
       .filter(item => !selectedChannel || item.channel === selectedChannel)
       .map(item => ({
         ...item,
@@ -1099,14 +988,10 @@ export class MCPServer {
     channel: SocialChannel;
     accountId: string;
   }> {
-    const all: Array<{ channel: SocialChannel; accountId: string }> = [
-      { channel: 'whatsapp', accountId: 'personal' },
-      { channel: 'whatsapp', accountId: 'professional' },
-      { channel: 'telegram', accountId: 'personal' },
-      { channel: 'telegram', accountId: 'professional' },
-      { channel: 'instagram', accountId: 'skirmshop' },
-      { channel: 'instagram', accountId: 'barbelpapis' },
-    ];
+    const all = getAccounts().map(item => ({
+      channel: item.channel as SocialChannel,
+      accountId: item.accountId,
+    }));
     return channel ? all.filter(item => item.channel === channel) : all;
   }
 
@@ -2034,6 +1919,16 @@ export class MCPServer {
   }
 
   private async canonicalManageSession(args: Record<string, any>): Promise<any> {
+    if (this.channel(args) === 'instagram') {
+      const action = this.string(args, 'action');
+      if (action !== 'startPairing') {
+        throw this.canonicalError(
+          'invalid_request',
+          "for channel 'instagram', action must be 'startPairing'"
+        );
+      }
+      return this.handleInstagramStartPairing();
+    }
     this.requireChannel(args, 'whatsapp');
     switch (this.string(args, 'action')) {
       case 'renewQr':
@@ -2051,12 +1946,51 @@ export class MCPServer {
     }
   }
 
+  /**
+   * SC-1194 P1 (criterion 2): Instagram pairing over the existing session
+   * surface. The authorize link is returned as tool output — chat.e-dani.com
+   * renders it as text, the same way the WhatsApp flow already hands out its
+   * QR page link — so no new screen is needed (epic gate C5). The connector
+   * owns the OAuth app config; this call only needs the verified actor, which
+   * connectorCall forwards as x-user-sub (SC-705 pattern).
+   */
+  private async handleInstagramStartPairing(): Promise<any> {
+    const actor = getRequestActor();
+    if (!actor.sub) {
+      throw this.canonicalError(
+        'invalid_request',
+        'Instagram pairing requires a verified user: this call carries no x-user-sub. Start it from your own chat.e-dani.com conversation.'
+      );
+    }
+    const data = await this.connectorCall(
+      this.instagramUrl,
+      'GET',
+      '/api/v1/oauth/instagram/authorize-url'
+    );
+    return this.jsonResponse({
+      action: 'startPairing',
+      channel: 'instagram',
+      pairingUrl: data.url,
+      scopes: data.scopes,
+      linkExpiresInSec: data.stateExpiresInSec,
+      instructions:
+        'Open this link, log in with your Instagram professional account and approve. The credential is stored encrypted under YOUR user id; afterwards the MCP serves only your own accounts. To pair a second account, run this again.',
+    });
+  }
+
   private async canonicalClickInteraction(args: Record<string, any>): Promise<any> {
     this.requireChannel(args, 'telegram');
+    // Either form identifies the button; dataB64 is the lossless one and wins
+    // for bots with binary callback payloads.
+    const dataB64 = typeof args.dataB64 === 'string' ? args.dataB64 : undefined;
+    if (dataB64 === undefined && typeof args.data !== 'string') {
+      throw this.canonicalError('invalid_request', "Provide either 'data' or 'dataB64'");
+    }
     return this.handleTelegramClickButton({
       chatId: this.target(args),
       messageId: args.messageId,
-      data: this.string(args, 'data'),
+      data: typeof args.data === 'string' ? args.data : '',
+      dataB64,
       account: this.account(args),
     });
   }
@@ -2288,24 +2222,26 @@ export class MCPServer {
     };
   }
 
+  /** Conversation references → canonical row (ADR 0001: account from account_id). */
+  private conversations(): ConversationResolver {
+    this.conversationResolver ??= new ConversationResolver(this.dbClient);
+    return this.conversationResolver;
+  }
+
   private async handleGetChat(args: { chatId: string; account?: string }) {
     const account = normalizeAccount(args.account);
-    const chatId = accountKey(account, args.chatId);
-    // conversations.id IS the wa_chat_id
-    const convResult = await this.dbClient.query(`SELECT * FROM conversations WHERE id = $1`, [
-      chatId,
-    ]);
+    const row = await this.conversations().resolve('whatsapp', account, args.chatId);
 
-    if (convResult.rows.length === 0) {
+    if (!row || !ConversationResolver.belongsTo(row, 'whatsapp', account)) {
       throw this.canonicalError(
         'not_found',
         `Conversation '${args.chatId}' was not found in the WhatsApp index for account '${account}'`
       );
     }
-    const row = convResult.rows[0];
+    const chatId = row.id;
     const conversation = {
       id: row.id,
-      waChatId: row.wa_chat_id || stripAccount(row.id).id,
+      waChatId: row.external_id,
       type: row.type || (row.is_group ? 'GROUP' : 'INDIVIDUAL'),
       name: row.name,
     };
@@ -2789,7 +2725,12 @@ export class MCPServer {
     if (!draft) {
       throw this.canonicalError('not_found', `Draft '${draftId}' was not found`);
     }
-    const actualAccount = stripAccount(draft.conversationId).account;
+    const owner = await this.dbClient.query(
+      `SELECT a.legacy_namespace AS ns FROM conversations c
+         JOIN social_accounts a ON a.id = c.account_id WHERE c.id = $1`,
+      [draft.conversationId]
+    );
+    const actualAccount = owner.rows[0]?.ns;
     if (actualAccount !== expectedAccount) {
       throw this.canonicalError(
         'not_found',
@@ -2868,6 +2809,8 @@ export class MCPServer {
           'Content-Type': 'application/json',
           'X-Connector-Signature': signature,
           'X-Connector-Timestamp': timestamp.toString(),
+          // SC-705: forward the verified caller identity to the connector.
+          ...actorRequestHeaders(),
         },
         body: JSON.stringify(body),
       });
@@ -2916,21 +2859,9 @@ export class MCPServer {
     }
 
     const account = normalizeAccount(args.account);
-    // Group sends bypass the professional cold-send gate: membership in a group
-    // already implies established context (no unsolicited first-contact), and the
-    // gate only ever supported 1:1 targets. Both accounts must hand the connector
-    // the BARE `@g.us` jid — a `professional:`/`personal:` prefix reaches
-    // `sock.groupMetadata()` verbatim and times out. Non-group professional sends
-    // keep the inbound gate untouched.
-    const conversationId = isGroupJid(args.chatId)
-      ? bareWhatsAppJid(args.chatId)
-      : account === 'professional'
-        ? await this.requireProfessionalInboundChat(args.chatId, {
-            phone: args.phone,
-            phoneE164: args.phoneE164,
-            manualOpenUrl: args.manualOpenUrl,
-          })
-        : args.chatId;
+    // The connector expects the BARE jid: a legacy `professional:` prefix
+    // reaches Baileys verbatim (groups: sock.groupMetadata() times out).
+    const conversationId = bareWhatsAppJid(args.chatId);
     const connectorUrl = this.waUrl(account);
     const sharedSecret = process.env.CONNECTOR_SHARED_SECRET || '';
     const timestamp = Math.floor(Date.now() / 1000);
@@ -2950,6 +2881,8 @@ export class MCPServer {
           'Content-Type': 'application/json',
           'X-Connector-Signature': signature,
           'X-Connector-Timestamp': timestamp.toString(),
+          // SC-705: forward the verified caller identity to the connector.
+          ...actorRequestHeaders(),
         },
         body: JSON.stringify(body),
       });
@@ -3001,107 +2934,6 @@ export class MCPServer {
       this.logger.error(`Error sending message: ${error}`);
       throw new McpError(ErrorCode.InternalError, `Failed to send message: ${error}`);
     }
-  }
-
-  private async hasProfessionalInbound(conversationId: string): Promise<boolean> {
-    const result = await this.dbClient.query(
-      `SELECT c.id, max(m.wa_timestamp) AS last_inbound_at
-         FROM conversations c
-         JOIN messages m ON m.conversation_id = c.id
-        WHERE (c.id = $1 OR c.wa_chat_id = $1)
-          AND c.account = 'professional'
-          AND m.account = 'professional'
-          AND m.platform = 'whatsapp'
-          AND m.direction = 'INBOUND'
-        GROUP BY c.id
-        LIMIT 1`,
-      [conversationId]
-    );
-    return result.rows.length > 0;
-  }
-
-  private async hasProfessionalInboundAny(conversationIds: string[]): Promise<boolean> {
-    const unique = [...new Set(conversationIds.filter(Boolean))];
-    for (const id of unique) {
-      if (await this.hasProfessionalInbound(id)) return true;
-    }
-    return false;
-  }
-
-  private async persistProfessionalLidPhoneMapping(target: {
-    sourceLidJid?: string;
-    sendJid: string;
-    phoneEvidenceSource?: TrustedPhoneEvidenceSource;
-  }): Promise<void> {
-    if (!target.sourceLidJid || !normalizeDirectWhatsAppJid(target.sendJid)) return;
-    try {
-      await this.dbClient.query(
-        `UPDATE conversations
-            SET wa_chat_id = $2,
-                metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
-                updated_at = now()
-          WHERE id = $1
-            AND account = 'professional'
-            AND (wa_chat_id IS NULL OR wa_chat_id = '' OR wa_chat_id = id)`,
-        [
-          accountKey('professional', target.sourceLidJid),
-          accountKey('professional', target.sendJid),
-          JSON.stringify({
-            lidPhoneMappingSource: 'professional_send_phone_evidence',
-            phoneEvidenceSource: target.phoneEvidenceSource || 'unknown',
-          }),
-        ]
-      );
-    } catch (error) {
-      (this.logger as pino.Logger | undefined)?.warn?.(
-        `Could not persist professional LID phone mapping source=${target.phoneEvidenceSource || 'unknown'}: ${safeError(error)}`
-      );
-    }
-  }
-
-  /**
-   * Gate professional WhatsApp direct sends behind an existing inbound message
-   * (no cold first-contact sends) and return the jid that must actually be sent.
-   *
-   * LID chats (`<n>@lid` / `<n>@hosted.lid`) are an opaque Baileys identity, not
-   * a phone: the conversation is stored verbatim (e.g. `professional:198...@lid`)
-   * so we look it up under the ORIGINAL jid and send to the LID jid unchanged.
-   * Bare phones / `@c.us` / `@s.whatsapp.net` keep the legacy normalize+gate path.
-   */
-  private async requireProfessionalInboundChat(
-    chatId: string,
-    evidence: { phone?: unknown; phoneE164?: unknown; manualOpenUrl?: unknown } = {}
-  ): Promise<string> {
-    const target = resolveProfessionalSendTarget(chatId, evidence);
-    if (!target) {
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        'Professional WhatsApp direct sends require a valid individual phone or WhatsApp chat ID'
-      );
-    }
-
-    if (isLidJid(chatId) && !target.phoneE164) {
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        'Professional WhatsApp @lid sends require trusted phone evidence (phone, phoneE164, or manualOpenUrl/wa.me) before automated sending.'
-      );
-    }
-
-    if (!(await this.hasProfessionalInboundAny(target.lookupKeys || [target.lookupKey]))) {
-      const fallbackUrl =
-        target.manualOpenUrl ||
-        (target.phoneE164
-          ? manualWhatsAppOpenUrlFromPhone(target.phoneE164, '')
-          : manualWhatsAppOpenUrl(target.sendJid, ''));
-      const fallback = fallbackUrl ? ` Manual fallback: ${fallbackUrl}` : '';
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        `Professional WhatsApp direct sends are only allowed after the customer has sent an inbound message.${fallback}`
-      );
-    }
-
-    await this.persistProfessionalLidPhoneMapping(target);
-    return target.sendJid;
   }
 
   private async handleSendTemplate(args: {
@@ -3188,6 +3020,8 @@ export class MCPServer {
           'Content-Type': 'application/json',
           'X-Connector-Signature': signature,
           'X-Connector-Timestamp': timestamp.toString(),
+          // SC-705: forward the verified caller identity to the connector.
+          ...actorRequestHeaders(),
         },
         body: JSON.stringify(body),
       });
@@ -3331,6 +3165,7 @@ export class MCPServer {
       limit: args.limit || 20,
       includeParticipants: args.includeParticipants !== false,
       account: args.account,
+      channel: 'whatsapp',
     });
 
     return {
@@ -3686,6 +3521,7 @@ export class MCPServer {
     chatId: string;
     messageId: number | string;
     data: string;
+    dataB64?: string;
     timeoutMs?: number;
     fireAndForget?: boolean;
     account?: string;
@@ -3701,6 +3537,7 @@ export class MCPServer {
         chatId: target.chatId,
         messageId,
         data: args.data,
+        ...(args.dataB64 ? { dataB64: args.dataB64 } : {}),
         timeoutMs,
         fireAndForget: args.fireAndForget === true,
       }
@@ -3773,8 +3610,9 @@ export class MCPServer {
     if (chatId.startsWith('@')) {
       const username = chatId.slice(1).toLowerCase();
       const r = await this.dbClient.query(
-        `SELECT id FROM conversations WHERE id LIKE $2 AND lower(metadata->>'username') = $1 LIMIT 1`,
-        [username, accountKey(account, 'tg_') + '%']
+        `SELECT COALESCE(merged_into, id) AS id FROM conversations
+          WHERE account_id = $2 AND lower(metadata->>'username') = $1 LIMIT 1`,
+        [username, socialAccountId('telegram', account)]
       );
       return r.rows[0]?.id ?? null;
     }
@@ -3841,18 +3679,20 @@ export class MCPServer {
     const bare = this.bareTelegramTgId(chatId);
     let candidates: string[];
     if (bare) {
-      candidates = [...new Set(ACCOUNTS.map(a => accountKey(a, bare)))];
+      candidates = [...new Set(accountList().map(a => accountKey(a, bare)))];
     } else {
-      const resolved = await Promise.all(ACCOUNTS.map(a => this.resolveTelegramChatId(chatId, a)));
+      const resolved = await Promise.all(
+        accountList().map(a => this.resolveTelegramChatId(chatId, a))
+      );
       candidates = [...new Set(resolved.filter((c): c is string => !!c))];
     }
     if (!candidates.length) return { account: requested, source: 'fallback', candidates };
 
-    const accountsFrom = (rows: Array<{ conversation_id?: string; id?: string }>) => {
+    const accountsFrom = (rows: Array<{ account_id?: string | null }>) => {
       const set = new Set<Account>();
       for (const row of rows) {
-        const key = row.conversation_id ?? row.id;
-        if (key) set.add(stripAccount(String(key)).account);
+        if (row.account_id?.startsWith('telegram:'))
+          set.add(row.account_id.slice('telegram:'.length));
       }
       return set;
     };
@@ -3860,7 +3700,7 @@ export class MCPServer {
       set.size === 1 ? [...set][0] : set.has(requested) ? requested : 'personal';
 
     const msg = await this.dbClient.query(
-      `SELECT DISTINCT conversation_id
+      `SELECT DISTINCT account_id
          FROM messages
         WHERE conversation_id = ANY($1::text[])
           AND (wa_message_id = $2 OR metadata->>'telegram_message_id' = $2)`,
@@ -3876,7 +3716,7 @@ export class MCPServer {
     }
 
     const conv = await this.dbClient.query(
-      `SELECT id FROM conversations WHERE id = ANY($1::text[])`,
+      `SELECT id, account_id FROM conversations WHERE id = ANY($1::text[])`,
       [candidates]
     );
     const convAccounts = accountsFrom(conv.rows);
@@ -4012,22 +3852,22 @@ export class MCPServer {
   private async handleTelegramGetDialogs(args?: { account?: string }) {
     const account = normalizeAccount(args?.account);
     const result = await this.dbClient.query(
-      `SELECT c.id, c.name, c.type, c.is_group, c.last_message_at, c.metadata,
+      `SELECT c.id, c.external_id, c.name, c.type, c.is_group, c.last_message_at, c.metadata,
               (SELECT count(*)::int FROM messages
                 WHERE conversation_id = c.id
                   AND (is_deleted IS NULL OR is_deleted = false)) AS message_count
          FROM conversations c
-        WHERE c.id LIKE $1
+        WHERE c.account_id = $1 AND c.merged_into IS NULL
         ORDER BY c.last_message_at DESC NULLS LAST
         LIMIT 1000`,
-      [accountKey(account, 'tg_') + '%']
+      [socialAccountId('telegram', account)]
     );
     return this.jsonResponse({
       source: 'db',
       count: result.rows.length,
       dialogs: result.rows.map((c: any) => ({
         id: c.id,
-        chatId: stripAccount(c.id).id.replace(/^tg_/, ''),
+        chatId: String(c.external_id).replace(/^tg_/, ''),
         name: c.name,
         type: c.is_group ? 'group' : 'private',
         lastMessageAt: c.last_message_at,
@@ -4124,6 +3964,8 @@ export class MCPServer {
         'Content-Type': 'application/json',
         'X-Connector-Signature': signature,
         'X-Connector-Timestamp': timestamp.toString(),
+        // SC-705: forward the verified caller identity to the connector.
+        ...actorRequestHeaders(),
       },
       ...(method !== 'GET' && method !== 'DELETE' ? { body: JSON.stringify(payload) } : {}),
       signal: AbortSignal.timeout(timeoutMs),
@@ -4161,19 +4003,7 @@ export class MCPServer {
       throw new McpError(ErrorCode.InvalidRequest, 'Sending disabled');
     }
     const { account, ...body } = args;
-    if (isGroupJid(body.conversationId)) {
-      // Group sends bypass the professional cold-send gate — parity with
-      // handleSendMessage: group membership already implies established
-      // context (no unsolicited first-contact), and the connector needs the
-      // BARE `@g.us` jid on both accounts (an account prefix reaches
-      // sock.groupMetadata() verbatim and times out).
-      body.conversationId = bareWhatsAppJid(body.conversationId);
-    } else if (normalizeAccount(account) === 'professional') {
-      // Same cold-send guard as text sends: block first-contact media to a
-      // professional chat with no prior inbound (Baileys account_restricted /
-      // ban risk) and resolve the @lid-aware send jid. Mirrors handleSendMessage.
-      body.conversationId = await this.requireProfessionalInboundChat(body.conversationId);
-    }
+    body.conversationId = bareWhatsAppJid(body.conversationId);
     const data = await this.connectorCall(
       this.waUrl(account),
       'POST',
@@ -4193,17 +4023,7 @@ export class MCPServer {
       throw new McpError(ErrorCode.InvalidRequest, 'Sending disabled');
     }
     const { account, ...body } = args;
-    if (isGroupJid(body.toChatId)) {
-      // Forwarding INTO a group bypasses the cold-send gate — same parity as
-      // handleSendMessage/handleSendFile: membership implies established
-      // context, and the connector needs the bare `@g.us` jid.
-      body.toChatId = bareWhatsAppJid(body.toChatId);
-    } else if (normalizeAccount(account) === 'professional') {
-      // Gate the forward DESTINATION (toChatId) through the same inbound guard
-      // as text/media sends — chatId is only the source we read from, so it
-      // does not initiate contact. Resolves the @lid-aware send jid too.
-      body.toChatId = await this.requireProfessionalInboundChat(body.toChatId);
-    }
+    body.toChatId = bareWhatsAppJid(body.toChatId);
     const data = await this.connectorCall(
       this.waUrl(account),
       'POST',
@@ -4242,26 +4062,14 @@ export class MCPServer {
 
   private async getUnreadWhatsAppChatsFromDb(account: Account, reason: string) {
     const result = await this.dbClient.query(
-      `SELECT c.id, c.name, c.type, c.is_group, c.unread_count, c.last_message_at
+      `SELECT c.id, c.external_id, c.name, c.type, c.is_group, c.unread_count, c.last_message_at
          FROM conversations c
-        WHERE c.account = $1
+        WHERE c.account_id = $1
+          AND c.merged_into IS NULL
           AND COALESCE(c.unread_count, 0) > 0
-          AND regexp_replace(c.id, '^(personal|professional):', '') NOT LIKE 'tg_%'
-          AND (
-            regexp_replace(c.id, '^(personal|professional):', '') LIKE '%@%'
-            OR regexp_replace(COALESCE(c.wa_chat_id, ''), '^(personal|professional):', '') LIKE '%@%'
-            OR EXISTS (
-              SELECT 1
-                FROM messages m
-               WHERE m.conversation_id = c.id
-                 AND m.account = $1
-                 AND m.platform = 'whatsapp'
-               LIMIT 1
-            )
-          )
         ORDER BY c.unread_count DESC, c.last_message_at DESC NULLS LAST
         LIMIT 200`,
-      [account]
+      [socialAccountId('whatsapp', account)]
     );
 
     return {
@@ -4270,7 +4078,7 @@ export class MCPServer {
       totalResults: result.rows.length,
       chats: result.rows.map(row => ({
         id: row.id,
-        waChatId: stripAccount(row.id).id,
+        waChatId: row.external_id,
         name: row.name,
         unreadCount: Number(row.unread_count || 0),
         isGroup: Boolean(row.is_group),
@@ -4495,18 +4303,20 @@ export class MCPServer {
   }
 
   private async handleMessagingStatus() {
-    const targets = [
-      ['whatsapp', 'personal', this.waUrl('personal'), '/api/v1/health'],
-      ['whatsapp', 'professional', this.waUrl('professional'), '/api/v1/health'],
-      ['telegram', 'personal', this.tgUrl('personal'), '/health'],
-      ['telegram', 'professional', this.tgUrl('professional'), '/health'],
+    const targets: Array<readonly [string, string, string, string]> = [
+      ...getAccounts('whatsapp').map(
+        a => ['whatsapp', a.accountId, a.connectorUrl as string, '/api/v1/health'] as const
+      ),
+      ...getAccounts('telegram').map(
+        a => ['telegram', a.accountId, a.connectorUrl as string, '/health'] as const
+      ),
       [
         'instagram',
         'default',
         process.env.INSTAGRAM_CONNECTOR_URL || 'http://instagram-connector:3003',
         '/health',
       ],
-    ] as const;
+    ];
     const checks = await Promise.all(
       targets.map(async ([kind, account, url, endpoint]) => {
         try {
@@ -4596,7 +4406,7 @@ export class MCPServer {
         `Could not resolve Telegram chatId '${args.chatId}'`
       );
     const result = await this.dbClient.query(
-      `SELECT id, name, type, is_group, participant_count, last_message_at, metadata,
+      `SELECT id, external_id, name, type, is_group, participant_count, last_message_at, metadata,
               (SELECT count(*)::int FROM messages
                 WHERE conversation_id = c.id
                   AND (is_deleted IS NULL OR is_deleted = false)) AS message_count
@@ -4609,7 +4419,7 @@ export class MCPServer {
     return this.jsonResponse({
       source: 'db',
       id: c.id,
-      chatId: stripAccount(c.id).id.replace(/^tg_/, ''),
+      chatId: String(c.external_id).replace(/^tg_/, ''),
       name: c.name,
       type: c.is_group ? 'group' : 'private',
       participantCount: c.participant_count,
@@ -4659,7 +4469,13 @@ export class MCPServer {
     const url = `${this.instagramUrl}${path}`;
     const options: RequestInit = {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // SC-1194 P1 (criterion 3): forward the gateway-verified actor exactly
+        // like the WhatsApp/Telegram routes (SC-705). With no actor the
+        // headers are empty and the connector keeps its legacy env path.
+        ...actorRequestHeaders(),
+      },
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (body) options.body = JSON.stringify(body);

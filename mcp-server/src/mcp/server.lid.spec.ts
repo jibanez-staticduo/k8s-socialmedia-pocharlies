@@ -1,9 +1,5 @@
-import {
-  isLidJid,
-  normalizeDirectWhatsAppJid,
-  resolveProfessionalSendTarget,
-  MCPServer,
-} from './server';
+import { useTestAccounts } from '../domain/test-accounts';
+import { isLidJid, normalizeDirectWhatsAppJid, MCPServer } from './server';
 
 describe('isLidJid', () => {
   it('detects bare @lid and @hosted.lid jids', () => {
@@ -50,172 +46,6 @@ describe('normalizeDirectWhatsAppJid (legacy phone behavior unchanged)', () => {
   });
 });
 
-describe('resolveProfessionalSendTarget', () => {
-  it('keeps a bare @lid under the @lid key but marks it as missing phone evidence', () => {
-    expect(resolveProfessionalSendTarget('198517716955152@lid')).toEqual({
-      lookupKey: 'professional:198517716955152@lid',
-      lookupKeys: ['professional:198517716955152@lid'],
-      sendJid: '198517716955152@lid',
-    });
-  });
-
-  it('keeps a @hosted.lid jid under the @hosted.lid key too', () => {
-    expect(resolveProfessionalSendTarget('198517716955152@hosted.lid')).toEqual({
-      lookupKey: 'professional:198517716955152@hosted.lid',
-      lookupKeys: ['professional:198517716955152@hosted.lid'],
-      sendJid: '198517716955152@hosted.lid',
-    });
-  });
-
-  it('strips an already-prefixed professional @lid before re-keying (no double prefix)', () => {
-    expect(resolveProfessionalSendTarget('professional:198517716955152@lid')).toEqual({
-      lookupKey: 'professional:198517716955152@lid',
-      lookupKeys: ['professional:198517716955152@lid'],
-      sendJid: '198517716955152@lid',
-    });
-  });
-
-  it('uses trusted phone evidence to turn an @lid send into a phone-number send jid', () => {
-    expect(
-      resolveProfessionalSendTarget('198517716955152@lid', {
-        manualOpenUrl: 'https://wa.me/35796658668?text=hello',
-      })
-    ).toEqual({
-      lookupKey: 'professional:198517716955152@lid',
-      lookupKeys: [
-        'professional:198517716955152@lid',
-        'professional:35796658668@s.whatsapp.net',
-      ],
-      sendJid: '35796658668@s.whatsapp.net',
-      sourceLidJid: '198517716955152@lid',
-      phoneE164: '+35796658668',
-      phoneWaJid: '35796658668@c.us',
-      manualOpenUrl: 'https://wa.me/35796658668?text=hello',
-      phoneEvidenceSource: 'manualOpenUrl',
-    });
-  });
-
-  it('(b) normalizes a bare phone to @s.whatsapp.net under the professional key', () => {
-    expect(resolveProfessionalSendTarget('34660242739')).toEqual({
-      lookupKey: 'professional:34660242739@s.whatsapp.net',
-      lookupKeys: ['professional:34660242739@s.whatsapp.net'],
-      sendJid: '34660242739@s.whatsapp.net',
-    });
-  });
-
-  it('(b) normalizes a @c.us jid to @s.whatsapp.net under the professional key', () => {
-    expect(resolveProfessionalSendTarget('34660242739@c.us')).toEqual({
-      lookupKey: 'professional:34660242739@s.whatsapp.net',
-      lookupKeys: ['professional:34660242739@s.whatsapp.net'],
-      sendJid: '34660242739@s.whatsapp.net',
-    });
-  });
-
-  it('returns null for ids that are neither @lid nor a normalizable phone', () => {
-    expect(resolveProfessionalSendTarget('123456789-987654321@g.us')).toBeNull();
-    expect(resolveProfessionalSendTarget('123')).toBeNull();
-    expect(resolveProfessionalSendTarget(undefined)).toBeNull();
-  });
-});
-
-describe('requireProfessionalInboundChat gate (DB-backed)', () => {
-  // Build an MCPServer without running the heavy constructor, injecting only the
-  // fake dbClient the gate uses. The gate is a private method exercised via a
-  // typed bracket-access cast.
-  function gateWith(queryImpl: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>) {
-    const server = Object.create(MCPServer.prototype) as MCPServer;
-    (server as unknown as { dbClient: { query: typeof queryImpl } }).dbClient = {
-      query: jest.fn(queryImpl),
-    };
-    return {
-      server,
-      call: (
-        chatId: string,
-        evidence: { phone?: string; phoneE164?: string; manualOpenUrl?: string } = {}
-      ) =>
-        (
-          server as unknown as {
-            requireProfessionalInboundChat: (
-              id: string,
-              evidence?: { phone?: string; phoneE164?: string; manualOpenUrl?: string }
-            ) => Promise<string>;
-          }
-        ).requireProfessionalInboundChat(chatId, evidence),
-      query: (server as unknown as { dbClient: { query: jest.Mock } }).dbClient.query,
-    };
-  }
-
-  it('@lid without trusted phone evidence stays blocked before touching the DB', async () => {
-    const { call, query } = gateWith(async () => ({
-      rows: [{ id: 'professional:198517716955152@lid' }],
-    }));
-    await expect(call('198517716955152@lid')).rejects.toThrow(/require trusted phone evidence/);
-    expect(query).not.toHaveBeenCalled();
-  });
-
-  it('@lid plus trusted phone evidence and inbound history sends to the phone-number jid', async () => {
-    const { call, query } = gateWith(async (sql) => {
-      if (/SELECT c\.id/.test(sql)) return { rows: [{ id: 'professional:198517716955152@lid' }] };
-      return { rows: [] };
-    });
-    await expect(call('198517716955152@lid', { phoneE164: '+35796658668' })).resolves.toBe(
-      '35796658668@s.whatsapp.net'
-    );
-    expect(query).toHaveBeenNthCalledWith(1, expect.stringContaining('c.wa_chat_id = $1'), [
-      'professional:198517716955152@lid',
-    ]);
-    expect(query).toHaveBeenNthCalledWith(2, expect.stringContaining('UPDATE conversations'), [
-      'professional:198517716955152@lid',
-      'professional:35796658668@s.whatsapp.net',
-      expect.any(String),
-    ]);
-  });
-
-  it('@lid plus phone still blocks when neither the LID nor phone has inbound history', async () => {
-    const { call, query } = gateWith(async () => ({ rows: [] }));
-    await expect(call('198517716955152@lid', { phone: '35796658668' })).rejects.toThrow(
-      /only allowed after the customer has sent an inbound message/
-    );
-    expect(query).toHaveBeenCalledWith(expect.any(String), ['professional:198517716955152@lid']);
-    expect(query).toHaveBeenCalledWith(expect.any(String), [
-      'professional:35796658668@s.whatsapp.net',
-    ]);
-  });
-
-  it('bare phone with an inbound returns the normalized @s.whatsapp.net jid', async () => {
-    const { call, query } = gateWith(async () => ({
-      rows: [{ id: 'professional:34660242739@s.whatsapp.net' }],
-    }));
-    await expect(call('34660242739')).resolves.toBe('34660242739@s.whatsapp.net');
-    expect(query).toHaveBeenCalledWith(expect.any(String), [
-      'professional:34660242739@s.whatsapp.net',
-    ]);
-  });
-
-  it('bare phone with an inbound LID conversation found through wa_chat_id is allowed', async () => {
-    const { call, query } = gateWith(async (sql, params) => {
-      expect(sql).toContain('c.wa_chat_id = $1');
-      expect(params).toEqual(['professional:35796658668@s.whatsapp.net']);
-      return { rows: [{ id: 'professional:79723233333251@lid' }] };
-    });
-    await expect(call('35796658668')).resolves.toBe('35796658668@s.whatsapp.net');
-    expect(query).toHaveBeenCalledTimes(1);
-  });
-
-  it('bare phone with NO inbound throws the guard error with a wa.me manual fallback', async () => {
-    const { call } = gateWith(async () => ({ rows: [] }));
-    await expect(call('34660242739')).rejects.toThrow(/Manual fallback: https:\/\/wa\.me\/34660242739/);
-  });
-
-  it('rejects an unusable id before touching the DB', async () => {
-    const { call, query } = gateWith(async () => ({ rows: [] }));
-    await expect(call('123456789-987654321@g.us')).rejects.toThrow(
-      /valid individual phone or WhatsApp chat ID/
-    );
-    expect(query).not.toHaveBeenCalled();
-  });
-});
-
 describe('handleSendMessage professional @lid + phone fallback behavior', () => {
   const originalEnableSending = process.env.ENABLE_SENDING;
   const originalEmergencyDisable = process.env.EMERGENCY_DISABLE_SENDING;
@@ -229,13 +59,15 @@ describe('handleSendMessage professional @lid + phone fallback behavior', () => 
     global.fetch = originalFetch;
   });
 
-  function sendServer(queryImpl: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>) {
+  function sendServer(queryImpl: (sql: string, params: unknown[]) => Promise<{ rows: any[] }>) {
     const server = Object.create(MCPServer.prototype) as MCPServer;
     const query = jest.fn(queryImpl);
     const logger = { error: jest.fn(), warn: jest.fn() };
+    useTestAccounts({
+      whatsapp: { personal: 'http://wa-personal', professional: 'http://wa-professional' },
+    });
     Object.assign(server as unknown as Record<string, unknown>, {
       dbClient: { query },
-      waUrls: { personal: 'http://wa-personal', professional: 'http://wa-professional' },
       logger,
     });
     return {
@@ -275,10 +107,7 @@ describe('handleSendMessage professional @lid + phone fallback behavior', () => 
     }));
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    const { send } = sendServer(async (sql) => {
-      if (/SELECT c\.id/.test(sql)) return { rows: [{ id: 'professional:198517716955152@lid' }] };
-      return { rows: [] };
-    });
+    const { send, query } = sendServer(async () => ({ rows: [] }));
 
     await expect(
       send({
@@ -291,6 +120,8 @@ describe('handleSendMessage professional @lid + phone fallback behavior', () => 
     ).rejects.toThrow(/Manual fallback: open https:\/\/wa\.me\/35796658668/);
 
     const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
-    expect(body.conversationId).toBe('35796658668@s.whatsapp.net');
+    // No gate: the LID goes out verbatim and inbound history is never read.
+    expect(body.conversationId).toBe('198517716955152@lid');
+    expect(query).not.toHaveBeenCalled();
   });
 });

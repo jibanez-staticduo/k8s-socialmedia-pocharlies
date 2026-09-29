@@ -13,11 +13,22 @@
  * single-account mode using INSTAGRAM_ACCESS_TOKEN / INSTAGRAM_BUSINESS_ACCOUNT_ID.
  */
 
-import express from 'express';
+import express, { Request, Response } from 'express';
 import pino from 'pino';
-import { InstagramAPI, InstagramConfig } from './instagram-api';
+import { actorFromHeaders } from '@mcp-socialmedia/shared';
+import { discoverFacebookInstagramAccount, InstagramAPI, InstagramConfig } from './instagram-api';
 import { createWebhookRouter } from './webhook';
 import { InstagramEventPublisher } from './publisher';
+import {
+  IG_PAIRING_SCOPES,
+  IG_SESSION_KEY_RE,
+  PairingFetch,
+  buildAuthorizeUrl,
+  instagramLoginConfigFromEnv,
+  pairInstagramAccount,
+  signPairingState,
+} from './oauth-pairing';
+import { createInstagramCredentialStore, resolveInstagramEntry } from './credential-resolution';
 
 const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
@@ -99,6 +110,22 @@ function loadAccounts(): Map<string, AccountEntry> {
 async function main(): Promise<void> {
   const accounts = loadAccounts();
 
+  // SC-1194 P1: per-sub credential store + Instagram Login pairing. Flag-gated:
+  // with CREDENTIAL_STORE_ENABLED unset the store is null and every route
+  // below behaves exactly like the legacy env path (no-regression rule).
+  const credentialStore = createInstagramCredentialStore();
+  const pairingConfig = instagramLoginConfigFromEnv();
+  const PAIRING_STATE_TTL_SEC = Math.max(
+    60,
+    parseInt(process.env.INSTAGRAM_OAUTH_STATE_TTL_SEC || '600', 10) || 600
+  );
+  if (credentialStore) {
+    logger.info(
+      { pairing: !!pairingConfig },
+      'credential-store: ENABLED — per-sub instagram resolution active'
+    );
+  }
+
   // Build a reverse lookup: accountId → account name (for webhook routing)
   // We register BOTH id formats because Meta uses different IDs depending on API version:
   //   - businessAccountId (from .env, e.g. 25864160563286488) — legacy/Facebook Graph
@@ -124,6 +151,35 @@ async function main(): Promise<void> {
           { account: name, id: data.id, user_id: data.user_id },
           'Registered Instagram IDs for routing'
         );
+      } else if (entry.config.fbAccessToken) {
+        try {
+          const facebookAccount = await discoverFacebookInstagramAccount(
+            entry.config.fbAccessToken,
+            entry.config.businessAccountId
+          );
+          if (facebookAccount) {
+            entry.api.setFacebookPrimary(facebookAccount.id);
+            bizIdToAccount.set(facebookAccount.id, name);
+            logger.info(
+              {
+                account: name,
+                instagramUserId: facebookAccount.id,
+                username: facebookAccount.username,
+              },
+              'Using Facebook Login system-user token after Instagram Login token validation failed'
+            );
+          } else {
+            logger.warn(
+              { account: name, status: res.status },
+              'Instagram Login token invalid and Facebook Login account could not be resolved'
+            );
+          }
+        } catch (facebookError) {
+          logger.warn(
+            { account: name, status: res.status, err: String(facebookError) },
+            'Instagram Login token invalid and Facebook Login fallback failed'
+          );
+        }
       } else {
         logger.warn({ account: name, status: res.status }, 'Failed to fetch IG IDs from /me');
       }
@@ -184,10 +240,153 @@ async function main(): Promise<void> {
     );
   }
 
+  // === SC-1194 P1: Instagram Login pairing (per-sub) ===
+  // Registered BEFORE the /api/v1/:account middleware so the OAuth surface is
+  // not mistaken for an account name.
+
+  // The mcp-server calls this with the gateway-forwarded x-user-sub; the
+  // response is the authorize URL the user opens from their chat. The state
+  // carries the sub across the browser round-trip, HMAC-signed with a key
+  // derived from the credential-store master key.
+  app.get('/api/v1/oauth/instagram/authorize-url', (req: Request, res: Response) => {
+    const actor = actorFromHeaders(req.headers);
+    if (!actor.sub) {
+      res.status(400).json({
+        error: {
+          code: 'no_actor',
+          message: 'x-user-sub header required to start instagram pairing',
+        },
+      });
+      return;
+    }
+    if (!credentialStore || !pairingConfig) {
+      res.status(400).json({
+        error: {
+          code: 'instagram_pairing_unavailable',
+          message:
+            'instagram pairing needs CREDENTIAL_STORE_ENABLED=true, CREDENTIAL_STORE_MASTER_KEY, the Instagram Login app credentials and INSTAGRAM_OAUTH_REDIRECT_URI',
+        },
+      });
+      return;
+    }
+    const label =
+      typeof req.query.account === 'string' && req.query.account.trim()
+        ? req.query.account.trim()
+        : undefined;
+    if (label && !IG_SESSION_KEY_RE.test(`${actor.sub}:${label}`)) {
+      res.status(400).json({
+        error: {
+          code: 'invalid_account_label',
+          message: 'account label must match [A-Za-z0-9][A-Za-z0-9_.:-]{0,63}',
+        },
+      });
+      return;
+    }
+    const state = signPairingState(
+      { sub: actor.sub, label, exp: 0 },
+      pairingConfig.stateSecret,
+      Date.now(),
+      PAIRING_STATE_TTL_SEC * 1000
+    );
+    res.json({
+      url: buildAuthorizeUrl(pairingConfig, state),
+      scopes: IG_PAIRING_SCOPES,
+      stateExpiresInSec: PAIRING_STATE_TTL_SEC,
+    });
+  });
+
+  function pairingPage(title: string, body: string): string {
+    return (
+      '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+      `<title>${title}</title></head><body style="font-family:sans-serif;max-width:32em;margin:4em auto">` +
+      `<h1>${title}</h1><p>${body}</p></body></html>`
+    );
+  }
+  const escapeHtml = (value: string) =>
+    value.replace(
+      /[&<>"']/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
+    );
+
+  // Instagram redirects the user's browser here after consent. Everything the
+  // exchange needs (app secret included) is server-side; the response never
+  // echoes a token.
+  app.get('/oauth/instagram/callback', async (req: Request, res: Response) => {
+    const deny = (status: number, message: string) => {
+      res
+        .status(status)
+        .type('html')
+        .send(pairingPage('Instagram pairing failed', escapeHtml(message)));
+    };
+    if (typeof req.query.error === 'string' && req.query.error) {
+      deny(400, `Instagram returned: ${req.query.error}`);
+      return;
+    }
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    if (!code || !state) {
+      deny(400, 'missing code or state');
+      return;
+    }
+    if (!credentialStore || !pairingConfig) {
+      deny(400, 'instagram pairing is not enabled on this connector');
+      return;
+    }
+    try {
+      const result = await pairInstagramAccount({
+        code,
+        state,
+        config: pairingConfig,
+        store: credentialStore,
+        fetchImpl: globalThis.fetch as unknown as PairingFetch,
+      });
+      res
+        .type('html')
+        .send(
+          pairingPage(
+            'Instagram paired',
+            `@${escapeHtml(result.username)} is now linked to your account. You can close this tab and keep using chat.`
+          )
+        );
+    } catch (error) {
+      logger.warn({ err: String(error) }, 'instagram pairing callback failed');
+      deny(400, 'the pairing link is invalid or expired. Start again with social_manage_session.');
+    }
+  });
+
+  // === Per-account credential resolution (SC-1194 P1) ===
+  // With the store flag OFF (or an anonymous caller) this hands back the exact
+  // env account the legacy routes used. With flag ON + a verified sub it
+  // serves that sub's own row — never another user's account.
+  app.use('/api/v1/:account', async (req: Request, res: Response, next) => {
+    try {
+      const resolution = await resolveInstagramEntry({
+        headers: req.headers as Record<string, string | string[] | undefined>,
+        accountName: req.params.account,
+        store: credentialStore,
+        legacyLookup: getAccount,
+        log: msg => logger.info(msg),
+      });
+      if ('error' in resolution) {
+        if (resolution.error.code === 'unknown_account') {
+          res.status(404).json({ error: `Account '${req.params.account}' not found` });
+        } else {
+          res.status(400).json({ error: resolution.error });
+        }
+        return;
+      }
+      res.locals.igEntry = { name: resolution.entry.name, api: resolution.entry.api };
+      next();
+    } catch (error) {
+      logger.error({ err: String(error) }, 'instagram credential resolution failed');
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
   // === Per-account API routes ===
 
   app.get('/api/v1/:account/profile', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.getProfile());
@@ -197,7 +396,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/media', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const limit = parseInt(req.query.limit as string) || 25;
@@ -208,7 +407,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/media/:mediaId/comments', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.getMediaComments(req.params.mediaId));
@@ -218,7 +417,7 @@ async function main(): Promise<void> {
   });
 
   app.post('/api/v1/:account/comments/:commentId/reply', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { message } = req.body;
@@ -229,7 +428,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/conversations', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const limit = parseInt(req.query.limit as string) || 20;
@@ -240,7 +439,7 @@ async function main(): Promise<void> {
   });
 
   app.post('/api/v1/:account/messages/send', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { recipient_id, message } = req.body;
@@ -251,7 +450,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/media/:mediaId/insights', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.getMediaInsights(req.params.mediaId));
@@ -261,7 +460,7 @@ async function main(): Promise<void> {
   });
 
   app.post('/api/v1/:account/publish', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { image_url, caption, media_type } = req.body;
@@ -278,7 +477,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/stories', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.getStories());
@@ -289,7 +488,7 @@ async function main(): Promise<void> {
 
   // Publishing: carousel / reel / story
   app.post('/api/v1/:account/publish/carousel', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { items, caption } = req.body as { items: string[]; caption?: string };
@@ -302,7 +501,7 @@ async function main(): Promise<void> {
   });
 
   app.post('/api/v1/:account/publish/reel', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { video_url, caption, share_to_feed } = req.body as {
@@ -318,7 +517,7 @@ async function main(): Promise<void> {
   });
 
   app.post('/api/v1/:account/publish/story', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { image_url, video_url } = req.body as { image_url?: string; video_url?: string };
@@ -332,7 +531,7 @@ async function main(): Promise<void> {
 
   // Comments: post / hide / delete
   app.post('/api/v1/:account/media/:mediaId/comments', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { message } = req.body as { message: string };
@@ -344,7 +543,7 @@ async function main(): Promise<void> {
   });
 
   app.post('/api/v1/:account/comments/:commentId/hide', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const { hide } = req.body as { hide?: boolean };
@@ -355,7 +554,7 @@ async function main(): Promise<void> {
   });
 
   app.delete('/api/v1/:account/comments/:commentId', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.deleteComment(req.params.commentId));
@@ -366,7 +565,7 @@ async function main(): Promise<void> {
 
   // Account: insights / pages / publishing limit / token validation
   app.get('/api/v1/:account/insights', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const metrics = req.query.metrics ? String(req.query.metrics).split(',') : undefined;
@@ -378,7 +577,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/pages', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.getAccountPages());
@@ -388,7 +587,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/publishing-limit', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json(await entry.api.getContentPublishingLimit());
@@ -398,7 +597,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/token/validate', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       res.json({ valid: await entry.api.validateAccessToken() });
@@ -409,7 +608,7 @@ async function main(): Promise<void> {
 
   // Hashtags: search + media
   app.get('/api/v1/:account/hashtag/search', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const q = req.query.q as string;
@@ -421,7 +620,7 @@ async function main(): Promise<void> {
   });
 
   app.get('/api/v1/:account/hashtag/:hashtagId/media', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const mediaType = (req.query.media_type as 'top' | 'recent') || 'top';
@@ -434,7 +633,7 @@ async function main(): Promise<void> {
 
   // Mentions
   app.get('/api/v1/:account/mentions', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const limit = parseInt(req.query.limit as string) || 25;
@@ -446,7 +645,7 @@ async function main(): Promise<void> {
 
   // Business Discovery
   app.get('/api/v1/:account/business-discovery', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const username = req.query.username as string;
@@ -459,7 +658,7 @@ async function main(): Promise<void> {
 
   // Conversation messages
   app.get('/api/v1/:account/conversations/:conversationId/messages', async (req, res) => {
-    const entry = getAccount(req.params.account);
+    const entry = res.locals.igEntry as AccountEntry | undefined;
     if (!entry) return res.status(404).json({ error: `Account '${req.params.account}' not found` });
     try {
       const limit = parseInt(req.query.limit as string) || 25;

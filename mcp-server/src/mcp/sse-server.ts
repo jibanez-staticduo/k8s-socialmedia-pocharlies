@@ -7,16 +7,24 @@
 
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { Pool } from 'pg';
+import { syncSocialAccountsBestEffort } from '../infrastructure/database/social-accounts';
 import Redis, { RedisOptions } from 'ioredis';
 import * as fs from 'fs';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { writeNoSessionResponse } from './session-errors';
 import { randomUUID } from 'node:crypto';
 import { MCPServer } from './server';
+import { actorFromHeaders, runWithRequestActor } from '@mcp-socialmedia/shared';
 
-const DATABASE_URL =
-  process.env.DATABASE_URL || 'postgresql://whatsappmcp:whatsappmcp_dev@localhost:5432/whatsappmcp';
+// SC-1239 C2: no hardcoded fallback — fail at startup naming the variable.
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL is unset: refusing to start the MCP SSE server without an explicit database connection'
+  );
+}
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const REDIS_TLS_CA = process.env.REDIS_TLS_CA;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -137,6 +145,7 @@ async function main() {
   } as any);
   // Touch the pool once so we surface bad credentials at boot.
   await dbPool.query('SELECT 1');
+  await syncSocialAccountsBestEffort(dbPool);
   console.log('[SSE] Connected to database (pool max=30, statement_timeout=10s)');
 
   let redisOptions: RedisOptions = {};
@@ -279,20 +288,21 @@ async function main() {
         const existing = sid ? streamableSessions.get(sid) : undefined;
         if (existing) {
           existing.lastActivity = Date.now();
-          await existing.transport.handleRequest(req, res, body);
+          // SC-552: per-request actor (x-user-sub / x-user-name injected by
+          // the AgentGateway on /social). The AsyncLocalStorage wraps the SDK
+          // call, so the tool-call handler it awaits sees the actor; no header
+          // → empty actor → consumers take the exact legacy path.
+          await runWithRequestActor(actorFromHeaders(req.headers), () =>
+            existing.transport.handleRequest(req, res, body)
+          );
           return;
         }
 
-        // No (valid) session: only an `initialize` request may open one.
+        // No (valid) session: only an `initialize` request may open one. A dead
+        // session id gets 404 (not 400) so spec-compliant clients re-initialize
+        // instead of retrying the zombie id forever — see session-errors.ts.
         if (!isInitializeRequest(body)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              jsonrpc: '2.0',
-              error: { code: -32000, message: 'Bad Request: no valid session id' },
-              id: null,
-            })
-          );
+          writeNoSessionResponse(res, sid);
           return;
         }
 
@@ -321,15 +331,16 @@ async function main() {
 
         const sessionServer = mcpServer.createSessionServer();
         await sessionServer.connect(transport);
-        await transport.handleRequest(req, res, body);
+        await runWithRequestActor(actorFromHeaders(req.headers), () =>
+          transport.handleRequest(req, res, body)
+        );
         return;
       }
 
       if (req.method === 'GET' || req.method === 'DELETE') {
         const session = sid ? streamableSessions.get(sid) : undefined;
         if (!session) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid or missing mcp-session-id' }));
+          writeNoSessionResponse(res, sid);
           return;
         }
         if (req.method === 'DELETE') {
@@ -470,7 +481,9 @@ async function main() {
         return;
       }
 
-      await s.transport.handlePostMessage(req, res);
+      await runWithRequestActor(actorFromHeaders(req.headers), () =>
+        s.transport.handlePostMessage(req, res)
+      );
       return;
     }
 

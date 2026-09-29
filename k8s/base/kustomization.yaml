@@ -2,5 +2,36 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - manifest.yaml
+  # Per-account connector workloads, rendered from social-accounts.json by
+  # scripts/render-connectors.py (CI fails if stale: --check).
+  - generated/connectors.yaml
   - whatsapp-synapse-bridge.yaml
   - networkpolicy.yaml
+  # SC-1197 P3 (SC-1226): API de emparejamientos por sub, inerte (replicas 0, flag off).
+  - social-pairing.yaml
+  - networkpolicy-social-pairing.yaml
+
+# SC-1144 fase 2: la tabla de vinculos sub->cuentas vive en
+# social-identity-bindings.yaml (el fichero checked-in es el trace GitOps: cada
+# cambio de vinculo es un git diff). El ConfigMap se renderiza desde ese fichero
+# con nombre ESTATICO a proposito (disableNameSuffixHash): el codigo de
+# mcp-server/src/domain/identity-bindings.ts relee el fichero montado cuando
+# cambia (stat mtime+size), asi que editar un vinculo aplica sin reiniciar el
+# pod. Hashearlo forzaria rolls inutilmente — la postura es la misma que la del
+# shim de workspace en k8s-agentgateway-pocharlies.
+configMapGenerator:
+  - name: social-identity-bindings
+    files:
+      - social-identity-bindings.yaml
+  # Registro de cuentas del MCP (mcp-server/src/domain/account-registry.ts):
+  # una entrada por instancia de conector. Mismo criterio de nombre estatico:
+  # el codigo relee el fichero montado al cambiar (stat mtime+size).
+  # Se monta la PROYECCION de runtime (generated/social-accounts.json = el
+  # registro sin los bloques `deploy`, que solo consume el renderizador), con la
+  # misma clave de fichero que antes.
+  - name: social-accounts
+    files:
+      - social-accounts.json=generated/social-accounts.json
+
+generatorOptions:
+  disableNameSuffixHash: true

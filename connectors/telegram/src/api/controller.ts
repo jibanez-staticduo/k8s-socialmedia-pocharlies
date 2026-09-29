@@ -633,8 +633,13 @@ export function createRouter(client: TelegramClientWrapper, sharedSecret: string
 
   /**
    * GET /messages/reactors/:chatId/:msgId - Per-reactor identity for a message.
-   * Returns `[{emoji, userId, displayName, mine}]`. Used by the dashboard's
-   * "who reacted?" tooltip when the user hovers/clicks a reaction badge.
+   * Returns `{total, reactors: [{emoji, userId, displayName, mine}]}`. Used by
+   * the dashboard's "who reacted?" tooltip when the user hovers/clicks a
+   * reaction badge.
+   *
+   * `total` is Telegram's own count for the whole message and is authoritative
+   * even when `reactors` is shorter: the list is paged at 100 per Telegram
+   * call and `limit` (default 100) bounds how many pages we walk.
    */
   router.get('/messages/reactors/:chatId/:msgId', (req: Request, res: Response): void => {
     void (async () => {
@@ -645,8 +650,8 @@ export function createRouter(client: TelegramClientWrapper, sharedSecret: string
           res.status(400).json({ error: 'Bad msgId' });
           return;
         }
-        const reactors = await client.getReactionUsers(req.params.chatId, msgId, limit);
-        res.json({ reactors: reactors || [] });
+        const result = await client.getReactionUsers(req.params.chatId, msgId, limit);
+        res.json({ reactors: result?.reactors || [], total: result?.total || 0 });
       } catch (e) {
         res.status(500).json({ error: String(e) });
       }
@@ -687,14 +692,21 @@ export function createRouter(client: TelegramClientWrapper, sharedSecret: string
           res.status(503).json({ error: 'Not connected to Telegram' });
           return;
         }
-        const { chatId, messageId, data, timeoutMs, fireAndForget } = req.body as {
+        const { chatId, messageId, data, dataB64, timeoutMs, fireAndForget } = req.body as {
           chatId?: string;
           messageId?: number | string;
           data?: string;
+          dataB64?: string;
           timeoutMs?: number | string;
           fireAndForget?: boolean;
         };
-        if (!chatId || messageId === undefined || messageId === null || data === undefined) {
+        // dataB64 alone is enough: binary callback_data has no text form.
+        if (
+          !chatId ||
+          messageId === undefined ||
+          messageId === null ||
+          (data === undefined && dataB64 === undefined)
+        ) {
           res.status(400).json({ error: 'Missing chatId, messageId or data' });
           return;
         }
@@ -711,8 +723,9 @@ export function createRouter(client: TelegramClientWrapper, sharedSecret: string
           res.status(400).json({ error: 'timeoutMs must be a positive integer' });
           return;
         }
-        const answer = await client.clickCallbackButton(chatId, msgId, String(data), {
+        const answer = await client.clickCallbackButton(chatId, msgId, String(data ?? ''), {
           ...(timeout ? { timeoutMs: timeout } : {}),
+          ...(dataB64 ? { dataB64: String(dataB64) } : {}),
           fireAndForget: fireAndForget === true,
         });
         res.json({ clicked: true, answer });
