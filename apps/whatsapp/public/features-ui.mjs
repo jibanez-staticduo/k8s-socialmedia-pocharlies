@@ -214,12 +214,17 @@ export function newIncomingMessageIds(previousIds = [], messages = []) {
   return array(messages).filter(message => message?.fromMe !== true && text(message?.id) && !previous.has(text(message.id))).map(message => text(message.id));
 }
 
+function notificationTimestamp(value) {
+  const date = new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value || '');
+  return date.getTime();
+}
+
 export function shouldNotifyChatUpdate(previous, next, { hidden = false, permission = 'default', muted = false } = {}) {
   if (!previous || !next || !hidden || permission !== 'granted' || muted) return false;
-  const previousDate = new Date(typeof previous.timestamp === 'number' && previous.timestamp < 1e12 ? previous.timestamp * 1000 : previous.timestamp || '');
-  const nextDateValue = new Date(typeof next.timestamp === 'number' && next.timestamp < 1e12 ? next.timestamp * 1000 : next.timestamp || '');
-  const newer = !Number.isNaN(previousDate.getTime()) && !Number.isNaN(nextDateValue.getTime())
-    ? nextDateValue > previousDate
+  const previousTime = notificationTimestamp(previous.timestamp);
+  const nextTime = notificationTimestamp(next.timestamp);
+  const newer = Number.isFinite(previousTime) && Number.isFinite(nextTime)
+    ? nextTime > previousTime
     : text(previous.timestamp) !== text(next.timestamp);
   return newer && Number(next.unread) > Number(previous.unread);
 }
@@ -451,6 +456,7 @@ export function installFeatureUI({
     generation: 0,
     lastFocus: null,
     chatListBaseline: new Map(),
+    notificationSnapshots: new Map(),
     notificationPermission: windowRef?.Notification?.permission || 'default',
     modal: null,
     presenceTimer: null,
@@ -1945,6 +1951,16 @@ export function installFeatureUI({
 
   function chatListChanged(chats) {
     const account = runtime.account;
+    const firstSnapshot = !runtime.notificationSnapshots.has(account);
+    if (firstSnapshot) runtime.notificationSnapshots.set(account, Date.now());
+    let newestKnownTime = Number.NEGATIVE_INFINITY;
+    for (const [key, value] of runtime.chatListBaseline) {
+      if (!key.startsWith(`${account}:`)) continue;
+      const time = notificationTimestamp(value.timestamp);
+      if (Number.isFinite(time) && time > newestKnownTime) newestKnownTime = time;
+    }
+    const freshnessFloor = Number.isFinite(newestKnownTime)
+      ? newestKnownTime : runtime.notificationSnapshots.get(account) - 30_000;
     const current = new Map(array(chats).map(chat => [text(chat?.id), {
       timestamp: chat?.timestamp || '',
       unread: Number(chat?.unread) || 0,
@@ -1953,7 +1969,6 @@ export function installFeatureUI({
       muted: chatIsMuted(chat, prefs()),
       isGroup: chat?.isGroup === true || text(chat?.id).endsWith('@g.us'),
     }]));
-    const firstSnapshot = ![...runtime.chatListBaseline.keys()].some(key => key.startsWith(`${account}:`));
     for (const [chatId, next] of current) {
       const key = `${account}:${chatId}`;
       const previous = runtime.chatListBaseline.get(key);
@@ -1962,7 +1977,10 @@ export function installFeatureUI({
         runtime.selectedChat = array(chats).find(chat => text(chat?.id) === chatId) || runtime.selectedChat;
         if (next.unread > 0) void markVisibleRead();
       }
-      if (firstSnapshot || !shouldNotifyChatUpdate(previous, next, { hidden: documentRef.hidden, permission: runtime.notificationPermission, muted: next.muted })) continue;
+      const newUnreadChat = !previous && !firstSnapshot &&
+        notificationTimestamp(next.timestamp) > freshnessFloor && next.unread > 0 &&
+        documentRef.hidden && runtime.notificationPermission === 'granted' && !next.muted;
+      if (firstSnapshot || (!newUnreadChat && !shouldNotifyChatUpdate(previous, next, { hidden: documentRef.hidden, permission: runtime.notificationPermission, muted: next.muted }))) continue;
       const delivery = notificationSettings?.payloadFor?.({ isGroup: next.isGroup, name: next.name, preview: next.preview });
       if (!delivery) continue;
       try {
@@ -2077,7 +2095,7 @@ export function installFeatureUI({
     runtime.presenceStream?.close(); runtime.presenceStream = null;
     runtime.presenceEventVersion = 0;
     runtime.closeAttachMenu?.();
-    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
+    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); runtime.notificationSnapshots.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
   }
 
   async function markVisibleRead() {

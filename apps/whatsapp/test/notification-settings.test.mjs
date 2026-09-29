@@ -519,6 +519,33 @@ test('the first snapshot never re-notifies synchronized history', () => {
   assert.deepEqual(shell.notifications, [], 'history already on screen must not produce alerts');
 });
 
+test('a genuinely new unread chat notifies, while an older page does not', () => {
+  const shell = installShell();
+  const baseline = chat('known@c.us', 'Conocido', { at: '2026-09-20T10:00:00Z' });
+  shell.featureUI.chatsChanged([baseline]);
+  shell.featureUI.chatsChanged([
+    baseline,
+    chat('older@c.us', 'Histórico', { unread: 2, at: '2026-09-19T10:00:00Z', preview: 'Antes' }),
+  ]);
+  assert.deepEqual(shell.notifications, [], 'pagination must not alert old unread chats');
+  shell.featureUI.chatsChanged([
+    baseline,
+    chat('older@c.us', 'Histórico', { unread: 2, at: '2026-09-19T10:00:00Z', preview: 'Antes' }),
+    chat('new@c.us', 'Nuevo', { unread: 1, at: '2026-09-20T10:01:00Z', preview: 'Hola' }),
+  ]);
+  assert.deepEqual(shell.notifications.map(item => [item.title, item.body]), [['Nuevo', 'Hola']]);
+});
+
+test('an account with an empty first snapshot can notify its first new chat', () => {
+  const shell = installShell();
+  shell.featureUI.chatsChanged([]);
+  assert.deepEqual(shell.notifications, []);
+  shell.featureUI.chatsChanged([chat('first@c.us', 'Primero', {
+    unread: 1, at: new Date().toISOString(), preview: 'Hola',
+  })]);
+  assert.deepEqual(shell.notifications.map(item => item.title), ['Primero']);
+});
+
 test('direct and group notifications follow their own switch, sound and preview', () => {
   const shell = installShell();
   const first = chat('123@c.us', 'Ana');
