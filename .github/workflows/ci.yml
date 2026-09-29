@@ -19,11 +19,10 @@ permissions:
 
 jobs:
   # ADR 0001 decision 5: per-account connectors are rendered from the registry.
-  # runner condicional: arc-k8s solo existe en pocharlies-org; en forks y PRs
-  # externos cae a ubuntu-latest (los scripts son python puro, portables).
+  # Los verificadores de PR usan runners publicos para no depender de ARC.
   connectors-generated:
     if: ${{ !contains(github.event.head_commit.message || '', '[skip ci]') }}
-    runs-on: ${{ github.repository_owner == 'pocharlies-org' && 'arc-k8s' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
