@@ -1,12 +1,12 @@
 /**
- * Novedades (Estados + Canales) read-only viewer.
+ * Novedades (Estados + Canales) viewer and account-scoped actions.
  *
  * Two catalogs (Estados, Canales) share one side panel: a list on the left
  * and a contextual viewer or empty state on the right; below 720px the
  * panel collapses into a single view with a back button. Every read comes
- * from the injected loaders (the /api/novedades proxy), so this module
- * never writes anything back: opening a status never sends a read receipt
- * and there are no publish placeholders while the mutation API is absent.
+ * from the injected loaders (the /api/novedades proxy). Opening a status
+ * never sends a read receipt; publishing and channel subscriptions require
+ * an explicit confirmation through their dedicated API routes.
  *
  * The data contract is the proxied DTO as defined in lib/novedades-proxy.mjs:
  * authors carry {id, name, own, count, unseen, latestTimestamp}, status and
@@ -122,7 +122,7 @@ export function groupAuthors(authors) {
   ].filter(section => section.items.length)
 }
 
-/** The channels endpoint has no search parameter: filtering is local. */
+/** Filter already loaded channels locally; provider lookup is a separate action. */
 export function filterChannels(channels, query) {
   const needle = text(query).toLocaleLowerCase()
   const list = (channels || []).filter(Boolean)
@@ -211,6 +211,7 @@ export function normalizeNovedadesChannel(raw, account, baseUrl) {
     latestTimestamp: novedadesDate(raw.latestTimestamp),
     avatarUrl: raw.avatarAvailable === true ? novedadesMediaUrl(raw.avatarUrl, account, baseUrl) : '',
     verification: text(raw.verification),
+    subscribed: raw.subscribed === true,
   }
 }
 
@@ -542,6 +543,8 @@ export function installNovedadesUI({
   loadAuthors = async () => ({ authors: [] }),
   loadStatuses = async () => ({ items: [] }),
   loadChannels = async () => ({ channels: [] }),
+  lookupChannel = null,
+  changeChannelSubscription = null,
   loadPosts = async () => ({ items: [] }),
   loadContacts = async () => ({ contacts: [] }),
   publishStatus = null,
@@ -588,6 +591,10 @@ export function installNovedadesUI({
     channelsCursor: null,
     channelsLoading: false,
     channelQuery: '',
+    lookupChannel: null,
+    lookupRequest: 0,
+    subscriptionPending: false,
+    subscriptionSerial: 0,
     composeRow: null,
     composeButton: null,
     composer: null,
@@ -991,6 +998,20 @@ export function installNovedadesUI({
     if (!state.list || state.tab !== 'channels') return
     const visible = filterChannels(state.channels, state.channelQuery)
     state.list.replaceChildren()
+    if (state.lookupChannel) {
+      const found = node('section', 'novedades-channel-found')
+      found.append(node('strong', '', 'Resultado de WhatsApp'))
+      const open = rowButton(state.lookupChannel.name, state.lookupChannel.description, () => openTimeline(state.lookupChannel), {
+        avatarUrl: state.lookupChannel.avatarUrl, avatarName: state.lookupChannel.name,
+      })
+      open.setAttribute('aria-label', 'Abrir canal encontrado')
+      const action = button('novedades-subscription', state.lookupChannel.subscribed ? 'Dejar de seguir' : 'Seguir canal')
+      action.textContent = state.lookupChannel.subscribed ? 'Dejar de seguir' : 'Seguir canal'
+      action.disabled = state.subscriptionPending || !changeChannelSubscription || !canPublish()
+      action.onclick = () => void changeSubscription()
+      found.append(open, action)
+      state.list.append(found)
+    }
     for (const channel of visible) {
       const detail = [
         channel.subscribers !== null ? `${channel.subscribers} ${channel.subscribers === 1 ? 'seguidor' : 'seguidores'}` : '',
@@ -1003,14 +1024,62 @@ export function installNovedadesUI({
       }))
     }
     if (!visible.length) {
-      emptyPane(state.channelQuery
+      state.list.append(node('p', 'novedades-empty', state.channelQuery
         ? 'Ningún canal cargado coincide con esta búsqueda.'
-        : 'Todavía no sigues ningún canal sincronizado en esta cuenta.')
+        : 'Todavía no sigues ningún canal sincronizado en esta cuenta.'))
     }
     const total = state.channels.length
     setStatus(state.channelQuery && visible.length !== total
       ? `${visible.length} de ${total} ${total === 1 ? 'canal' : 'canales'}`
       : `${total} ${total === 1 ? 'canal' : 'canales'}`)
+  }
+
+  async function lookupCurrentChannel() {
+    if (!lookupChannel || !state.channelQuery) return
+    const token = { generation: state.generation, account: state.account }
+    const query = state.channelQuery
+    const request = ++state.lookupRequest
+    state.lookupChannel = null
+    setStatus('Consultando canal en WhatsApp…')
+    try {
+      const result = await lookupChannel(query)
+      if (!isCurrent(token) || state.tab !== 'channels' || request !== state.lookupRequest || state.channelQuery !== query) return
+      state.lookupChannel = normalizeNovedadesChannel(result?.channel, token.account, baseUrl())
+      renderChannelRows()
+      if (!state.lookupChannel) setStatus('No se encontró el canal.', 'error')
+    } catch {
+      if (isCurrent(token) && request === state.lookupRequest) setStatus('No se pudo consultar el canal.', 'error')
+    }
+  }
+
+  async function changeSubscription() {
+    const channel = state.lookupChannel
+    if (!channel || state.subscriptionPending || !changeChannelSubscription) return
+    const action = channel.subscribed ? 'unfollow' : 'follow'
+    if (!windowRef.confirm(`¿${action === 'follow' ? 'Seguir' : 'Dejar de seguir'} el canal ${channel.name}?`)) return
+    const token = { generation: state.generation, account: state.account }
+    const serial = ++state.subscriptionSerial
+    state.subscriptionPending = true
+    renderChannelRows()
+    try {
+      const result = await changeChannelSubscription(channel.id, action)
+      if (!isCurrent(token) || state.lookupChannel?.id !== channel.id) return
+      if (result?.confirmed !== true || result.account !== token.account || result.channel?.id !== channel.id ||
+          result.channel?.subscribed !== (action === 'follow')) throw new Error('unconfirmed')
+      state.lookupChannel = normalizeNovedadesChannel(result.channel, token.account, baseUrl())
+      setNotice(action === 'follow' ? 'Ahora sigues este canal.' : 'Has dejado de seguir este canal.')
+    } catch {
+      if (isCurrent(token)) state.notice = 'WhatsApp no confirmó el cambio. Consulta el canal antes de repetirlo.'
+    } finally {
+      if (serial === state.subscriptionSerial) state.subscriptionPending = false
+      if (isCurrent(token) && serial === state.subscriptionSerial) {
+        renderChannelRows()
+        if (state.notice.startsWith('WhatsApp no confirmó')) {
+          state.status.textContent = state.notice
+          state.status.dataset.kind = 'error'
+        }
+      }
+    }
   }
 
   async function renderChannelsTab() {
@@ -2082,9 +2151,14 @@ export function installNovedadesUI({
     state.searchInput.setAttribute('aria-label', 'Buscar canales')
     state.searchInput.addEventListener('input', () => {
       state.channelQuery = text(state.searchInput.value)
+      state.lookupRequest += 1
+      state.lookupChannel = null
       renderChannelRows()
     })
-    state.searchRow.append(state.searchInput)
+    const lookup = button('novedades-lookup', 'Consultar en WhatsApp')
+    lookup.textContent = 'Consultar en WhatsApp'
+    lookup.onclick = () => void lookupCurrentChannel()
+    state.searchRow.append(state.searchInput, lookup)
 
     state.composeRow = node('div', 'novedades-compose')
     state.composeButton = button('novedades-compose-button', 'Publicar un estado nuevo')
@@ -2172,6 +2246,10 @@ export function installNovedadesUI({
       state.generation += 1
       state.account = next
       state.channelQuery = ''
+      state.lookupRequest += 1
+      state.lookupChannel = null
+      state.subscriptionSerial += 1
+      state.subscriptionPending = false
       if (state.searchInput) state.searchInput.value = ''
       state.channels = []
       state.channelsCursor = null

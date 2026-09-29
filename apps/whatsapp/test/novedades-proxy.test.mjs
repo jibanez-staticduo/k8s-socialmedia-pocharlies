@@ -79,6 +79,45 @@ test('channel metadata and pagination are projected without raw provider fields'
   await assert.rejects(read('/api/novedades/channels/123%40newsletter/posts', '', envelope({ channel: { id: '999@newsletter' }, items: [] })), { status: 502 });
 });
 
+test('channel lookup forwards only one query and projects a safe account-scoped result', async () => {
+  const query = 'https://whatsapp.com/channel/InviteCode';
+  const request = novedadesRequest('/api/novedades/channels/lookup', params(`account=secondary&query=${encodeURIComponent(query)}`));
+  assert.equal(request.kind, 'lookup');
+  assert.equal(request.endpoint, `/novedades/channels/lookup?query=${encodeURIComponent(query)}`);
+  assert.throws(() => novedadesRequest('/api/novedades/channels/lookup', params('query=abc&other=x')), { status: 400 });
+  assert.throws(() => novedadesRequest('/api/novedades/channels/lookup', params('query=&account=secondary')), { status: 400 });
+
+  const result = await read(
+    '/api/novedades/channels/lookup',
+    `account=secondary&query=${encodeURIComponent(query)}`,
+    envelope({
+      channel: {
+        id: '123@newsletter',
+        name: 'Canal público',
+        description: 'Descripción',
+        role: 'guest',
+        subscribed: false,
+        verification: 'verified',
+        subscribers: 15,
+        createdAt: '2026-09-28T00:00:00.000Z',
+        invite: 'secret-invite',
+        rawMetadata: { mediaKey: 'secret-key' },
+      },
+    })
+  );
+  assert.equal(result.data.channel.id, '123@newsletter');
+  assert.equal(result.data.channel.subscribed, false);
+  assert.equal(JSON.stringify(result).includes('secret'), false);
+
+  await assert.rejects(
+    read('/api/novedades/channels/lookup', `account=secondary&query=${encodeURIComponent(query)}`, envelope({
+      account: 'personal',
+      channel: { id: '123@newsletter', name: 'Private from other account' },
+    })),
+    { status: 502 }
+  );
+});
+
 test('channel avatars use only account-scoped media routes and never provider URLs', async () => {
   const result = await read('/api/novedades/channels', '', envelope({ channels: [{ id: '123@newsletter', avatarAvailable: true, avatarUrl: 'https://private.invalid' }] }));
   const url = new URL(result.data.channels[0].avatarUrl, 'https://app.invalid');

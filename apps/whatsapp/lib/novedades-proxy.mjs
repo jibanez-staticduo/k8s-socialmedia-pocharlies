@@ -29,6 +29,11 @@ export function novedadesRequest(path, params) {
     scope = jid(params.get('author'), authorPattern); target.set('author', scope);
   } else if (path === '/api/novedades/channels') {
     kind = 'channels'; endpoint = '/novedades/channels';
+  } else if (path === '/api/novedades/channels/lookup') {
+    kind = 'lookup'; endpoint = '/novedades/channels/lookup'; allowed.add('query');
+    const query = required(params.get('query'), 'query', 512).trim();
+    if (!query || /[\x00-\x1f]/.test(query)) throw fail(400, 'Invalid channel query');
+    target.set('query', query);
   } else if (/^\/api\/novedades\/channels\/[^/]+\/posts$/.test(path)) {
     kind = 'posts';
     try { scope = jid(decodeURIComponent(path.split('/')[4]), channelPattern); } catch { throw fail(400, 'Invalid channel'); }
@@ -73,7 +78,7 @@ function page(source) {
   return { limit: number(source.limit), hasMore: source.hasMore, nextCursor: source.hasMore ? source.nextCursor : null, overlapPossible: source.overlapPossible === true };
 }
 
-function channel(source, account) {
+export function projectNovedadesChannel(source, account) {
   if (!source || typeof source.id !== 'string' || source.id.length > 256 || !channelPattern.test(source.id)) throw invalid();
   return {
     id: source.id, name: string(source.name, 1024), description: string(source.description, 16384),
@@ -108,6 +113,9 @@ function item(source, request, account) {
 }
 
 function project(source, request, account) {
+  if (request.kind === 'lookup') {
+    return { account, channel: source.channel ? projectNovedadesChannel(source.channel, account) : null };
+  }
   const coverage = source.coverage || {};
   const base = { account, ...page(source), coverage: {
     source: 'local-store', remoteListing: false, backfilled: false, syncedAt: date(coverage.syncedAt),
@@ -122,12 +130,12 @@ function project(source, request, account) {
   }
   if (request.kind === 'channels') {
     if (!Array.isArray(source.channels)) throw invalid();
-    return { ...base, channels: source.channels.map(value => channel(value, account)) };
+    return { ...base, channels: source.channels.map(value => projectNovedadesChannel(value, account)) };
   }
   if (!Array.isArray(source.items)) throw invalid();
   const result = { ...base, items: source.items.map(value => item(value, request, account)), serverTime: date(source.serverTime) };
   if (request.kind === 'posts') {
-    result.channel = source.channel ? channel(source.channel, account) : null;
+    result.channel = source.channel ? projectNovedadesChannel(source.channel, account) : null;
     if (result.channel && result.channel.id !== request.scope) throw invalid();
   }
   return result;

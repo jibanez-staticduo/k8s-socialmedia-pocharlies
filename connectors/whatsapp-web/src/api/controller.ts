@@ -63,6 +63,7 @@ import {
   type NovedadesPorts,
   type NovedadesReader,
 } from '../novedades-reader';
+import { ChannelService, ChannelSubscriptionUncertainError } from '../novedades-channels';
 
 /* --------------------------------------------------------------------------
  * Novedades read routes: local store only, no WhatsApp traffic
@@ -105,6 +106,30 @@ function novedadesWithDeadline<T>(
     }),
     guard,
   ]);
+}
+
+/**
+ * Channel lookup and follow/unfollow run over the live socket: rc13 exposes
+ * newsletterMetadata/Follow/Unfollow only there, so BaileysClient hands out a
+ * narrow newsletter port instead of the socket itself. One service is kept per
+ * client session so two concurrent requests for the same channel cannot both
+ * pass the pre-read and mutate twice; the socket is resolved per call, so a
+ * reconnect is never pinned to a dead handle. When no session is connected the
+ * port is null and the service answers 503, never a TypeError.
+ */
+const novedadesChannelServices = new WeakMap<BaileysClient, ChannelService>();
+
+function novedadesChannelService(client: BaileysClient): ChannelService {
+  const cached = novedadesChannelServices.get(client);
+  if (cached) return cached;
+  const service = new ChannelService(() =>
+    // An old client build without the port has no channel capability at all,
+    // which the service reports as 501; a connected session whose socket is
+    // already gone reports null and becomes 503.
+    typeof client.novedadesChannelSocket === 'function' ? client.novedadesChannelSocket() : {}
+  );
+  novedadesChannelServices.set(client, service);
+  return service;
 }
 
 function novedadesPorts(client: BaileysClient): NovedadesPorts {
@@ -2802,6 +2827,71 @@ export function createRouter(
       }
     })();
   });
+
+  /* Provider channel lookup: resolves exactly one channel by JID or invite
+   * link through newsletterMetadata. rc13 has no global channel directory, so
+   * this never lists or searches — it answers for the one address given, and a
+   * null answer is an honest 404. Read-only: it mutates nothing on WhatsApp. */
+  router.get('/novedades/channels/lookup', auth, (req: AuthenticatedRequest, res: Response) => {
+    void (async () => {
+      try {
+        if (typeof client.isConnected === 'function' && !client.isConnected())
+          throw new NovedadesReaderError(
+            'NOVEDADES_SESSION_DOWN',
+            'This WhatsApp session is not connected, so channels cannot be looked up',
+            503
+          );
+        novedadesSuccess(res, await novedadesChannelService(client).lookup(req.query.query));
+      } catch (error) {
+        novedadesFailure(res, error);
+      }
+    })();
+  });
+
+  /* Follow/unfollow a channel. This is a mutation of the live account, so it
+   * passes the same sending gates as a message send, validates before the
+   * socket, writes at most once, and confirms only through the viewer-role
+   * read-back. An unconfirmed read-back is reported once as outcomeUncertain. */
+  router.post(
+    '/novedades/channels/subscription',
+    auth,
+    (req: AuthenticatedRequest, res: Response) => {
+      void (async () => {
+        try {
+          if (
+            process.env.ENABLE_SENDING !== 'true' ||
+            process.env.EMERGENCY_DISABLE_SENDING === 'true'
+          ) {
+            res.status(403).json({
+              ok: false,
+              error: { code: 'SENDING_DISABLED', message: 'Sending is disabled' },
+            });
+            return;
+          }
+          if (typeof client.isConnected === 'function' && !client.isConnected())
+            throw new NovedadesReaderError(
+              'NOVEDADES_SESSION_DOWN',
+              'This WhatsApp session is not connected, so channel subscriptions cannot change',
+              503
+            );
+          novedadesSuccess(res, await novedadesChannelService(client).subscription(req.body));
+        } catch (error) {
+          if (error instanceof ChannelSubscriptionUncertainError) {
+            res.status(502).json({
+              ok: false,
+              error: {
+                code: 'NOVEDADES_SUBSCRIPTION_UNCONFIRMED',
+                message: error.message,
+              },
+              outcomeUncertain: true,
+            });
+            return;
+          }
+          novedadesFailure(res, error);
+        }
+      })();
+    }
+  );
 
   router.get('/novedades/channels/:jid/posts', auth, (req: AuthenticatedRequest, res: Response) => {
     void (async () => {

@@ -883,6 +883,8 @@ const novedadesReady = import('./novedades-ui.mjs').then(({installNovedadesUI}) 
     loadAuthors: () => read('/api/novedades/status/authors'),
     loadStatuses: (author, {cursor} = {}) => read('/api/novedades/status', {author, cursor}),
     loadChannels: ({cursor} = {}) => read('/api/novedades/channels', {cursor}),
+    lookupChannel: query => read('/api/novedades/channels/lookup', {query}),
+    changeChannelSubscription: (jid, action) => api('/api/novedades/channels/subscription', {account: state.account, jid, action}),
     loadPosts: (channel, {cursor} = {}) => read(`/api/novedades/channels/${encodeURIComponent(channel)}/posts`, {cursor}),
     loadContacts: ({q, cursor} = {}) => read('/api/contacts', {q, cursor, limit: '50'}),
     publishStatus: payload => api('/api/novedades/status', {...payload, account: state.account}, undefined, AbortSignal.timeout(90000)),

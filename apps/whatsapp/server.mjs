@@ -16,7 +16,7 @@ import { mediaRequest } from './lib/media.mjs';
 import { readMediaLibrary } from './lib/media-library.mjs';
 import { readChatDirectory } from './lib/chat-directory.mjs';
 import { readContactDirectory } from './lib/contact-directory.mjs';
-import { readNovedades, novedadesMediaResponse } from './lib/novedades-proxy.mjs';
+import { readNovedades, novedadesMediaResponse, projectNovedadesChannel } from './lib/novedades-proxy.mjs';
 import { Sessions } from './lib/sessions.mjs';
 import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
@@ -1444,6 +1444,36 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         res.writeHead(output.status, output.headers);
         return res.end(output.bytes);
       }
+      if (req.method === 'POST' && path === '/api/novedades/channels/subscription') {
+        const body = await bodyJSON(req);
+        const a = accountParam(body.account);
+        if (typeof body.jid !== 'string' || !/^\d{1,20}@newsletter$/.test(body.jid) ||
+            !['follow', 'unfollow'].includes(body.action)) throw fail(400, 'Invalid channel subscription');
+        if (!sendingEnabled(env)) throw fail(403, 'Sending is disabled');
+        if (!env[a.secretEnv]) throw fail(503, 'Connector credentials unavailable');
+        let result;
+        try {
+          result = await featureConnector(a, '/novedades/channels/subscription', {
+            method: 'POST', body: { jid: body.jid, action: body.action },
+            requireSending: true, timeout: FEATURE_SEND_TIMEOUT_MS,
+          });
+        } catch (error) {
+          if (error.status === 400 || error.status === 403) throw error;
+          const uncertain = featureError(502, 'SUBSCRIPTION_UNCONFIRMED', 'WhatsApp no confirmó el cambio de suscripción');
+          uncertain.outcomeUncertain = true;
+          throw uncertain;
+        }
+        if (result.account !== a.accountId || result.confirmed !== true || result.action !== body.action ||
+            result.channel?.id !== body.jid || result.channel?.subscribed !== (body.action === 'follow')) {
+          const uncertain = featureError(502, 'SUBSCRIPTION_UNCONFIRMED', 'WhatsApp no confirmó el cambio de suscripción');
+          uncertain.outcomeUncertain = true;
+          throw uncertain;
+        }
+        return json(200, {
+          account: a.accountId, confirmed: true, unchanged: result.unchanged === true,
+          channel: projectNovedadesChannel(result.channel, a.accountId),
+        });
+      }
       // Publishing a status is a send to an audience the caller chose. The whole
       // request is validated locally first, then one attempt reaches the connector:
       // a status has no idempotency token, so retrying here could publish it twice.
@@ -2751,7 +2781,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       res.setHeader('content-type', types[extname(file)] || 'application/octet-stream'); res.end(bytes);
     } catch (e) {
       if (res.headersSent) { res.destroy(); return; }
-      json(e.status || 500, { error: e.status ? e.message : 'Internal server error', ...(e.code ? { code: e.code } : {}), ...(e.details ? { details: e.details } : {}) });
+      json(e.status || 500, { error: e.status ? e.message : 'Internal server error', ...(e.code ? { code: e.code } : {}), ...(e.details ? { details: e.details } : {}), ...(e.outcomeUncertain ? { outcomeUncertain: true } : {}) });
     }
   });
   // Start only after the app has initialized successfully; a failed OIDC or

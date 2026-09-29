@@ -142,6 +142,7 @@ import {
   NovedadesReaderError,
   readNovedadesMediaStream,
 } from './novedades-reader';
+import type { ChannelSocketLike } from './novedades-channels';
 import { PreparedEvent, PreparedPoll, StructuredSendError } from './structured-send';
 import {
   appendCompanyToDisplayName,
@@ -4643,6 +4644,27 @@ export class BaileysClient extends EventEmitter {
    */
   get ownJid(): string | null {
     return this.meJid;
+  }
+
+  /**
+   * Narrow provider port for the Novedades channel panel: exactly the three
+   * newsletter calls rc13 exposes (metadata by JID/invite, follow, unfollow),
+   * bound to the live socket, or null while no socket exists. The socket
+   * itself stays private, so a channel caller cannot reach session state,
+   * messaging or media through this port. Methods missing from the installed
+   * provider are left absent rather than stubbed, and the caller answers 501.
+   */
+  novedadesChannelSocket(): ChannelSocketLike | null {
+    const sock = this.sock as unknown as ChannelSocketLike | null;
+    if (!sock) return null;
+    const metadata = typeof sock.newsletterMetadata === 'function' ? sock.newsletterMetadata : null;
+    const follow = typeof sock.newsletterFollow === 'function' ? sock.newsletterFollow : null;
+    const unfollow = typeof sock.newsletterUnfollow === 'function' ? sock.newsletterUnfollow : null;
+    return {
+      newsletterMetadata: metadata ? (type, key) => metadata.call(sock, type, key) : undefined,
+      newsletterFollow: follow ? jid => follow.call(sock, jid) : undefined,
+      newsletterUnfollow: unfollow ? jid => unfollow.call(sock, jid) : undefined,
+    };
   }
 
   /**

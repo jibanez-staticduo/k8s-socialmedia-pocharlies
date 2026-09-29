@@ -21,9 +21,17 @@ const statusItem = (id, hoursAgo) => ({ id, author: '34600111222@c.us', text: `e
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://fixture.local');
   if (url.pathname.startsWith('/api/')) {
-    requests.push({ path: url.pathname, search: url.search });
+    const call = { path: url.pathname, search: url.search, method: request.method };
+    if (request.method === 'POST') call.body = JSON.parse(await new Promise((resolve, reject) => {
+      let raw = '';
+      request.setEncoding('utf8');
+      request.on('data', chunk => { raw += chunk; });
+      request.on('end', () => resolve(raw));
+      request.on('error', reject);
+    }));
+    requests.push(call);
     let data = {};
-    if (url.pathname === '/api/accounts') data = { accounts: [{ id: 'alpha', label: 'Alpha' }], sendingEnabled: false };
+    if (url.pathname === '/api/accounts') data = { accounts: [{ id: 'alpha', label: 'Alpha' }], sendingEnabled: true };
     if (url.pathname === '/api/chats') data = { chats: [], hasMore: false, nextCursor: null };
     if (url.pathname === '/api/novedades/status/authors') data = { account: 'alpha', hasMore: false, nextCursor: null, coverage: {}, authors: [
       { id: '34600111222@c.us', name: 'Ana', own: false, count: 3, total: 3, unseen: 2, latestTimestamp: iso(1) },
@@ -37,6 +45,23 @@ const server = createServer(async (request, response) => {
       { id: '111@newsletter', name: 'Beta', description: null, subscribers: 5, avatarAvailable: false, latestTimestamp: null },
       { id: '222@newsletter', name: 'Gamma', description: null, subscribers: null, avatarAvailable: false, latestTimestamp: null },
     ] };
+    if (url.pathname === '/api/novedades/channels/lookup') data = { account: 'alpha', channel: {
+      id: '333@newsletter', name: 'Canal encontrado', description: 'Desde enlace',
+      role: 'guest', subscribed: false, verification: 'verified', subscribers: 12,
+      createdAt: iso(24), muted: false, avatarAvailable: false, avatarUrl: null,
+    } };
+    if (url.pathname === '/api/novedades/channels/subscription' && request.method === 'POST') {
+      data = {
+        account: 'alpha',
+        action: call.body.action,
+        confirmed: call.body.action === 'follow',
+        channel: {
+          id: call.body.jid, name: 'Canal encontrado',
+          role: call.body.action === 'follow' ? 'subscriber' : 'subscriber',
+          subscribed: true, subscribers: 12, avatarAvailable: false,
+        },
+      };
+    }
     if (url.pathname === '/api/novedades/channels/111%40newsletter/posts') {
       await firstPostGate;
       data = {account:'alpha', hasMore:false, nextCursor:null, coverage:{}, items:[{id:'old-post', kind:'text', text:'Publicación del canal anterior', timestamp:iso(1)}]};
@@ -152,6 +177,25 @@ try {
   await staleResponse;
   await tab.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(await tab.getByText('Publicación del canal anterior').count(), 0, 'late previous channel cannot replace current posts');
+  await tab.getByRole('button', { name: 'Volver a la lista de canales' }).click();
+  await tab.getByLabel('Buscar canales').fill('https://whatsapp.com/channel/InviteCode');
+  await tab.getByRole('button', { name: 'Consultar en WhatsApp' }).click();
+  await tab.getByText('Canal encontrado').waitFor();
+  assert(new URLSearchParams(requests.filter(item => item.path === '/api/novedades/channels/lookup').at(-1).search).get('account') === 'alpha');
+  const openFound = tab.getByRole('button', { name: 'Abrir canal encontrado' });
+  await openFound.click();
+  await tab.getByText('Este canal todavía no tiene publicaciones sincronizadas.').waitFor();
+  await tab.getByRole('button', { name: 'Volver a la lista de canales' }).click();
+  tab.once('dialog', dialog => dialog.accept());
+  await tab.getByRole('button', { name: 'Seguir canal' }).click();
+  await tab.getByRole('button', { name: 'Dejar de seguir' }).waitFor();
+  const follow = requests.filter(item => item.path === '/api/novedades/channels/subscription').at(-1);
+  assert.equal(follow.method, 'POST');
+  assert.deepEqual(follow.body, { account: 'alpha', jid: '333@newsletter', action: 'follow' });
+  tab.once('dialog', dialog => dialog.accept());
+  await tab.getByRole('button', { name: 'Dejar de seguir' }).click();
+  await tab.getByText(/WhatsApp no confirmó el cambio/).waitFor();
+  assert.equal(await tab.getByRole('button', { name: 'Dejar de seguir' }).count(), 1, 'unconfirmed leave never changes the UI state');
   assert(requests.every(item => !new URLSearchParams(item.search).has('q')));
   assert(requests.every(item => item.path === '/api/chats' || !new URLSearchParams(item.search).has('q')));
   await tab.keyboard.press('Escape');
@@ -172,7 +216,7 @@ try {
   await closeButton.click();
   assert.equal(await mobile.locator('.novedades-overlay').count(),0);
   assert.deepEqual(pageErrors, [], 'no page errors');
-  console.log('Novedades UI: author-first pages, cursor pagination, remainingMs TTL and local channel search pass');
+  console.log('Novedades UI: author-first pages, local/external channel lookup, subscription confirmation and local channel search pass');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));
