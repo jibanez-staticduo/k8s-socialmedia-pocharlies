@@ -134,4 +134,12 @@ jobs:
           {"name":"whatsappmcp-whatsapp-open-worker","context":".","dockerfile":"workers/whatsapp-open-worker/Dockerfile"},
           {"name":"whatsappmcp-mcp-server","context":".","dockerfile":"mcp-server/Dockerfile"}
         ]
-    secrets: inherit
+    secrets:
+      # Fork PRs receive no repository secrets. The checker repository is public,
+      # so the scoped workflow token can fetch it; internal runs keep their PAT.
+      FRAMEWORK_REPO_TOKEN: ${{ secrets.FRAMEWORK_REPO_TOKEN || github.token }}
+      HARBOR_USER: ${{ secrets.HARBOR_USER }}
+      HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+      OPENCLAW_TELEGRAM_BOT_TOKEN: ${{ secrets.OPENCLAW_TELEGRAM_BOT_TOKEN || secrets.TELEGRAM_CI_BOT_TOKEN }}
+      OPENCLAW_TELEGRAM_TARGET: ${{ secrets.OPENCLAW_TELEGRAM_TARGET || secrets.TELEGRAM_CI_CHAT_ID }}
+      OPENCLAW_TELEGRAM_THREAD_ID: ${{ secrets.OPENCLAW_TELEGRAM_THREAD_ID || secrets.TELEGRAM_CI_THREAD_ID }}
