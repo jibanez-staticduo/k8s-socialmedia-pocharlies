@@ -173,6 +173,8 @@ export function normalizeNovedadesAuthor(raw) {
     count: Number.isFinite(raw.count) ? raw.count : 0,
     unseen: Number.isFinite(raw.unseen) ? raw.unseen : 0,
     latestTimestamp: novedadesDate(raw.latestTimestamp),
+    latestStatusId: text(raw.latestStatusId),
+    latestReceivedAt: text(raw.latestReceivedAt),
   }
 }
 

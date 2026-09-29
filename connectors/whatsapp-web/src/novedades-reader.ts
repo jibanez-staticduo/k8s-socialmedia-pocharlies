@@ -204,6 +204,16 @@ export interface NovedadesAuthorSummary {
   total: number;
   unseen: number;
   latestTimestamp: string | null;
+  /**
+   * Identity of the newest status behind `latestTimestamp`, plus when that row
+   * first reached the store (microsecond UTC string). Together with
+   * `latestTimestamp` they form a tuple a client can compare as strings: it
+   * grows exactly when a newer status arrived, even when two statuses share a
+   * posting second and the provider ids sort backwards. Null for a store that
+   * predates the columns.
+   */
+  latestStatusId: string | null;
+  latestReceivedAt: string | null;
 }
 
 export interface NovedadesChannelItem {
@@ -775,6 +785,8 @@ export function createNovedadesReader(
         total: row.total,
         unseen: row.unseen,
         latestTimestamp: row.latestPostedAt,
+        latestStatusId: row.latestStatusId ?? null,
+        latestReceivedAt: row.latestReceivedAt ?? null,
       })),
       nextCursor: null,
       hasMore: false,

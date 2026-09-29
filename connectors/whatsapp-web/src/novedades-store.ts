@@ -1611,9 +1611,36 @@ export interface NovedadesStatusAuthorSummary {
   active: number;
   unseen: number;
   latestPostedAt: string | null;
+  /**
+   * Message id of the author's newest status row, and when that row first
+   * reached this store (see `LATEST_STATUS_ORDER`). `null` only when the rollup
+   * has no row at all.
+   */
+  latestStatusId: string | null;
+  latestReceivedAt: string | null;
 }
 
-/** Author rollup for the Novedades list (visible statuses only). */
+/**
+ * Total order that defines an author's "newest" status: posting time first, then
+ * the arrival time at this store, then the message id. Arrival is decisive
+ * because `wa_message_id` is an opaque provider id: two statuses posted in the
+ * same second can arrive with ids that sort backwards, and a tie-break that
+ * stopped at the id would keep pointing at the older one and hide the new post.
+ * `created_at` is never rewritten by the status upsert, so it grows with
+ * arrival, and a backfilled OLDER status cannot move the newest row.
+ */
+const LATEST_STATUS_ORDER = 'posted_at DESC NULLS LAST, created_at DESC, wa_message_id DESC';
+
+/**
+ * Author rollup for the Novedades list (visible statuses only).
+ *
+ * `latest_posted_at` stays `MAX(posted_at)`, so its value is unchanged for
+ * existing clients; the two identity columns describe the very same row that
+ * maximum comes from, never an independent aggregate. `latest_received_at` is
+ * rendered in SQL rather than through `Date`: the driver parses `timestamptz`
+ * into a millisecond `Date`, and collapsing microseconds would put two
+ * same-millisecond arrivals on the same watermark and hide the newer one.
+ */
 export async function listNovedadesStatusAuthors(
   options: { includeExpiredTotals?: boolean } = {}
 ): Promise<NovedadesStatusAuthorSummary[]> {
@@ -1623,7 +1650,12 @@ export async function listNovedadesStatusAuthors(
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE ${activePredicate}) AS active,
             COUNT(*) FILTER (WHERE ${activePredicate} AND seen_at IS NULL) AS unseen,
-            MAX(posted_at) AS latest_posted_at
+            MAX(posted_at) AS latest_posted_at,
+            (array_agg(wa_message_id ORDER BY ${LATEST_STATUS_ORDER}))[1] AS latest_status_id,
+            to_char(
+              (array_agg(created_at ORDER BY ${LATEST_STATUS_ORDER}))[1] AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            ) AS latest_received_at
        FROM whatsapp_novedades_status
       WHERE account = $1 AND NOT is_deleted AND visibility = 'visible'
       GROUP BY author_jid
@@ -1639,6 +1671,14 @@ export async function listNovedadesStatusAuthors(
       latestPostedAt: row.latest_posted_at
         ? new Date(row.latest_posted_at as Date | string).toISOString()
         : null,
+      latestStatusId:
+        typeof row.latest_status_id === 'string' && row.latest_status_id
+          ? row.latest_status_id
+          : null,
+      latestReceivedAt:
+        typeof row.latest_received_at === 'string' && row.latest_received_at
+          ? row.latest_received_at
+          : null,
     }))
     .filter(summary => (options.includeExpiredTotals === true ? true : summary.active > 0));
 }

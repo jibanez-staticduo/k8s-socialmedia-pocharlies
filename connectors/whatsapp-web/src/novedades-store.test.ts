@@ -851,6 +851,57 @@ test('status reads hide expired/unknown/event/seen states behind explicit option
   }
 });
 
+test('author rollup names the newest status and keeps its arrival watermark exact', async () => {
+  const { calls, restore } = stubPool([
+    {
+      rows: [
+        {
+          author_jid: '34600123456@s.whatsapp.net',
+          total: 2,
+          active: 2,
+          unseen: 1,
+          latest_posted_at: new Date('2026-09-28T10:00:00.000Z'),
+          latest_status_id: 'ST-TIE-AAA',
+          latest_received_at: '2026-09-28T10:00:00.000002Z',
+        },
+        { author_jid: '34600000009@s.whatsapp.net', total: 1, active: 0, unseen: 0 },
+      ],
+    },
+  ]);
+  try {
+    const summaries = await listNovedadesStatusAuthors();
+    const sql = calls[0]!.sql;
+    // Posting time, then arrival, then id: one total order drives both new
+    // columns, so the id and the watermark can never describe different rows.
+    assert.equal(
+      (sql.match(/ORDER BY posted_at DESC NULLS LAST, created_at DESC, wa_message_id DESC/g) ?? [])
+        .length,
+      2,
+      'identity and watermark must share a single tie-break order'
+    );
+    assert.match(sql, /\)\[1\] AS latest_status_id/);
+    // Microseconds come from SQL, not from a JS Date, which would collapse them.
+    assert.match(
+      sql,
+      /to_char\([\s\S]*AT TIME ZONE 'UTC',\s*'YYYY-MM-DD"T"HH24:MI:SS\.US"Z"'/
+    );
+    assert.match(sql, /MAX\(posted_at\) AS latest_posted_at/);
+    assert.equal(summaries.length, 1, 'expired-only author stays hidden');
+    assert.deepEqual(summaries[0], {
+      authorJid: '34600123456@s.whatsapp.net',
+      total: 2,
+      active: 2,
+      unseen: 1,
+      latestPostedAt: '2026-09-28T10:00:00.000Z',
+      latestStatusId: 'ST-TIE-AAA',
+      // Passed through verbatim: `...000Z` here would mean the microseconds were lost.
+      latestReceivedAt: '2026-09-28T10:00:00.000002Z',
+    });
+  } finally {
+    restore();
+  }
+});
+
 test('prune only clears expired known-freshness statuses with an explicit now', async () => {
   const now = new Date(1_700_000_000_000);
   const { calls, restore } = stubPool([{ rows: [1, 2], rowCount: 2 }]);

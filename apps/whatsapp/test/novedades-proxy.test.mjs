@@ -133,6 +133,29 @@ test('catalog identities reject arrays instead of coercing them into valid JIDs'
   await assert.rejects(read('/api/novedades/status/authors', '', envelope({ authors: [{ id: ['123@lid'] }] })), { status: 502 });
 });
 
+test('author status identity and its microsecond watermark survive the proxy untouched', async () => {
+  const micro = '2026-09-28T10:00:00.000002Z';
+  const result = await read('/api/novedades/status/authors', '', envelope({ authors: [{
+    id: '12345@lid', name: 'Ana', own: false, count: 2, total: 2, unseen: 1,
+    latestTimestamp: '2026-09-28T10:00:00Z', latestStatusId: 'ST-TIE-AAA', latestReceivedAt: micro,
+    rawPayload: { token: 'secret' },
+  }] }));
+  const [author] = result.data.authors;
+  assert.equal(author.latestStatusId, 'ST-TIE-AAA');
+  assert.equal(author.latestReceivedAt, micro, 'a millisecond Date round-trip would lose the tie');
+  assert.equal(JSON.stringify(result).includes('secret'), false);
+
+  const legacy = await read('/api/novedades/status/authors', '', envelope({ authors: [{
+    id: '12345@lid', count: 1, total: 1, unseen: 1, latestTimestamp: '2026-09-28T10:00:00Z',
+  }] }));
+  assert.equal(legacy.data.authors[0].latestStatusId, null, 'an older connector still serves authors');
+  assert.equal(legacy.data.authors[0].latestReceivedAt, null);
+
+  for (const bad of ['2026-09-28T10:00:00.000002+02:00', '2026-09-28 10:00:00.000002Z', '2026-09-28T10:00:00.002Z', 'yesterday', 1789840800, ['x'], '2026-09-28T10:00:00.0000000Z'])
+    assert.equal((await read('/api/novedades/status/authors', '', envelope({ authors: [{ id: '12345@lid', latestReceivedAt: bad }] }))).data.authors[0].latestReceivedAt, null, `cannot order by ${JSON.stringify(bad)}`);
+  assert.equal((await read('/api/novedades/status/authors', '', envelope({ authors: [{ id: '12345@lid', latestStatusId: ['ST-TIE-AAA'] }] }))).data.authors[0].latestStatusId, null);
+});
+
 test('media validates bytes and forces potentially executable formats to download', async () => {
   const query = 'kind=channel&jid=123%40newsletter&messageId=1';
   const data = { base64: Buffer.from('<svg/>').toString('base64'), size: 6, mimeType: 'image/svg+xml', fileName: 'image.svg' };

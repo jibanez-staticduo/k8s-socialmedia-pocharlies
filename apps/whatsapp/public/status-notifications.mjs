@@ -2,6 +2,19 @@ import { normalizeNovedadesAuthor, readableAuthor } from './novedades-ui.mjs';
 
 const DEFAULT_POLL_MS = 30000;
 
+function newerStatus(current, previous) {
+  if (current.latest !== previous.latest) return current.latest > previous.latest;
+  if (current.latestReceivedAt && previous.latestReceivedAt) {
+    if (current.latestReceivedAt !== previous.latestReceivedAt) {
+      return current.latestReceivedAt > previous.latestReceivedAt;
+    }
+    return Boolean(current.latestStatusId && previous.latestStatusId &&
+      current.latestStatusId > previous.latestStatusId);
+  }
+  return Boolean(current.latestStatusId && previous.latestStatusId &&
+    current.latestStatusId !== previous.latestStatusId);
+}
+
 export function createStatusNotificationMonitor({
   loadAuthors,
   onStatus,
@@ -41,15 +54,19 @@ export function createStatusNotificationMonitor({
         const author = normalizeNovedadesAuthor(raw);
         if (!author || !author.latestTimestamp) continue;
         const previous = next.get(author.id);
-        if (!previous || previous.latest < author.latestTimestamp.getTime()) {
-          next.set(author.id, { latest: author.latestTimestamp.getTime(), unseen: author.unseen, own: author.own, name: readableAuthor(author.id, author.name) });
+        const latest = author.latestTimestamp.getTime();
+        const status = { latest, latestStatusId: author.latestStatusId,
+          latestReceivedAt: author.latestReceivedAt, unseen: author.unseen,
+          own: author.own, name: readableAuthor(author.id, author.name) };
+        if (!previous || newerStatus(status, previous)) {
+          next.set(author.id, status);
         }
       }
       if (baseline && documentRef.hidden && permission() === 'granted') {
         for (const [id, status] of next) {
           if (status.own || status.unseen <= 0) continue;
           const previous = baseline.get(id);
-          if (previous && status.latest <= previous.latest) continue;
+          if (previous && !newerStatus(status, previous)) continue;
           try { onStatus({ account: currentAccount, author: id, name: status.name, latest: status.latest }); }
           catch { /* Notification delivery must not interrupt the baseline. */ }
         }

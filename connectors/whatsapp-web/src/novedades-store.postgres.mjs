@@ -541,6 +541,85 @@ try {
   assert.deepEqual(chA.rawMetadata, { id: CH_A, name: 'Canal A' });
   account('professional');
   assert.equal((await store.listNovedadesChannels()).length, 0, 'channel directory is per account');
+
+  // 10. Author rollup identity: two statuses posted in the same second whose
+  //     provider ids sort backwards must still produce a distinguishable signal.
+  account('personal');
+  const TIE = '34600000004@s.whatsapp.net';
+  const tieTs = Date.now() - 5 * 60_000;
+  const stored = async id =>
+    store.storeNovedadesStatus({
+      key: { id, remoteJid: 'status@broadcast', participant: TIE },
+      message: { conversation: `tie ${id}` },
+      messageTimestampMs: tieTs,
+    });
+  await stored('ST-TIE-BBB');
+  await stored('ST-TIE-AAA');
+  // Arrival order is what decides here; pin it so a coarse clock cannot make
+  // the assertion pass for the wrong reason.
+  await client.query(
+    `UPDATE whatsapp_novedades_status SET created_at = '2026-09-28 10:00:00.000001+00'::timestamptz
+      WHERE account = 'personal' AND author_jid = $1 AND wa_message_id = 'ST-TIE-BBB'`,
+    [TIE]
+  );
+  await client.query(
+    `UPDATE whatsapp_novedades_status SET created_at = '2026-09-28 10:00:00.000002+00'::timestamptz
+      WHERE account = 'personal' AND author_jid = $1 AND wa_message_id = 'ST-TIE-AAA'`,
+    [TIE]
+  );
+  const tupleOf = row => [row.latestPostedAt, row.latestReceivedAt, row.latestStatusId];
+  const authorsOf = async () =>
+    (await store.listNovedadesStatusAuthors()).find(r => r.authorJid === TIE);
+  const tie = await authorsOf();
+  assert.ok(tie, 'same-second author listed');
+  assert.equal(
+    tupleOf(tie).join('|'),
+    `${new Date(tieTs).toISOString()}|2026-09-28T10:00:00.000002Z|ST-TIE-AAA`,
+    'the later arrival wins over a higher-sorting id, with microseconds intact'
+  );
+  assert.equal(tie.total, 2);
+  assert.equal(tie.active, 2);
+  // A client comparing the tuple as strings must see the second post arrive.
+  assert.ok(
+    JSON.stringify([tie.latestPostedAt, '2026-09-28T10:00:00.000001Z', 'ST-TIE-BBB']) <
+      JSON.stringify(tupleOf(tie)),
+    'the tuple strictly grows when the newer id sorts first'
+  );
+
+  // Backfill of an OLDER status: it must not move the identity or its watermark.
+  await store.storeNovedadesStatus({
+    key: { id: 'ST-TIE-BACKFILL', remoteJid: 'status@broadcast', participant: TIE },
+    message: { conversation: 'más antiguo, llega tarde' },
+    messageTimestampMs: tieTs - 2 * HOUR,
+  });
+  await client.query(
+    `UPDATE whatsapp_novedades_status SET created_at = '2026-09-28 10:00:00.000003+00'::timestamptz
+      WHERE account = 'personal' AND author_jid = $1 AND wa_message_id = 'ST-TIE-BACKFILL'`,
+    [TIE]
+  );
+  const afterBackfill = await authorsOf();
+  assert.deepEqual(
+    tupleOf(afterBackfill),
+    tupleOf(tie),
+    'a late-arriving older status is not signalled as new'
+  );
+  assert.equal(afterBackfill.total, 3, 'the older status is still counted');
+
+  // A newer post with an id that sorts lower still moves the identity.
+  await store.storeNovedadesStatus({
+    key: { id: 'AAA-NEWEST', remoteJid: 'status@broadcast', participant: TIE },
+    message: { conversation: 'el más reciente' },
+    messageTimestampMs: tieTs + 60_000,
+  });
+  const newest = await authorsOf();
+  assert.equal(newest.latestStatusId, 'AAA-NEWEST');
+  assert.equal(newest.latestPostedAt, new Date(tieTs + 60_000).toISOString());
+  assert.ok(
+    JSON.stringify(tupleOf(newest)) > JSON.stringify(tupleOf(tie)),
+    'posting time dominates the tuple'
+  );
+  console.log('status author identity tie-break verified (same second, reverse ids, backfill)');
+
   console.log('NOVEDADES POSTGRES HARNESS: all assertions passed');
 } finally {
   pg.Pool.prototype.query = originalQuery;

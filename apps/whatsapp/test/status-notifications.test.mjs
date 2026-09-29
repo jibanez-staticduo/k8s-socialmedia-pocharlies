@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStatusNotificationMonitor } from '../public/status-notifications.mjs';
 
-const author = (id, timestamp, { unseen = 1, own = false, name = '' } = {}) => ({
-  id, latestTimestamp: timestamp, unseen, own, name,
+const author = (id, timestamp, { unseen = 1, own = false, name = '', latestStatusId = '', latestReceivedAt = '' } = {}) => ({
+  id, latestTimestamp: timestamp, latestStatusId, latestReceivedAt, unseen, own, name,
 });
 
 function harness() {
@@ -139,4 +139,19 @@ test('pagehide cancels a hidden-tab check before Safari aborts its request', asy
   assert.equal(reads, 1, 'navigation must not launch another status request');
   monitor.destroy();
   assert.equal(windowHandlers.size, 0);
+});
+
+test('a new unseen status with the same provider timestamp notifies once', async () => {
+  const h = harness();
+  const timestamp = '2026-09-29T10:00:00Z';
+  h.setAuthors([author('111@s.whatsapp.net', timestamp, { latestStatusId: 'Z', latestReceivedAt: '2026-09-29T10:00:01.000001Z' })]);
+  h.monitor.start('personal');
+  await h.flush();
+  h.documentRef.hidden = true;
+  h.setAuthors([author('111@s.whatsapp.net', timestamp, { latestStatusId: 'A', latestReceivedAt: '2026-09-29T10:00:01.000002Z', unseen: 2 })]);
+  await h.monitor.check();
+  await h.monitor.check();
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.delivered[0].author, '111@s.whatsapp.net');
+  h.monitor.destroy();
 });

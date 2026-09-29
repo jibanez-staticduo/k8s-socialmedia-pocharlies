@@ -10,6 +10,15 @@ const string = (value, max = 4096) => typeof value === 'string' ? value.slice(0,
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const boolean = value => typeof value === 'boolean' ? value : null;
 const date = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
+// Status identity watermarks arrive as microsecond UTC strings and are forwarded
+// verbatim: `date()` would rebuild them through a millisecond Date, collapsing
+// the microseconds a client needs to tell two statuses posted in the same second
+// apart when their provider ids sort backwards. Anything but a canonical UTC
+// timestamp (including a pre-watermark connector) projects as null.
+const watermark = value =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value)
+    ? value
+    : null;
 
 function jid(value, pattern) {
   if (typeof value !== 'string' || value.length > 256 || !pattern.test(value)) throw fail(400, 'Invalid Novedades identity');
@@ -125,7 +134,7 @@ function project(source, request, account) {
     if (!Array.isArray(source.authors)) throw invalid();
     return { ...base, authors: source.authors.map(author => {
       if (!author || typeof author.id !== 'string' || author.id.length > 256 || !authorPattern.test(author.id)) throw invalid();
-      return { id: author.id, name: string(author.name, 1024), own: author.own === true, count: number(author.count), total: number(author.total), unseen: number(author.unseen), latestTimestamp: date(author.latestTimestamp) };
+      return { id: author.id, name: string(author.name, 1024), own: author.own === true, count: number(author.count), total: number(author.total), unseen: number(author.unseen), latestTimestamp: date(author.latestTimestamp), latestStatusId: string(author.latestStatusId, 512), latestReceivedAt: watermark(author.latestReceivedAt) };
     }) };
   }
   if (request.kind === 'channels') {

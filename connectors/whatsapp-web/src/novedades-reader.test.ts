@@ -157,25 +157,48 @@ function fakeStore(data: {
   };
   const window = (limit?: number) => (limit === undefined ? 2000 : limit);
 
+  // Mirror of the store's newest-status order: posting time, then arrival at the
+  // store, then message id. The array index stands in for `created_at`, which the
+  // stored row does not carry, and the fake watermark keeps the six fractional
+  // digits the real SQL renders.
+  const idDesc = (
+    a: { row: StoredNovedadesStatus },
+    b: { row: StoredNovedadesStatus }
+  ): number => (a.row.messageId === b.row.messageId ? 0 : a.row.messageId > b.row.messageId ? -1 : 1);
+  const newestStatusFirst = (
+    a: { row: StoredNovedadesStatus; arrived: number },
+    b: { row: StoredNovedadesStatus; arrived: number }
+  ): number => {
+    const [pa, pb] = [a.row.postedAt, b.row.postedAt];
+    if (pa === null || pb === null) return pa === pb ? idDesc(a, b) : pa === null ? 1 : -1;
+    if (pa !== pb) return pa < pb ? 1 : -1;
+    if (a.arrived !== b.arrived) return b.arrived - a.arrived;
+    return idDesc(a, b);
+  };
+  const arrivalWatermark = (postedAt: string | null, arrived: number): string =>
+    `${(postedAt ?? '1970-01-01T00:00:00.000Z').slice(0, -5)}.${String(arrived).padStart(6, '0')}Z`;
+
   const store: NovedadesStoreReads = {
     statusAuthors: async () => {
       calls.push({ read: 'statusAuthors', args: [] });
-      const grouped = new Map<string, StoredNovedadesStatus[]>();
-      for (const row of data.statuses ?? [])
-        grouped.set(row.authorJid, [...(grouped.get(row.authorJid) ?? []), row]);
+      const grouped = new Map<string, Array<{ row: StoredNovedadesStatus; arrived: number }>>();
+      (data.statuses ?? []).forEach((row, arrived) =>
+        grouped.set(row.authorJid, [...(grouped.get(row.authorJid) ?? []), { row, arrived }])
+      );
       return [...grouped.entries()]
-        .map(([authorJid, rows]) => ({
-          authorJid,
-          total: rows.length,
-          active: rows.filter(row => row.active).length,
-          unseen: rows.filter(row => row.active && row.seenAt === null).length,
-          latestPostedAt:
-            rows
-              .map(row => row.postedAt)
-              .filter((value): value is string => typeof value === 'string')
-              .sort()
-              .pop() ?? null,
-        }))
+        .map(([authorJid, entries]) => {
+          const newest = [...entries].sort(newestStatusFirst)[0]!;
+          const rows = entries.map(entry => entry.row);
+          return {
+            authorJid,
+            total: rows.length,
+            active: rows.filter(row => row.active).length,
+            unseen: rows.filter(row => row.active && row.seenAt === null).length,
+            latestPostedAt: newest.row.postedAt,
+            latestStatusId: newest.row.messageId,
+            latestReceivedAt: arrivalWatermark(newest.row.postedAt, newest.arrived),
+          };
+        })
         .filter(summary => summary.active > 0);
     },
     statuses: async options => {
@@ -448,6 +471,47 @@ test('the account is recognized from a device JID including its realm', async ()
   assert.equal(result.hasMore, false);
   assert.equal(result.nextCursor, null);
   assert.equal(result.account, 'personal');
+});
+
+test('two statuses in the same second stay distinguishable when ids arrive reversed', async () => {
+  const before = await readerFor({ statuses: [statusRow(AUTHOR, 'ZZZ-FIRST', T)] }, {}).reader.statusAuthors();
+  const first = before.authors.find(author => author.id === AUTHOR);
+  assert.equal(first?.latestTimestamp, new Date(T).toISOString());
+  assert.equal(first?.latestStatusId, 'ZZZ-FIRST');
+
+  // Same posting second, provider id that sorts BEFORE the one already seen.
+  const after = await readerFor(
+    { statuses: [statusRow(AUTHOR, 'ZZZ-FIRST', T), statusRow(AUTHOR, 'AAA-SECOND', T)] },
+    {}
+  ).reader.statusAuthors();
+  const second = after.authors.find(author => author.id === AUTHOR);
+  assert.equal(second?.latestTimestamp, first?.latestTimestamp, 'the posting second did not move');
+  assert.equal(second?.latestStatusId, 'AAA-SECOND', 'arrival beats a backwards-sorting id');
+  assert.equal(second?.unseen, 2);
+  assert.match(String(first?.latestReceivedAt), /\.\d{6}Z$/, 'watermark keeps microseconds');
+  assert.notEqual(second?.latestReceivedAt, first?.latestReceivedAt);
+
+  // What a client has to compare: the tuple grows when the new post landed.
+  const tuple = (a: typeof first) => JSON.stringify([a?.latestTimestamp, a?.latestReceivedAt, a?.latestStatusId]);
+  assert.ok(tuple(second) > tuple(first), 'the author signals a new status');
+});
+
+test('an injected store without the identity columns reads as null instead of crashing', async () => {
+  const legacy = {
+    statusAuthors: async () => [
+      {
+        authorJid: AUTHOR,
+        total: 1,
+        active: 1,
+        unseen: 1,
+        latestPostedAt: new Date(T).toISOString(),
+      },
+    ],
+  } as unknown as NovedadesStoreReads;
+  const [author] = (await createNovedadesReader({ store: legacy }).statusAuthors()).authors;
+  assert.equal(author?.latestTimestamp, new Date(T).toISOString());
+  assert.equal(author?.latestStatusId, null);
+  assert.equal(author?.latestReceivedAt, null);
 });
 
 test('author summaries declare what the store cannot know', async () => {
