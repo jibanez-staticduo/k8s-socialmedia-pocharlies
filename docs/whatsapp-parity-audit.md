@@ -100,7 +100,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Real-time updates | In validation | Account-scoped message/chat change hints now use authenticated SSE with reconnect resync, bounded bursts and polling fallback. Synthetic app/browser tests pass; live delivery after deploy remains to verify |
 | Communities | Verified | Both accounts list/details live; create/admin use provider fixtures only |
 | Status | Partial | Account/author-scoped catalogue and viewer are available; saved contact names resolve by account. Text/image/video publishing to explicitly selected contacts passes synthetic app, connector and browser tests; real-provider delivery and complete historical coverage remain unverified |
-| Channels | In validation | Account-scoped catalogue and timeline are available. Explicit provider lookup and confirmed follow/unfollow have synthetic proxy, API and browser coverage; live provider acceptance and remote directory discovery remain unverified |
+| Channels | In validation | Account-scoped catalogue and timeline are available. Explicit provider lookup and confirmed follow/unfollow have synthetic proxy, API and browser coverage. A read-only live lookup of an existing personal-account channel returned HTTP 200 with the exact requested identity on 29 Sep; live follow/unfollow and remote directory discovery remain unverified |
 | Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
 | Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, browser Back/Forward between chat and list, reload after an open chat, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
@@ -579,6 +579,12 @@ image viewer. The deployed `whatsapp-app` container's mobile CSS, gesture
 handler, manifest, and HTML match the source hashes; the public manifest and
 Apple touch icon return HTTP 200. These checks do not replace the outstanding
 real-iPhone Home Screen installation and Keycloak return-flow test.
+On 2026-09-29 the same fixture also passed on Playwright WebKit with an iPhone
+13 device profile. Its SSE fixture now returns `text/event-stream`, matching
+the live route instead of relying on Chromium ignoring an invalid JSON stream.
+WebKit emulation confirms layout and navigation in that engine; it cannot
+prove Safari Home Screen installation, real pinch behavior or the Keycloak
+return path on a physical iPhone.
 
 ## Publishing WhatsApp statuses
 

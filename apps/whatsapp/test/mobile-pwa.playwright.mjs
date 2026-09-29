@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 import {extname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const {chromium, devices} = await import(process.env.PLAYWRIGHT_MODULE || '/app/node_modules/playwright/index.mjs');
+const {chromium, webkit, devices} = await import(process.env.PLAYWRIGHT_MODULE || '/app/node_modules/playwright/index.mjs');
 const root = fileURLToPath(new URL('../public/', import.meta.url));
 const types = {'.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2'};
 const server = createServer(async (request, response) => {
@@ -20,7 +20,8 @@ const server = createServer(async (request, response) => {
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 
-const browser = await chromium.launch({headless: true, args: ['--no-sandbox'], ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH ? {executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH} : {})});
+const browserType = process.env.MOBILE_BROWSER === 'webkit' ? webkit : chromium;
+const browser = await browserType.launch({headless: true, ...(browserType === chromium ? {args: ['--no-sandbox']} : {}), ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH ? {executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH} : {})});
 try {
   const context = await browser.newContext(devices['iPhone 13']);
   const page = await context.newPage();
@@ -28,6 +29,7 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => {
     const url = new URL(route.request().url());
+    if (route.request().headers().accept?.includes('text/event-stream')) return route.fulfill({status: 200, contentType: 'text/event-stream', body: ': fixture heartbeat\n\n'});
     if (url.pathname.startsWith('/api/media/')) return route.fulfill({status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==', 'base64')});
     const account = url.searchParams.get('account') || 'personal';
     const data = url.pathname === '/api/accounts'
@@ -174,7 +176,7 @@ try {
   await page.waitForFunction(() => !document.body.classList.contains('chat-open'));
   assert.deepEqual(errors, []);
   await context.close();
-  console.log('PASS mobile PWA: manifest/icons, iPhone touch and history navigation, accounts, historical image viewer, agent, input sizing and overflow');
+  console.log(`PASS mobile PWA (${browserType.name()}): manifest/icons, iPhone touch and history navigation, accounts, historical image viewer, agent, input sizing and overflow`);
 } finally {
   await browser.close();
   server.close();
