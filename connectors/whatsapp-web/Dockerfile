@@ -24,7 +24,7 @@ COPY connectors/whatsapp-web ./connectors/whatsapp-web
 COPY shared ./shared
 
 WORKDIR /app/shared
-RUN pnpm exec tsc --skipLibCheck --noEmit false || true
+RUN pnpm exec tsc --skipLibCheck --noEmit false
 
 WORKDIR /app
 

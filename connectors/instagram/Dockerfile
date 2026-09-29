@@ -28,7 +28,7 @@ COPY shared ./shared
 
 # Build shared package
 WORKDIR /app/shared
-RUN pnpm exec tsc --skipLibCheck --noEmit false || true
+RUN pnpm exec tsc --skipLibCheck --noEmit false
 
 WORKDIR /app
 RUN cd connectors/instagram && pnpm build

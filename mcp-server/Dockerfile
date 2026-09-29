@@ -26,9 +26,9 @@ RUN pnpm install
 COPY mcp-server ./mcp-server
 COPY shared ./shared
 
-# Build shared package (ignore errors for development)
+# Build shared from the packaged sources before starting the server.
 WORKDIR /app/shared
-RUN pnpm exec tsc --skipLibCheck --noEmit false || true
+RUN pnpm exec tsc --skipLibCheck --noEmit false
 
 # Stay in root app directory
 WORKDIR /app
