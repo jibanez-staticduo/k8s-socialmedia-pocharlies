@@ -28,6 +28,29 @@ export function mergeRecentMessages(existing, incoming) {
   return mergeMessages(existing.filter(message => compareMessages(message, oldestRecent) < 0), incoming);
 }
 
+export function visibleOutgoingMessages(remote, outgoing) {
+  const matched = new Set();
+  const hidden = new Set();
+  for (const message of remote) {
+    if (message.fromMe !== true) continue;
+    const id = String(message.waMessageId || message.id);
+    const item = outgoing.find(entry => entry.state !== 'failed' && !hidden.has(entry) && entry.messageId &&
+      (id === String(entry.messageId) || id === `${entry.account}:${entry.messageId}`));
+    if (item) { hidden.add(item); matched.add(id); }
+  }
+  for (const message of remote) {
+    if (message.fromMe !== true) continue;
+    const id = String(message.waMessageId || message.id);
+    if (matched.has(id)) continue;
+    const timestamp = messageTime(message);
+    const item = outgoing.find(entry => entry.state !== 'failed' && !hidden.has(entry) && !entry.messageId &&
+      !entry.file && !entry.fileName && !entry.knownIds?.has(id) &&
+      entry.text === message.text && Math.abs(timestamp - messageTime(entry)) <= 10000);
+    if (item) { hidden.add(item); matched.add(id); }
+  }
+  return outgoing.filter(item => !hidden.has(item));
+}
+
 export function shouldSubmitMessageKey(event, enterToSend, coarsePointer) {
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return false;
   if (event.ctrlKey || event.metaKey) return true;

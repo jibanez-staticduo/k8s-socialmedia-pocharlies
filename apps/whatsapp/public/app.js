@@ -3,8 +3,9 @@ let mergeMessages;
 let mergeRecentMessages;
 let pinnedFirst;
 let shouldSubmitMessageKey;
+let visibleOutgoingMessages;
 const historyReady = import('./chat-history.mjs').then(module => {
-  ({mergeMessages, mergeRecentMessages, pinnedFirst, shouldSubmitMessageKey} = module);
+  ({mergeMessages, mergeRecentMessages, pinnedFirst, shouldSubmitMessageKey, visibleOutgoingMessages} = module);
 });
 const $ = id => document.getElementById(id);
 function safeLocalStorage() { try { return globalThis.localStorage; } catch { return null; } }
@@ -269,6 +270,7 @@ function persistOutbox() {
   const entries = [...state.outgoing.values()].flat().filter(item => now - new Date(item.timestamp).getTime() < OUTBOX_TTL_MS).slice(-20).map(item => ({
     id:item.id, account:item.account, chat:item.chat, text:item.text.slice(0, 20000), timestamp:item.timestamp,
     state:item.state, messageId:item.messageId, replyTo:item.replyTo, sendToken:item.sendToken, retryable:item.text.length <= 20000, fileName:item.file?.name || item.fileName || '', viewOnce:item.viewOnce === true,
+    knownIds:[...(item.knownIds || [])].slice(-100),
   }));
   try { if (entries.length) sessionStorage.setItem(OUTBOX_STORAGE_KEY, JSON.stringify({scope:outboxScope, entries})); else sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {}
 }
@@ -280,7 +282,8 @@ function restoreOutbox(scope) {
     for (const entry of (saved?.entries || []).slice(-20)) {
       const age = Date.now() - new Date(entry?.timestamp).getTime();
       if (!entry || typeof entry.account !== 'string' || !entry.account || entry.account.length > 128 || typeof entry.chat !== 'string' || !entry.chat || entry.chat.length > 1024 || typeof entry.id !== 'string' || typeof entry.text !== 'string' || entry.text.length > 20000 || !Number.isFinite(age) || age < 0 || age > OUTBOX_TTL_MS) continue;
-      const item = {...entry, sendToken:entry.retryable !== false && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.sendToken || '') ? entry.sendToken : null, file:null, knownIds:new Set(), state:entry.state === 'confirmed' ? 'confirmed' : 'failed'};
+      const item = {...entry, sendToken:entry.retryable !== false && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.sendToken || '') ? entry.sendToken : null, file:null,
+        knownIds:new Set(Array.isArray(entry.knownIds) ? entry.knownIds.filter(id => typeof id === 'string').slice(-100) : []), state:entry.state === 'confirmed' ? 'confirmed' : 'failed'};
       const key = outgoingKey(item.account, item.chat);
       state.outgoing.set(key, [...outgoingFor(item.account, item.chat), item]);
     }
@@ -335,7 +338,7 @@ function renderMessages() {
   const oldTop = pane.scrollTop;
   const first = !state.signature;
   const remote = state.messages;
-  const pending = outgoingFor(state.account, state.chat);
+  const pending = visibleOutgoingMessages(remote, outgoingFor(state.account, state.chat));
   const visible = remote.concat(pending.map(item => ({id: item.id, text: item.text || item.file?.name || item.fileName || '', fromMe: true, timestamp: item.timestamp, replyToMessageId: item.replyTo || null})));
   const signature = JSON.stringify([visible, pending.map(item => [item.id, item.state])]);
   if (signature === state.signature) return;
@@ -389,6 +392,7 @@ function renderMessages() {
         retry.onclick = () => {
           if (item.state !== 'failed') return;
           item.ctx = context();
+          item.knownIds = new Set(state.messages.map(message => String(message.waMessageId || message.id)));
           item.state = 'sending';
           persistOutbox();
           state.signature = '';
@@ -683,7 +687,8 @@ $('composer').onsubmit = event => {
     text: plan.text || plan.caption || '', caption: plan.caption || '', file: plan.file || null,
     viewOnce: plan.file ? viewOnceByFile.get(plan.file) === true : false,
     quality: plan.file ? attachmentTools.readUploadQuality(safeLocalStorage(), ctx.account, plan.file) : 'source',
-    replyTo: plan.replyTo || '', sendToken: crypto.randomUUID(), timestamp: new Date().toISOString(), state: 'sending', messageId: null}));
+    replyTo: plan.replyTo || '', sendToken: crypto.randomUUID(), timestamp: new Date().toISOString(), state: 'sending', messageId: null,
+    knownIds: new Set(state.messages.map(message => String(message.waMessageId || message.id)))}));
   const key = outgoingKey(ctx.account, ctx.chat);
   state.outgoing.set(key, [...outgoingFor(ctx.account, ctx.chat), ...items]);
   persistOutbox();
