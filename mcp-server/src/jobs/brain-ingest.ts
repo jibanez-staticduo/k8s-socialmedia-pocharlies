@@ -27,8 +27,7 @@ if (!DATABASE_URL) {
     'DATABASE_URL is unset: refusing to start the brain-ingest job without an explicit database connection'
   );
 }
-const BRAIN_URL =
-  process.env.BRAIN_URL || '';
+const BRAIN_URL = process.env.BRAIN_URL || '';
 const BRAIN_API_KEY = process.env.BRAIN_API_KEY || '';
 const BATCH = parseInt(process.env.BRAIN_INGEST_BATCH || '500', 10);
 const MAX_ROWS = parseInt(process.env.BRAIN_INGEST_MAX_ROWS || '0', 10);

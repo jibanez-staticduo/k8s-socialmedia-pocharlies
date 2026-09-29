@@ -22,10 +22,19 @@ import {
 } from '../application/unread-digest.service';
 import { DraftService } from '../application/draft.service';
 import { DatabaseRepository } from '../infrastructure/database/repository';
-import { actorRequestHeaders, generateHMACSignature, getRequestActor } from '@mcp-socialmedia/shared';
-import { accountList, accountKey, normalizeAccount, stripAccount, type Account } from '../domain/account';
+import {
+  actorRequestHeaders,
+  generateHMACSignature,
+  getRequestActor,
+} from '@mcp-socialmedia/shared';
+import { accountKey, normalizeAccount, stripAccount, type Account } from '../domain/account';
 import { identityBindingEnabled, resolveBoundAccount } from '../domain/identity-bindings';
-import { findAccount, socialAccountId, type AccountChannel, type SocialAccount } from '../domain/account-registry';
+import {
+  findAccount,
+  socialAccountId,
+  type AccountChannel,
+  type SocialAccount,
+} from '../domain/account-registry';
 import { ConversationResolver } from '../infrastructure/database/social-accounts';
 import { createHash, createHmac } from 'crypto';
 import { t } from '../infrastructure/i18n/i18n';
@@ -363,21 +372,33 @@ export class MCPServer {
   private waUrl(account?: string): string {
     const entry = this.registryAccount('whatsapp', account);
     const url = entry.connectorUrl || this.waUrls[entry.accountId];
-    if (!url) throw this.canonicalError('unsupported_capability', `WhatsApp account '${entry.accountId}' is not configured`);
+    if (!url)
+      throw this.canonicalError(
+        'unsupported_capability',
+        `WhatsApp account '${entry.accountId}' is not configured`
+      );
     return url;
   }
 
   private tgUrl(account?: string): string {
     const entry = this.registryAccount('telegram', account);
     const url = entry.connectorUrl || this.tgUrls[entry.accountId];
-    if (!url) throw this.canonicalError('unsupported_capability', `Telegram account '${entry.accountId}' is not configured`);
+    if (!url)
+      throw this.canonicalError(
+        'unsupported_capability',
+        `Telegram account '${entry.accountId}' is not configured`
+      );
     return url;
   }
 
   private tgBridgeUrl(account?: string): string {
     const entry = this.registryAccount('telegram', account);
     const url = entry.bridgeUrl || this.tgBridgeUrls[entry.accountId];
-    if (!url) throw this.canonicalError('unsupported_capability', `Telegram bridge account '${entry.accountId}' is not configured`);
+    if (!url)
+      throw this.canonicalError(
+        'unsupported_capability',
+        `Telegram bridge account '${entry.accountId}' is not configured`
+      );
     return url;
   }
 
@@ -3037,7 +3058,7 @@ export class MCPServer {
     // keep the inbound gate untouched.
     const conversationId = isGroupJid(providerChatId)
       ? providerChatId
-        : requireAccount('whatsapp', account).requireInboundBeforeSend
+      : requireAccount('whatsapp', account).requireInboundBeforeSend
         ? await this.requireProfessionalInboundChat(
             providerChatId,
             {

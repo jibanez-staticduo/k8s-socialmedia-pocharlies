@@ -112,9 +112,10 @@ export async function runMigrations(
       const sql = readFileSync(join(dir, file), 'utf8');
       const checksum = createHash('sha256').update(sql).digest('hex');
       if (done.has(file)) {
-        const existing = await client.query(`SELECT checksum FROM ${LEDGER_TABLE} WHERE version = $1`, [
-          file,
-        ]);
+        const existing = await client.query(
+          `SELECT checksum FROM ${LEDGER_TABLE} WHERE version = $1`,
+          [file]
+        );
         if (existing.rows[0]?.checksum !== checksum)
           throw new Error(`Migration checksum changed: ${file}`);
         continue;
@@ -136,8 +137,10 @@ export async function runMigrations(
           // a ledgerless replay, drop its downstream 010 trigger temporarily:
           // PostgreSQL treats the trigger's WHEN reference as a dependency of
           // message_type's type alteration. 010 runs later and restores it.
-          if (file === '009_messages_message_type_text.sql' &&
-              (await tableExists(client, 'messages'))) {
+          if (
+            file === '009_messages_message_type_text.sql' &&
+            (await tableExists(client, 'messages'))
+          ) {
             await client.query(
               'DROP TRIGGER IF EXISTS messages_realtime_update_hint ON public.messages'
             );
@@ -169,16 +172,19 @@ if (require.main === module) {
     process.exitCode = 1;
   } else {
     const client = new Client({ connectionString: databaseUrl });
-  (async () => {
-    try {
-      await client.connect();
-      await runMigrations(client);
-    } catch (error) {
-      console.error('Migration failed:', error instanceof Error ? error.message : 'unknown error');
-      process.exitCode = 1;
-    } finally {
-      await client.end();
-    }
-  })();
+    (async () => {
+      try {
+        await client.connect();
+        await runMigrations(client);
+      } catch (error) {
+        console.error(
+          'Migration failed:',
+          error instanceof Error ? error.message : 'unknown error'
+        );
+        process.exitCode = 1;
+      } finally {
+        await client.end();
+      }
+    })();
   }
 }

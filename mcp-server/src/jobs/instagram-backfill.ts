@@ -94,7 +94,9 @@ function configFromEnv(): BackfillConfig {
   const registered = requireAccount('instagram', process.env.INSTAGRAM_BACKFILL_ACCOUNT);
   return {
     connectorUrl: (
-      registered.connectorUrl || process.env.INSTAGRAM_CONNECTOR_URL || 'http://instagram-connector:3003'
+      registered.connectorUrl ||
+      process.env.INSTAGRAM_CONNECTOR_URL ||
+      'http://instagram-connector:3003'
     ).replace(/\/+$/, ''),
     // No hardcoded DB target; the job must be pointed at the intended database.
     databaseUrl: requireDatabaseUrl(),

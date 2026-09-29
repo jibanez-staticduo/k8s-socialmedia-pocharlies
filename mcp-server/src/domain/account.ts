@@ -43,8 +43,7 @@ export function normalizeAccount(value: unknown, channel?: AccountChannel): Acco
     throw new AccountRegistryError(`Unknown or disabled account: ${String(value)}`);
   }
   if (channel) {
-    if (getAccounts(channel).some(a => a.accountId === value))
-      return value;
+    if (getAccounts(channel).some(a => a.accountId === value)) return value;
     throw new AccountRegistryError(`Unknown or disabled ${channel} account: ${value}`);
   }
   if (activeNamespaces().includes(value)) return value;
