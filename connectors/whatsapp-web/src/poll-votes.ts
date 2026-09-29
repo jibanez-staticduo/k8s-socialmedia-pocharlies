@@ -188,8 +188,8 @@ export function buildPollVoteContent(input: PollVoteBuildInput): WAMessageConten
     throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Poll creation message id is required');
   if (!input.meJid)
     throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Account JID is required to sign a vote');
-  if (!Array.isArray(input.optionNames) || input.optionNames.length === 0)
-    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'At least one option name is required');
+  if (!Array.isArray(input.optionNames))
+    throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Option names must be an array');
   const creatorJid = getKeyAuthor(input.pollCreationKey, input.meJid);
   const sign = Buffer.concat([
     Buffer.from(pollMsgId),
@@ -329,7 +329,7 @@ export function aggregateCapturedPollVotes(
       count: counts[index],
       selectedByMe: selectedByMe[index],
     })),
-    totalVoters: latestByVoter.size,
+    totalVoters: [...latestByVoter.values()].filter(vote => vote.selectedHashes.length > 0).length,
     capturedVotes: votes.length,
   };
 }
@@ -348,8 +348,7 @@ export function validatePollVoteSelection(
       ...extra,
     });
   };
-  if (!Array.isArray(requested) || requested.length === 0)
-    invalid('options must be a non-empty array of exact option names');
+  if (!Array.isArray(requested)) invalid('options must be an array of exact option names');
   const names = requested as unknown[];
   for (const name of names) {
     if (typeof name !== 'string' || name.trim().length === 0)

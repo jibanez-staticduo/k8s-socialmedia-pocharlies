@@ -822,13 +822,16 @@ test('poll results and votes stay within the selected account and poll', async t
     wa_timestamp: '2026-09-23T09:00:00.000Z',
   });
   const upstream = [];
+  let uncertainVote = false;
   const { request } = await fixture(t, { db, fetchImpl: async (url, options) => {
     upstream.push({ url, body: JSON.parse(options.body || '{}') });
     if (url.endsWith('/messages/poll/results')) return Response.json({ ok: true, polls: [{
       pollMessageId: 'poll-1', available: true, availability: 'local_partial', totalVoters: 2,
       options: [{ name: '20.30h', count: 2, selectedByMe: false, voters: ['private-jid'] }],
     }] });
-    if (url.endsWith('/messages/poll/vote')) return Response.json({ ok: true, messageId: 'vote-1' });
+    if (url.endsWith('/messages/poll/vote')) return uncertainVote
+      ? Response.json({ ok: false, error: { code: 'POLL_VOTE_OUTCOME_UNCERTAIN' } }, { status: 409 })
+      : Response.json({ ok: true, sent: true, messageId: null });
     return Response.json({ ok: true });
   } });
   const history = await request('/api/messages?account=personal&chat=personal-chat');
@@ -838,10 +841,22 @@ test('poll results and votes stay within the selected account and poll', async t
   assert.equal(upstream.find(call => call.url.endsWith('/messages/poll/results')).body.conversationId, 'personal-chat');
   assert.deepEqual(upstream.find(call => call.url.endsWith('/messages/poll/results')).body.pollMessageIds, ['poll-1']);
   assert.equal((await request('/api/messages/poll/vote', { account: 'secondary', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'] })).status, 404);
-  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: [] })).status, 400);
-  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'] })).status, 200);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id })).status, 400);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'] })).status, 400);
+  const voteTokens = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333'];
+  const firstVote = await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'], sendToken: voteTokens[0] });
+  assert.equal(firstVote.status, 200);
+  assert.equal((await firstVote.json()).messageId, null);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: ['21.30h'], sendToken: voteTokens[1] })).status, 200);
+  assert.equal((await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: [], sendToken: voteTokens[2] })).status, 200);
   assert.deepEqual(upstream.find(call => call.url.endsWith('/messages/poll/vote')).body,
-    { conversationId: 'personal-chat', pollMessageId: 'poll-1', options: ['20.30h'] });
+    { conversationId: 'personal-chat', pollMessageId: 'poll-1', options: ['20.30h'], sendToken: voteTokens[0] });
+  assert.deepEqual(upstream.filter(call => call.url.endsWith('/messages/poll/vote')).map(call => call.body.options),
+    [['20.30h'], ['21.30h'], []]);
+  uncertainVote = true;
+  const uncertain = await request('/api/messages/poll/vote', { account: 'personal', chat: 'personal-chat', messageId: poll.id, options: [], sendToken: voteTokens[2] });
+  assert.equal(uncertain.status, 409);
+  assert.equal((await uncertain.json()).code, 'POLL_VOTE_OUTCOME_UNCERTAIN');
 });
 
 test('messages endpoint projects reply, edit, reactions and safe content metadata', async t => {

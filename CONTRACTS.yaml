@@ -160,6 +160,22 @@ contracts:
       started to work (before it always answered 500). The path, the body
       fields, the 200 shape and the 404 failureClass are contract: changing any
       is breaking — a new `.v2` entry beside this one.
+  - id: http.whatsapp-connector.poll-vote.v1
+    kind: http-route
+    value: /messages/poll/vote
+    role: provider
+    files:
+      - connectors/whatsapp-web/src/api/controller.ts
+      - apps/whatsapp/server.mjs
+    status: active
+    note: >-
+      POST /api/v1/messages/poll/vote accepts conversationId, pollMessageId,
+      options (the complete selection; [] withdraws the vote), and sendToken.
+      A successful transport returns 200 {ok:true, sent:true, messageId}, where
+      messageId may be null. Reusing the token for the same completed vote
+      returns deduplicated:true without a second relay; a different payload or
+      an uncertain in-flight attempt returns 409. The app's authenticated
+      /api/messages/poll/vote route forwards the scoped account and token.
   - id: http.social-api.pairing-whatsapp.v1
     kind: http-route
     value: /pairing/whatsapp

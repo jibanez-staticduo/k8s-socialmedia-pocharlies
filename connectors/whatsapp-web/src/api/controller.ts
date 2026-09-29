@@ -50,6 +50,7 @@ import {
   claimSendAttempt,
   confirmTextSend,
   reserveMediaSend,
+  reservePollVoteSend,
   reserveTextSend,
   reserveVoiceSend,
   SendAlreadyClaimedError,
@@ -2462,6 +2463,7 @@ export function createRouter(
     })();
   });
 
+  // CONTRACT: http.whatsapp-connector.poll-vote.v1
   router.post('/messages/poll/vote', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {
@@ -2482,11 +2484,65 @@ export function createRouter(
         const pollMessageId = optionalString(body.pollMessageId || body.messageId);
         if (!pollMessageId)
           throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'pollMessageId is required');
-        const messageId = await client.sendPollVote(chatId, {
-          pollMessageId,
-          options: body.options,
+        const token = body.sendToken;
+        if (typeof token !== 'string' || !token.trim() || token.length > 200)
+          throw new StructuredSendError(
+            'INVALID_SEND_TOKEN',
+            'A usable sendToken is required',
+            400
+          );
+        if (!Array.isArray(body.options) || body.options.some(option => typeof option !== 'string'))
+          throw new CapabilityError(
+            'INVALID_CAPABILITY_INPUT',
+            'options must be an array of option names'
+          );
+        const sendToken = token.trim();
+        const input = { pollMessageId, options: body.options as string[] };
+        const reservation = await reservePollVoteSend({
+          token: sendToken,
+          conversationId: chatId,
+          ...input,
         });
-        res.json({ ok: true, messageId: messageId ?? null, sent: true });
+        if (reservation.state === 'conflict')
+          throw new StructuredSendError(
+            'POLL_VOTE_TOKEN_CONFLICT',
+            'sendToken belongs to a different vote',
+            409
+          );
+        if (reservation.state === 'pending')
+          throw new StructuredSendError(
+            'POLL_VOTE_OUTCOME_UNCERTAIN',
+            'Vote delivery is not confirmed',
+            409
+          );
+        if (reservation.state === 'sent') {
+          res.json({ ok: true, messageId: reservation.messageId, sent: true, deduplicated: true });
+          return;
+        }
+        let claimed = false;
+        try {
+          const relayedId = await client.sendPollVote(
+            chatId,
+            input,
+            reservation.messageId,
+            async () => {
+              await claimSendAttempt(sendToken, reservation.messageId);
+              claimed = true;
+            }
+          );
+          if (!claimed || (relayedId && relayedId !== reservation.messageId))
+            throw new Error('Poll vote relay returned a different message ID');
+          await confirmTextSend(sendToken, reservation.messageId);
+          res.json({ ok: true, messageId: relayedId ?? null, sent: true, deduplicated: false });
+        } catch (error) {
+          if (claimed || error instanceof SendAlreadyClaimedError)
+            throw new StructuredSendError(
+              'POLL_VOTE_OUTCOME_UNCERTAIN',
+              'Vote delivery is not confirmed; refresh the poll before another vote',
+              409
+            );
+          throw error;
+        }
       } catch (error) {
         capabilityErrorResponse(res, error);
       }

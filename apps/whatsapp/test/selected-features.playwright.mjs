@@ -457,11 +457,18 @@ async function fulfillApi(route, state) {
   if (pathName === '/api/messages/poll/vote' && request.method() === 'POST') {
     const message = messageFor(state, account, body.chat, body.messageId);
     if (message.type !== 'POLL') return jsonResponse(route, responseError('Not a poll'), 400);
-    for (const option of message.metadata.results.options) {
-      option.selectedByMe = body.options.includes(option.name);
-      if (option.selectedByMe) option.count += 1;
+    if (state.pollVoteFailOnce) {
+      state.pollVoteFailOnce = false;
+      return jsonResponse(route, responseError('Respuesta temporalmente perdida'), 502);
     }
-    message.metadata.results.totalVoters += 1;
+    const previouslyVoted = message.metadata.results.options.some(option => option.selectedByMe);
+    for (const option of message.metadata.results.options) {
+      const next = body.options.includes(option.name);
+      if (next !== option.selectedByMe) option.count += next ? 1 : -1;
+      option.selectedByMe = next;
+    }
+    const voted = message.metadata.results.options.some(option => option.selectedByMe);
+    if (voted !== previouslyVoted) message.metadata.results.totalVoters += voted ? 1 : -1;
     return jsonResponse(route, { account, chat: body.chat, confirmed: true, messageId: 'fixture-vote' });
   }
   if (pathName === '/api/messages/forward' && request.method() === 'POST') {
@@ -1303,7 +1310,7 @@ async function runDesktop(page, state, report) {
     }
   });
 
-  await check('poll options submit one scoped vote and refresh captured results', async () => {
+  await check('poll vote can be changed and removed in the selected account', async () => {
     await openChat(page, 'Equipo Fixture');
     const poll = page.locator('#messages [data-message-id="alpha-group-poll"]');
     await poll.getByRole('button', { name: /21\.30h/ }).click();
@@ -1317,6 +1324,39 @@ async function runDesktop(page, state, report) {
       && entry.body?.account === 'alpha' && entry.body?.chat === 'alpha-group'
       && entry.body?.messageId === 'alpha-group-poll' && entry.body?.options?.[0] === '21.30h'), 'poll vote request missing');
     await poll.getByText('3 votos registrados en esta copia').waitFor();
+    assert.equal(await poll.getByRole('button', { name: /21\.30h/ }).getAttribute('aria-pressed'), 'true');
+    await poll.getByRole('button', { name: /20\.30h/ }).click();
+    await poll.getByRole('button', { name: 'Cambiar voto' }).click();
+    await waitForCondition(() => state.log.some(entry => entry.path === '/api/messages/poll/vote'
+      && entry.body?.options?.length === 1 && entry.body.options[0] === '20.30h'), 'changed poll vote request missing');
+    assert.equal(await poll.getByRole('button', { name: /20\.30h/ }).getAttribute('aria-pressed'), 'true');
+    await poll.getByRole('button', { name: /20\.30h/ }).click();
+    await poll.getByRole('button', { name: 'Retirar voto' }).click();
+    await waitForCondition(() => state.log.some(entry => entry.path === '/api/messages/poll/vote'
+      && Array.isArray(entry.body?.options) && entry.body.options.length === 0), 'removed poll vote request missing');
+    await poll.getByText('2 votos registrados en esta copia').waitFor();
+    const sent = state.log.filter(entry => entry.path === '/api/messages/poll/vote');
+    assert.equal(new Set(sent.map(entry => entry.body.sendToken)).size, 3);
+    assert.ok(sent.every(entry => /^[0-9a-f-]{36}$/i.test(entry.body.sendToken)));
+    await poll.getByRole('button', { name: /21\.30h/ }).click();
+    state.pollVoteFailOnce = true;
+    await poll.getByRole('button', { name: 'Votar' }).click();
+    await poll.getByRole('button', { name: 'Votar' }).click();
+    await waitForCondition(() => state.log.filter(entry => entry.path === '/api/messages/poll/vote').length === 5, 'poll retry request missing');
+    const retries = state.log.filter(entry => entry.path === '/api/messages/poll/vote').slice(-2);
+    assert.equal(retries[0].body.sendToken, retries[1].body.sendToken);
+    const changedElsewhere = messageFor(state, 'alpha', 'alpha-group', 'alpha-group-poll');
+    for (const option of changedElsewhere.metadata.results.options) {
+      const next = option.name === '20.30h';
+      if (next !== option.selectedByMe) option.count += next ? 1 : -1;
+      option.selectedByMe = next;
+    }
+    await page.waitForTimeout(15100);
+    await openChat(page, 'Ana Fixture');
+    await openChat(page, 'Equipo Fixture');
+    const refreshed = page.locator('#messages [data-message-id="alpha-group-poll"]');
+    assert.equal(await refreshed.getByRole('button', { name: /20\.30h/ }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await refreshed.getByRole('button', { name: /21\.30h/ }).getAttribute('aria-pressed'), 'false');
   });
 
   await check('search and info use usable side panels', async () => {

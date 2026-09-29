@@ -5,7 +5,7 @@ import pg from 'pg';
 import express from 'express';
 import { createRouter } from './api/controller';
 import { generateHMACSignature } from './api/auth';
-import { claimSendAttempt, confirmTextSend, reserveMediaSend, reserveTextSend, reserveVoiceSend, reserveEventResponseSend, reservePinSend, SendAlreadyClaimedError } from './send-idempotency';
+import { claimSendAttempt, confirmTextSend, reserveMediaSend, reserveTextSend, reserveVoiceSend, reserveEventResponseSend, reservePinSend, reservePollVoteSend, SendAlreadyClaimedError } from './send-idempotency';
 
 test('reserves one send per account and token across retries and rejects changed payloads', async () => {
   const original = pg.Pool.prototype.query;
@@ -70,6 +70,14 @@ test('reserves one send per account and token across retries and rejects changed
       assert.equal((await reservePinSend({...pin,...change})).state,'conflict');
     }
     assert.equal((await reserveEventResponseSend({...eventResponse,token:pin.token})).state,'conflict');
+    const vote = {token:'poll-vote-1',conversationId:'123@g.us',pollMessageId:'poll-1',options:['Uno']};
+    const firstVote = await reservePollVoteSend(vote);
+    assert.equal(firstVote.state,'claimed');
+    assert.equal((await reservePollVoteSend(vote)).state,'prepared');
+    for (const changed of [{options:['Dos']},{options:[]},{pollMessageId:'poll-2'},{conversationId:'999@g.us'}]) {
+      assert.equal((await reservePollVoteSend({...vote,...changed})).state,'conflict');
+    }
+    assert.equal((await reservePollVoteSend({...vote,token:'poll-vote-2',options:['Dos']})).state,'claimed');
     process.env.CONNECTOR_ACCOUNT='professional';
     const secondAccountPin=await reservePinSend(pin);
     assert.equal(secondAccountPin.state,'claimed');assert.notEqual(secondAccountPin.messageId,firstPin.messageId);

@@ -583,6 +583,12 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     );
     let result = {};
     try { result = await response.json(); } catch { result = {}; }
+    if (path === '/messages/poll/vote' && response.status === 409) {
+      const conflict = result.error?.code === 'POLL_VOTE_TOKEN_CONFLICT';
+      throw featureError(409, result.error?.code || 'POLL_VOTE_OUTCOME_UNCERTAIN', conflict
+        ? 'Este intento de voto ya se usó con otra selección.'
+        : 'No se ha podido confirmar el voto. Actualiza la encuesta antes de votar de nuevo.');
+    }
     if ([404, 405, 501].includes(response.status)) {
       throw featureError(501, 'UNSUPPORTED_UPSTREAM', 'WhatsApp provider does not support this operation', { path, status: response.status });
     }
@@ -2209,13 +2215,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(body.account); const chat = safeChatId(body.chat);
         const target = await actionMessage(a, chat, body);
         if (target.message.message_type !== 'POLL') throw fail(400, 'Message is not a poll');
-        const options = Array.isArray(body.options) ? body.options : [];
-        if (!options.length || options.length > 100 || options.some(option => typeof option !== 'string' || !option.trim() || option.length > 500) || new Set(options).size !== options.length) throw fail(400, 'Invalid poll options');
+        const options = body.options;
+        if (!Array.isArray(options) || options.length > 100 || options.some(option => typeof option !== 'string' || !option.trim() || option.length > 500) || new Set(options).size !== options.length) throw fail(400, 'Invalid poll options');
+        if (body.sendToken === undefined) throw fail(400, 'sendToken is required');
+        const token = sendToken(body);
         const result = await featureConnector(a, '/messages/poll/vote', {
-          body: { conversationId: target.providerChat, pollMessageId: providerMessageId(target.message), options },
-          requireSending: true, requireMessageId: true,
+          body: { conversationId: target.providerChat, pollMessageId: providerMessageId(target.message), options, sendToken: token },
+          requireSending: true, acceptedStatuses: [409],
         });
-        return json(200, { account: a.accountId, chat, confirmed: true, messageId: result.messageId });
+        if (result.ok !== true || result.sent !== true) throw featureError(502, 'UPSTREAM_INVALID', 'Connector did not report a sent poll vote');
+        return json(200, { account: a.accountId, chat, confirmed: true, messageId: result.messageId || null });
       }
       if (req.method === 'POST' && (path === '/api/messages/reply' || path === '/api/messages/react' || path === '/api/messages/forward' || path === '/api/messages/edit' || path === '/api/messages/delete' || path === '/api/message-actions' || path === '/api/messages/action' || path === '/api/messages/actions')) {
         const body = await bodyJSON(req);

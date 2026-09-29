@@ -118,6 +118,18 @@ export async function reservePollSend(input: {
   return reserveSend(input.token, hash);
 }
 
+export async function reservePollVoteSend(input: {
+  token: string;
+  conversationId: string;
+  pollMessageId: string;
+  options: string[];
+}): Promise<SendReservation> {
+  const hash = createHash('sha256')
+    .update(JSON.stringify(['poll-vote', input.conversationId, input.pollMessageId, input.options]))
+    .digest('hex');
+  return reserveSend(input.token, hash);
+}
+
 export async function reserveEventCreationSend(input: {
   token: string;
   conversationId: string;

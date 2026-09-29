@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
+import express from 'express';
 import pg from 'pg';
 import { aesEncryptGCM, decryptPollVote, getKeyAuthor, hmacSign, proto, sha256 } from '@whiskeysockets/baileys';
 import { BaileysClient } from './baileys-client';
+import { generateHMACSignature } from './api/auth';
+import { createRouter } from './api/controller';
 import { CapabilityError } from './whatsapp-capabilities';
 import {
   aggregateCapturedPollVotes,
@@ -101,6 +104,42 @@ function stubPayloadTable(payloads: Record<string, unknown>[]): {
   return { calls, restore: () => ((pg.Pool.prototype as any).query = original) };
 }
 
+function stubPollVoteAttemptTable(): { restore: () => void } {
+  const original = pg.Pool.prototype.query;
+  const rows = new Map<string, {
+    request_hash: string;
+    message_id: string;
+    status: 'prepared' | 'pending' | 'sent';
+    sent_at: Date | null;
+  }>();
+  (pg.Pool.prototype as any).query = async (sql: string, params: string[] = []) => {
+    if (sql.includes('CREATE TABLE')) return { rowCount: 0, rows: [] };
+    const key = `${params[0]}:${params[1]}`;
+    if (sql.includes('INSERT INTO whatsapp_send_attempts')) {
+      if (rows.has(key)) return { rowCount: 0, rows: [] };
+      rows.set(key, { request_hash: params[2], message_id: params[3], status: 'prepared', sent_at: null });
+      return { rowCount: 1, rows: [{ message_id: params[3] }] };
+    }
+    const row = rows.get(key);
+    if (sql.includes('SELECT request_hash'))
+      return { rowCount: row ? 1 : 0, rows: row ? [row] : [] };
+    if (sql.includes('UPDATE whatsapp_send_attempts')) {
+      if (!row || row.message_id !== params[2]) return { rowCount: 0, rows: [] };
+      if (sql.includes("SET status = 'pending'")) {
+        if (row.status !== 'prepared') return { rowCount: 0, rows: [] };
+        row.status = 'pending';
+        return { rowCount: 1, rows: [{ message_id: row.message_id }] };
+      }
+      if (row.status !== 'pending') return { rowCount: 0, rows: [] };
+      row.status = 'sent';
+      row.sent_at = new Date('2026-01-01T00:00:00Z');
+      return { rowCount: 1, rows: [{ sent_at: row.sent_at }] };
+    }
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  return { restore: () => ((pg.Pool.prototype as any).query = original) };
+}
+
 function rawRow(id: string, key: Record<string, unknown>, content: unknown) {
   return {
     wa_message_id: `professional:${id}`,
@@ -187,7 +226,8 @@ test('option validation is exact, deduplicated and honours selectableCount seman
   );
   assert.throws(() => validatePollVoteSelection(DETAILS, ['Uno', 'Uno']), /repeat/);
   assert.throws(() => validatePollVoteSelection(DETAILS, ['  ']), /non-empty strings/);
-  assert.throws(() => validatePollVoteSelection(DETAILS, []), /non-empty array/);
+  assert.deepEqual(validatePollVoteSelection(DETAILS, []), []);
+  assert.throws(() => validatePollVoteSelection(DETAILS, null), /must be an array/);
   const unlimited: PollCreationDetails = { ...DETAILS, selectableCount: 0 };
   assert.deepEqual(
     validatePollVoteSelection(unlimited, ['Uno', 'Dos', 'Tres']),
@@ -310,26 +350,173 @@ test('getPollResults echoes unprefixed ids, caps to local_partial and hides iden
   }
 });
 
-test('sendPollVote relays a decryptable vote without touching sendMessage', async () => {
+test('sendPollVote relays first, replacement and withdrawal votes as complete selections', async () => {
   const payloads = [
     { kind: 'creation', row: rawRow(POLL_ID, { remoteJid: CHAT, id: POLL_ID, fromMe: true }, creationContent(ENC_KEY)) },
   ];
   const { restore } = stubPayloadTable(payloads as any);
   try {
     const { client, relayed } = clientWithFakeSock();
-    const messageId = await client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options: ['Tres'] });
-    assert.equal(typeof messageId, 'string');
-    assert.equal(relayed.length, 1);
-    const sent = relayed[0] as { jid: string; message: any };
-    assert.equal(sent.jid, CHAT);
-    const vote = sent.message.pollUpdateMessage.vote;
-    const decrypted = decryptPollVote(
-      { encPayload: vote.encPayload, encIv: vote.encIv },
-      { pollCreatorJid: ME, pollMsgId: POLL_ID, pollEncKey: ENC_KEY, voterJid: ME }
-    );
-    assert.deepEqual((decrypted.selectedOptions ?? []).map(o => hex(o)), [optionHash('Tres')]);
+    const selections = [['Uno'], ['Dos'], []];
+    for (const options of selections) {
+      assert.equal(await client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options }), 'RELAYED');
+    }
+    assert.equal(relayed.length, 3);
+    for (const [index, sent] of relayed.entries()) {
+      const { jid, message, options } = sent as { jid: string; message: any; options: { messageId: string } };
+      assert.equal(jid, CHAT);
+      assert.equal(message.pollUpdateMessage.pollCreationMessageKey.id, POLL_ID);
+      assert.ok(options.messageId);
+      const vote = message.pollUpdateMessage.vote;
+      const decrypted = decryptPollVote(
+        { encPayload: vote.encPayload, encIv: vote.encIv },
+        { pollCreatorJid: ME, pollMsgId: POLL_ID, pollEncKey: ENC_KEY, voterJid: ME }
+      );
+      assert.deepEqual((decrypted.selectedOptions ?? []).map(o => hex(o)), selections[index].map(optionHash));
+    }
+    assert.equal(new Set(relayed.map(item => (item as any).options.messageId)).size, 3);
   } finally {
     restore();
+  }
+});
+
+test('withdrawal supersedes an earlier vote without leaving a selected option or voter', () => {
+  const rows = [
+    { key: { ...CREATION_KEY, id: 'VOTE_FIRST' }, content: voteUpdateContent(ME, ['Uno'], 10) },
+    { key: { ...CREATION_KEY, id: 'VOTE_WITHDRAW' }, content: voteUpdateContent(ME, [], 20) },
+  ];
+  const decrypted = decryptCapturedPollVotes(rows, { pollMsgId: POLL_ID, pollEncKey: ENC_KEY, meJid: ME });
+  assert.equal(decrypted.undecryptable, 0);
+  assert.deepEqual(aggregateCapturedPollVotes(DETAILS, decrypted.votes).options, [
+    { name: 'Uno', count: 0, selectedByMe: false },
+    { name: 'Dos', count: 0, selectedByMe: false },
+    { name: 'Tres', count: 0, selectedByMe: false },
+  ]);
+  assert.equal(aggregateCapturedPollVotes(DETAILS, decrypted.votes).totalVoters, 0);
+});
+
+test('sendPollVote only reports a vote after transport resolves, even if persistence fails', async () => {
+  const { restore } = stubPayloadTable([
+    { kind: 'creation', row: rawRow(POLL_ID, CREATION_KEY, creationContent(ENC_KEY)) },
+  ] as any);
+  try {
+    const { client, relayed } = clientWithFakeSock();
+    (client as any).persistSentMessage = async () => { throw new Error('storage unavailable'); };
+    (client as any).logger = { warn: () => {} };
+    assert.equal(await client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options: ['Uno'] }), 'RELAYED');
+    assert.equal(relayed.length, 1);
+    (client as any).sock.relayMessage = async () => { throw new Error('transport unavailable'); };
+    await assert.rejects(
+      client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options: ['Dos'] }),
+      /transport unavailable/
+    );
+    assert.equal(relayed.length, 1);
+    (client as any).sock.relayMessage = async () => undefined;
+    assert.equal(await client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options: [] }), undefined);
+  } finally {
+    restore();
+  }
+});
+
+test('sendPollVote claims its stable message ID before relaying', async () => {
+  const { restore } = stubPayloadTable([
+    { kind: 'creation', row: rawRow(POLL_ID, CREATION_KEY, creationContent(ENC_KEY)) },
+  ] as any);
+  try {
+    const { client, relayed } = clientWithFakeSock();
+    const reservedId = '3EB0ABCDEF0123456789';
+    let claimed = false;
+    (client as any).sock.relayMessage = async (_jid: string, _message: unknown, options: { messageId: string }) => {
+      assert.equal(claimed, true);
+      assert.equal(options.messageId, reservedId);
+      relayed.push(options);
+      return reservedId;
+    };
+    assert.equal(
+      await client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options: ['Uno'] }, reservedId, async () => { claimed = true; }),
+      reservedId
+    );
+    assert.equal(relayed.length, 1);
+    await assert.rejects(
+      client.sendPollVote(CHAT, { pollMessageId: POLL_ID, options: ['Dos'] }, reservedId, async () => { throw new Error('claim failed'); }),
+      /claim failed/
+    );
+    assert.equal(relayed.length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test('poll vote API retries a lost response without another relay and accepts a new choice token', async () => {
+  const secret = 'poll-vote-fixture';
+  const calls: unknown[] = [];
+  let transportFails = false;
+  const { restore } = stubPollVoteAttemptTable();
+  const app = express();
+  app.use(express.json());
+  app.use(createRouter({
+    sendPollVote: async (chatId: string, input: unknown, _messageId: string, beforeSend: () => Promise<void>) => {
+      await beforeSend();
+      calls.push({ chatId, input });
+      if (transportFails) throw new Error('transport unavailable');
+      return undefined;
+    },
+  } as any, { getCurrentQR: () => null } as any, secret));
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise<void>(resolve => server.once('listening', resolve));
+  const priorEnabled = process.env.ENABLE_SENDING;
+  const priorEmergency = process.env.EMERGENCY_DISABLE_SENDING;
+  process.env.ENABLE_SENDING = 'true';
+  delete process.env.EMERGENCY_DISABLE_SENDING;
+  try {
+    const body = { conversationId: CHAT, pollMessageId: POLL_ID, options: [], sendToken: 'withdraw-1' };
+    const post = (payload: unknown) => {
+      const timestamp = Math.floor(Date.now() / 1000);
+      return fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/messages/poll/vote`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: {
+          'content-type': 'application/json',
+          'x-connector-timestamp': String(timestamp),
+          'x-connector-signature': generateHMACSignature(payload, timestamp, secret),
+        },
+      });
+    };
+    const accepted = await post(body);
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(await accepted.json(), { ok: true, messageId: null, sent: true, deduplicated: false });
+    assert.deepEqual(calls, [{ chatId: CHAT, input: { pollMessageId: POLL_ID, options: [] } }]);
+    const retried = await post(body);
+    assert.equal(retried.status, 200);
+    const retriedBody = await retried.json() as { ok: boolean; messageId: string; sent: boolean; deduplicated: boolean };
+    assert.equal(retriedBody.ok, true);
+    assert.match(retriedBody.messageId, /^3EB0[A-F0-9]{18}$/);
+    assert.equal(retriedBody.sent, true);
+    assert.equal(retriedBody.deduplicated, true);
+    assert.equal(calls.length, 1);
+    const conflict = await post({ ...body, options: ['Uno'] });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json() as { error: { code: string } }).error.code, 'POLL_VOTE_TOKEN_CONFLICT');
+    assert.equal(calls.length, 1);
+    const changed = await post({ ...body, sendToken: 'choose-2', options: ['Dos'] });
+    assert.equal(changed.status, 200);
+    assert.equal((await changed.json() as { deduplicated: boolean }).deduplicated, false);
+    assert.deepEqual(calls[1], { chatId: CHAT, input: { pollMessageId: POLL_ID, options: ['Dos'] } });
+    assert.equal(calls.length, 2);
+    const noToken = await post({ ...body, sendToken: undefined });
+    assert.equal(noToken.status, 400);
+    transportFails = true;
+    const uncertain = { ...body, sendToken: 'uncertain-3', options: ['Tres'] };
+    assert.equal((await post(uncertain)).status, 409);
+    assert.equal((await post(uncertain)).status, 409);
+    assert.equal(calls.length, 3);
+  } finally {
+    restore();
+    if (priorEnabled === undefined) delete process.env.ENABLE_SENDING;
+    else process.env.ENABLE_SENDING = priorEnabled;
+    if (priorEmergency === undefined) delete process.env.EMERGENCY_DISABLE_SENDING;
+    else process.env.EMERGENCY_DISABLE_SENDING = priorEmergency;
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 });
 

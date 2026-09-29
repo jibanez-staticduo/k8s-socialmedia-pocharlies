@@ -3716,7 +3716,9 @@ export class BaileysClient extends EventEmitter {
    */
   async sendPollVote(
     chatId: string,
-    input: { pollMessageId: string; options: unknown }
+    input: { pollMessageId: string; options: unknown },
+    reservedMessageId?: string,
+    beforeSend?: () => Promise<void>
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
     if (!this.isConnected()) throw new Error('Client not connected');
@@ -3754,11 +3756,19 @@ export class BaileysClient extends EventEmitter {
       meJid: meId,
     });
     const raw = this.toRawJid(chatId);
-    const messageId = generateMessageIDV2(this.sock.user?.id);
+    const messageId = reservedMessageId || generateMessageIDV2(this.sock.user?.id);
     const fullMsg = generateWAMessageFromContent(raw, content, { messageId, userJid: meId });
-    await this.sock.relayMessage(raw, fullMsg.message as proto.IMessage, { messageId });
-    await this.persistSentMessage(fullMsg, raw);
-    return fullMsg.key.id || messageId;
+    await beforeSend?.();
+    const relayedId = await this.sock.relayMessage(raw, fullMsg.message as proto.IMessage, {
+      messageId,
+    });
+    try {
+      await this.persistSentMessage(fullMsg, raw);
+    } catch {
+      // The transport has already accepted the send; a retry could cast a duplicate vote.
+      this.logger.warn('Poll vote relayed; local persistence is pending');
+    }
+    return relayedId || undefined;
   }
 
   /**

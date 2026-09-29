@@ -73,7 +73,7 @@ const liveReady = import('./live-updates.mjs').then(({createLiveUpdates}) => {
     await Promise.all([loadChats({background: true}), hidden ? null : loadMessages(), hidden ? null : pinnedUI?.refresh()]);
   }});
 });
-const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, historyCursor: null, historyInitialized: false, loadingOlder: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
+const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, historyCursor: null, historyInitialized: false, loadingOlder: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollSubmitted: new Map(), pollDirty: new Set(), pollAttempts: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
 historyNotice.id = 'history-notice';
@@ -288,15 +288,23 @@ function restoreOutbox(scope) {
   } catch { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} }
 }
 function pollKey(message) { return `${state.account}:${state.chat}:${message.id}`; }
+function samePollOptions(left, right) {
+  return left.size === right.size && [...left].every(index => right.has(index));
+}
+function recordedPollOptions(message) {
+  const key = pollKey(message);
+  const selected = new Set();
+  for (const [index, name] of (message.metadata?.options || []).entries()) {
+    if (message.metadata?.results?.options?.find(option => option.name === name)?.selectedByMe) selected.add(index);
+  }
+  const submitted = state.pollSubmitted.get(key);
+  if (submitted && !samePollOptions(selected, submitted.selected) && Date.now() < submitted.expiresAt) return submitted.selected;
+  if (submitted) state.pollSubmitted.delete(key);
+  return selected;
+}
 function selectedPollOptions(message) {
   const key = pollKey(message);
-  if (!state.pollSelections.has(key)) {
-    const selected = new Set();
-    for (const [index, name] of (message.metadata?.options || []).entries()) {
-      if (message.metadata?.results?.options?.find(option => option.name === name)?.selectedByMe) selected.add(index);
-    }
-    state.pollSelections.set(key, selected);
-  }
+  if (!state.pollDirty.has(key) || !state.pollSelections.has(key)) state.pollSelections.set(key, new Set(recordedPollOptions(message)));
   return state.pollSelections.get(key);
 }
 function updatePollControls() {
@@ -304,6 +312,7 @@ function updatePollControls() {
     const message = state.messages.find(item => String(item.id) === bubble.dataset.messageId);
     if (!message || message.metadata?.kind !== 'poll' || message.metadata?.results?.available !== true) continue;
     const selected = selectedPollOptions(message);
+    const recorded = recordedPollOptions(message);
     const busy = state.pollBusy.has(pollKey(message));
     for (const option of bubble.querySelectorAll('button.message-poll-option')) {
       const active = selected.has(Number(option.dataset.pollOptionIndex));
@@ -312,7 +321,11 @@ function updatePollControls() {
       option.disabled = busy;
     }
     const submit = bubble.querySelector('.message-poll-submit');
-    if (submit) { submit.disabled = busy || selected.size === 0; submit.textContent = busy ? 'Enviando…' : 'Votar'; }
+    const changed = selected.size !== recorded.size || [...selected].some(index => !recorded.has(index));
+    if (submit) {
+      submit.disabled = busy || !changed;
+      submit.textContent = busy ? 'Enviando…' : !selected.size && recorded.size ? 'Retirar voto' : recorded.size ? 'Cambiar voto' : 'Votar';
+    }
   }
 }
 function renderMessages() {
@@ -411,18 +424,37 @@ $('messages').addEventListener('click', async event => {
       else if (selected.size >= max) { error(`Puedes elegir hasta ${max} opciones.`); return; }
       selected.add(index);
     }
+    if (samePollOptions(selected, recordedPollOptions(message))) state.pollDirty.delete(key);
+    else state.pollDirty.add(key);
     error();
     updatePollControls();
     return;
   }
-  if (!selected.size) return;
   const ctx = context();
+  const recorded = recordedPollOptions(message);
+  if (samePollOptions(selected, recorded)) return;
+  const options = [...selected].map(index => message.metadata.options[index]);
+  const signature = JSON.stringify(options);
+  let attempt = state.pollAttempts.get(key);
+  if (!attempt || attempt.signature !== signature) {
+    attempt = {signature, token: crypto.randomUUID()};
+    state.pollAttempts.set(key, attempt);
+  }
   state.pollBusy.add(key);
   updatePollControls();
   try {
     await api('/api/messages/poll/vote', {account: ctx.account, chat: ctx.chat, messageId: message.id,
-      options: [...selected].map(index => message.metadata.options[index])});
-    state.pollSelections.delete(key);
+      options, sendToken: attempt.token});
+    const submitted = {selected: new Set(selected), expiresAt: Date.now() + 15000};
+    state.pollSubmitted.set(key, submitted);
+    state.pollSelections.set(key, new Set(selected));
+    state.pollDirty.delete(key);
+    state.pollAttempts.delete(key);
+    setTimeout(() => {
+      if (state.pollSubmitted.get(key) !== submitted) return;
+      state.pollSubmitted.delete(key);
+      if (state.account === ctx.account && state.chat === ctx.chat) updatePollControls();
+    }, 15000);
     if (current(ctx)) await loadMessages();
   } catch (err) { if (current(ctx)) error(err.message); }
   finally { state.pollBusy.delete(key); if (current(ctx)) updatePollControls(); }
