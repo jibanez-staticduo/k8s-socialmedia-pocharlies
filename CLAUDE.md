@@ -12,22 +12,88 @@ Servidor MCP multi-plataforma (WhatsApp + Telegram + Instagram) que expone tools
 - El stack docker-compose viejo en sauvage `~/mcp-socialmedia/` está parado a propósito desde 2026-05-22 (migración a k8s). NO arrancarlo.
 - Imágenes en Harbor: `harbor.e-dani.com/homelab/whatsappmcp-*`
 
-## Multi-account (personal / professional)
+## Multi-account (personal / professional / leila)
 
-El MCP enruta cada call a una de dos cuentas:
+El MCP enruta cada call a una de tres cuentas de WhatsApp (y dos de Telegram):
 
 | Account | Telegram | WhatsApp |
 |---|---|---|
 | `personal` (**default**) | `telegram-connector` — sesión `paxanguero` | `whatsapp-connector` — Baileys (número personal) |
 | `professional` | `telegram-connector-professional` — sesión `sauvageadminbot` (skirmshop) | `whatsapp-connector-professional` — Baileys (número de negocio) |
+| `leila` | — (sin conector Telegram; `accountId: 'leila'` + `channel: 'telegram'` = "not configured") | `whatsapp-connector-leila` — Baileys (número de Leila), **desplegada pero SIN emparejar** |
 
-- **Ambas cuentas de WhatsApp son Baileys (WhatsApp Web)** — cada una un Deployment con su número, sesión y PVC propia. NO se usa Cloud API (eliminado: el usuario no quiere pagar a Meta y quiere contestar a mano desde el móvil; Baileys es un dispositivo vinculado).
-- Para indicarle al MCP qué cuenta usar pasa `account: 'personal' \| 'professional'` en la tool call.
+- **Las tres cuentas de WhatsApp son Baileys (WhatsApp Web)** — cada una un Deployment con su número, sesión y PVC propia. NO se usa Cloud API (eliminado: el usuario no quiere pagar a Meta y quiere contestar a mano desde el móvil; Baileys es un dispositivo vinculado).
+- Para indicarle al MCP qué cuenta usar pasa `accountId: 'personal' | 'professional' | 'leila'` en la tool call (el parámetro canónico se llama `accountId`; el `account` interno de los handlers se deriva de él).
 - Default global: `personal`. Si el chat es claramente de skirmshop/business → pasar `professional`.
 - Para agentes/sesiones de Claude/Codex/OpenClaw que NO sean específicamente "hogar"/"familia", la guía es: **siempre `account: 'professional'`** salvo que el chat destino sea familiar/personal.
-- Vincular el número professional: escanear el QR en `https://whatsapp-pro.e-dani.com/qr/page` (LAN).
+- Vincular el número professional: escanear el QR en `https://whatsapp-pro.e-dani.com/qr/page`.
+- Vincular el número de Leila (pendiente del operador — SC-1144 criterio 2): QR **solo por LAN** en `https://whatsapp-leila.lan.e-dani.com/qr/page` (botón de renovar activo vía `ALLOW_WEB_RENEW`, igual que professional). NUNCA exponerla al edge: la página pública del personal (`whatsapp.e-dani.com`) es legado y no se replica.
 
-DB scoping (migración 002): los ids de la cuenta `personal` no llevan prefijo (compat con ~449k filas existentes); los de `professional` van prefijados `professional:`. La columna `account` está indexada para filtros rápidos.
+DB scoping (migración 002): los ids de la cuenta `personal` no llevan prefijo (compat con ~449k filas existentes); los de `professional` van prefijados `professional:` y los de `leila` `leila:`. La columna `account` está indexada para filtros rápidos.
+
+### Payloads duraderos de WhatsApp (fase 3 / PR-1, migración 009)
+
+El conector guarda el WAMessage crudo (key + contenido, BufferJSON, sin miniaturas ni material de claves) en `whatsapp_message_payloads` con los mismos ids namespaced que `messages` (`connectors/whatsapp-web/src/durable-message-store.ts`). Lo usan: citar al responder, `/api/v1/messages/forward` (reenvío real `{ forward }`, 404 `message_unavailable` si no hay original) y el `getMessage` de reintentos de Baileys — memoria primero, luego la copia duradera. Se guarda tráfico vivo y envíos propios; history-sync solo si es más reciente que `DURABLE_PAYLOAD_HISTORY_DAYS` (7 por defecto, 0 = nunca); tope `DURABLE_PAYLOAD_MAX_BYTES` (256 KiB). Sin la tabla (009 sin aplicar) falla en blando: un log y comportamiento en memoria, re-sondea cada 5 min. La pool de emparejamiento (`ingest: false`) nunca la toca. Sin retención todavía.
+
+### Vínculos de identidad por usuario (SC-1144 fase 2, bandera OFF)
+
+Un usuario verificado solo puede tocar las cuentas ligadas a su `sub` de Keycloak. La tabla vive en GitOps: `k8s/base/social-identity-bindings.yaml` (misma forma y misma postura fail-closed que `backends/workspace/identity-bindings.yaml` de k8s-agentgateway-pocharlies), montada en el pod `mcp-sse` como ConfigMap de nombre estático en `/identity/` — el código (`mcp-server/src/domain/identity-bindings.ts`) **relee el fichero cuando cambia (stat mtime+size), así editar un vínculo no reinicia el pod**.
+
+- Bandera `SOCIAL_IDENTITY_BINDING` (default **`off`**; el repo la entrega off en base y en prod). Con OFF: cero lecturas del fichero, enrutado byte-idéntico al de siempre. Volcarla a ON es decisión del operador.
+- Con ON, el gate único es `applyIdentityBinding` en `executeCanonicalTool` (todas las tools con `accountId` pasan por ahí; `social_list_accounts` no lo tiene y no se gatea):
+  - `sub` ligado + `accountId` pedido fuera de su lista → error explícito nombrando principal y cuentas ligadas.
+  - `accountId` omitido → **primera cuenta de su lista** (nunca el default global `personal`).
+  - `sub` sin entrada en la tabla, o llamada sin `x-user-sub` → fail-closed, ninguna cuenta.
+- El vínculo es **por cuenta, sea el canal que sea**: con ON, Instagram (`skirmshop`/`barbelpapis`) queda fail-closed para todo el mundo hasta que se añadan a la tabla.
+- **Riesgo residual declarado**: `x-user-sub` lo estampa el gateway sobrescribiendo al cliente, pero `mcp-sse` es alcanzable por la ruta LAN `mcp-socialmedia.lan.e-dani.com` con el **bearer compartido**, así que quien posea ese token puede forjar la cabecera. Eso lo cierra la **Parte 5 (SC-1146, retirada de la clave compartida)**, no esta historia.
+
+## Almacén de credenciales por usuario (SC-552 + fase 1.5 SC-705)
+
+Decisión CTO 13-09-2026: UN almacén por `sub` del JWT que el AgentGateway verifica en `/social` y reenvía como cabecera `x-user-sub`, con tres adaptadores de canal — no tres almacenes paralelos. Implementación en `shared/src/session-store/` (desde la fase 1.5, 21-09: la consumen DOS runtimes — mcp-server y el conector whatsapp-web —; un solo código que habla con la tabla). Sus specs de regresión corren en el jest de mcp-server (`mcp-server/src/infrastructure/session-store/*.spec.ts`, que compila `shared` antes de testear).
+
+- `credential-store.ts` — tabla `user_channel_credentials` (migración 007, PK `(session_key, channel)`). Persistencia = la DB `whatsappmcp`: sobrevive reinicios del gateway y de los pods. **El payload va CIFRADO en la capa del store** (`put` cifra, `get` descifra; la DB nunca ve texto plano): envelope AES-256-GCM con data-key aleatoria por fila envuelta por la clave maestra `CREDENTIAL_STORE_MASTER_KEY` (base64 de 32 bytes; viaja dentro del item 1Password `whatsapp-mcp` → `envFrom`; formato y justificación del envelope en `payload-crypto.ts`). Fail-closed: sin clave, `put`/`get` lanzan; una fila NO-envelope se rechaza.
+- `request-context.ts` — AsyncLocalStorage alrededor de `transport.handleRequest`/`handlePostMessage` en `sse-server.ts` (por POST); expone `x-user-sub`/`x-user-name` al contexto de la tool call. Sin cabecera → contexto vacío. `actorRequestHeaders()` reenvía el actor en las llamadas HTTP del mcp-server a los conectores (SC-705).
+- `adapters/` — baileys (directorio multi-file auth-state → `{files: nombre→base64}`), mtcute (session string), instagram (token Graph + ids). Cada canal conserva su formato; el store no lo interpreta.
+- `credential-resolver.ts` — `resolveCredential`: (1) cabecera + fila → la fila gana; (2) sin cabecera → ruta legacy exacta, cero lecturas/escrituras; (3) cabecera sin fila → adopt-on-first-use (leer legacy, escribir fila, servir legacy).
+
+**Cableado WhatsApp (fase 1.5, `connectors/whatsapp-web/src/credential-session.ts`)**: un conector por sesión emparejada indexa su sesión por `session_key = <sub>` (o `<sub>:<cuenta>` si un usuario tuviera dos cuentas — convención del tech-lead, el PK ya la soporta). Con `CREDENTIAL_STORE_ENABLED=true` **y** `CREDENTIAL_SESSION_KEY=<sub>`: authDir por sub (`<SESSION_PATH>/by-sub/<key>/baileys-auth`), carga de la fila antes de `connect()` (persistencia tras `rollout restart`, sin QR), write-back OBLIGATORIO de `saveCreds`→`store.put` (debounced, con trailing run) y borrado de la fila en `loggedOut`. Sin `CREDENTIAL_SESSION_KEY` (las cuentas de la casa `personal`/`professional`) o con flag OFF: ruta legacy exacta, cero lecturas/escrituras — criterio de cero regresión.
+
+Despliegue: la migración 007 NO se aplica todavía — el Job PreSync `whatsapp-mcp-migrate` queda fuera del PR 52 (veredicto architect SC-1144: las imágenes pinneadas son pre-almacén y un PreSync que falla bloquea el sync de toda la app) y se re-añade en el PR2 junto al re-pin de imagen; `migrate.ts` ya lleva ledger `_migrations` (salta lo aplicado, baseline de esquemas previos al ledger, transacción por fichero). `CREDENTIAL_STORE_ENABLED=false` en este PR; el `true` SOLO en el overlay `prod` llega con el PR2 (`k8s/overlays/.../patch-credential-store.yaml`; stg OFF). Pendiente de fase 2: pool multiplexado por `sub` en un solo proceso; inyección de `x-user-sub` en la ruta `/social` del AgentGateway (hoy solo la hacen `/workspace` y `/chat-*` vía `transformations.request.set`).
+
+El mismo `request-context.ts` es la base de los **vínculos de identidad SC-1144 fase 2** (sección "Vínculos de identidad por usuario" arriba): `getRequestActor().sub` alimenta `mcp-server/src/domain/identity-bindings.ts`, gated por `SOCIAL_IDENTITY_BINDING` (default OFF, misma regla de no-regresión: sin cabecera y sin bandera, ruta legacy exacta).
+
+## API de emparejamientos por sub (SC-1197) — topología nueva
+
+Tres Deployment: **`social-api`** (:3020, imagen mcp-server) es la ÚNICA cara y el ÚNICO proceso del repo que verifica el JWT de Keycloak (RS256 via jose, iss `https://auth-next.e-dani.com/realms/edani`, `aud` CONTIENE `social-api`, `azp` ∈ `dgx-messages`, `typ` NO se comprueba — medido 25-09, Keycloak 26.6.2 emite `typ: JWT`); **`whatsapp-pairing`** (:3001, pool baileys por sub) y **`telegram-pairing`** (:3002, pool mtcute por sub) son pools INERTES: nunca ven un JWT, solo a social-api por el HMAC interno de siempre (`CONNECTOR_SHARED_SECRET`, cabeceras `x-connector-*`) y el `sessionKey = sub` viaja DENTRO del cuerpo firmado (todo POST; `/internal/{whatsapp,telegram}/sessions/...`). Persistencia SOLO en el credential store (las pools: emptyDir de memoria, sin PVC, `Recreate`). Rutas: `POST /pairing/{whatsapp,telegram}/start`, `GET /pairing/{whatsapp,telegram}` (QR por POLLING, no SSE), `POST /pairing/telegram/password` (2FA), `GET /me/{whatsapp,telegram}`, `GET /social/status` (siempre 200; estados `paired|expired|unpaired|unavailable`) y `GET /health` sin auth. `x-user-sub` NO es entrada de auth aquí (a diferencia del enrutado MCP). Topes: 10 sesiones concurrentes por pool; por sub 1 start/60 s, 10/día, 5 QR por start. Es el "pool multiplexado por sub" que quedaba pendiente en la fase 2 del almacén.
+
+Flags (todas entregadas INERTES por `k8s/base/social-pairing.yaml`, P3: `replicas: 0`): `SOCIAL_PAIRING_API` (`on` = trim/lowercase; off → 404 salvo /health, en las tres caras), `CREDENTIAL_STORE_ENABLED` (`true` + `CREDENTIAL_STORE_MASTER_KEY` válida, si no 503 `pairing_unavailable`), `SOCIAL_API_ALLOWED_ORIGINS` (vacío por defecto: un `Origin` presente fuera de la lista es 403; nunca se contestan cabeceras CORS) y `SOCIAL_IDENTITY_BINDING` (NO la lee social-api: gatea las tools del MCP; `/social/status` lee los vínculos siempre, fail-closed). El resto del env es el contrato con los manifests P3 (`WHATSAPP_PAIRING_URL`, `TELEGRAM_PAIRING_URL`, `SOCIAL_API_JWT_*`, `SOCIAL_API_ALLOWED_AZP`, `CONNECTOR_SHARED_SECRET`, `DATABASE_URL`, `SOCIAL_ACCOUNTS_FILE`, `SOCIAL_IDENTITY_BINDINGS_FILE`). Detalle, códigos de error y JWT contract: **`docs/social-api.md`**; superficies registradas: `http.social-api.*` en `CONTRACTS.yaml`. Encendido = PR del operador tras el PR2 de SC-705 y el mapper Audience de SC-1198 historia 0. Los QR de la casa (`/api/v1/auth/qr`, `/api/v1/me` de los conectores) son superficie DISTINTA e intacta (diseño D6).
+
+## Reenganche NATS + backfill acotado al reconectar (INFRA-112)
+
+Tres piezas, todas por GitOps (rama `feat/infra-112-p6-integration` → PR → `deploy/prod` → ArgoCD):
+
+- **Backfill acotado (whatsapp-web)**: cuando la sesión Baileys se reengancha tras una caída, el conector
+  pide el histórico SOLO de la ventana perdida: `historyBackfillRequestedUntil` = ahora −
+  `WA_RECONNECT_BACKFILL_WINDOW_HOURS` (prod: `6`), con tope duro de `WA_RECONNECT_BACKFILL_MAX_MESSAGES`
+  mensajes (prod: `500`), newer-first. Se ingresa con el marcador que ya existía:
+  `source=baileys_history_sync` (`connectors/whatsapp-web/src/baileys-client.ts`) — nunca un marcador nuevo.
+  Los dos env se declaran en el registro de cuentas `k8s/base/social-accounts.json` (bloque `deploy.env`
+  de las tres cuentas WhatsApp) y viajan a los pods vía `k8s/base/generated/connectors.yaml`
+  (renderizado por `scripts/render-connectors.py`; CI falla si está obsoleto con `--check`).
+  `WA_HISTORY_SYNC_ON_LOGIN` global sigue SIN activarse: todo histórico queda acotado por estos dos env.
+  Test: `src/reconnect-backfill.test.ts` (afirma que `fetchMessageHistory` no se invoca por encima del tope).
+- **Retén NATS acotado (whatsapp-web + instagram)**: si el publish contra NATS falla, los publishers
+  (`connectors/whatsapp-web/src/events/publisher.ts`, `connectors/instagram/src/publisher.ts`) ya NO
+  descartan el evento: lo guardan en una cola con tope de entradas y antigüedad y lo republica al
+  reengancharse, sin duplicar por id de evento, con backoff `NATS_RECONNECT_BASE_MS`→`NATS_RECONNECT_MAX_MS`
+  (2s→30s default). Contadores publicados/recibidos para medir la pérdida.
+  Tests: `src/events/publisher.retention.test.ts` y `src/events/publisher.live.test.ts` (whatsapp-web),
+  `src/publisher.retention.test.ts` (instagram).
+- **Reenganche NATS (telegram)**: el publisher de telegram reintenta `connect()` con el mismo backoff en
+  vez de propagar el error; `main.ts` ya no muere con un fallo de NATS en runtime (antes: CrashLoop).
+  Test: `connectors/telegram/src/events/publisher.test.ts`.
+
+Subjects NATS y formato de evento: INTACTOS (los consumen mcp-server/telegram-sync/brain-ingest).
 
 ## Estructura
 
@@ -41,11 +107,15 @@ Tras el refactor del 2026-05-07 (commit `6791fae`), todo bajo carpetas dedicadas
 |----------|--------|--------|-------|
 | WhatsApp Web personal | 3001 | ✅ | Baileys, número personal; sesión en PVC `whatsapp-session-data` |
 | WhatsApp Web professional | 3001 | ✅ | Baileys, número de negocio; deploy `whatsapp-connector-professional`, PVC `whatsapp-session-data-professional` |
+| WhatsApp Web leila | 3001 | 🟡 desplegada, sin emparejar | Baileys, número de Leila (SC-1144 fase 2); deploy `whatsapp-connector-leila`, PVC `whatsapp-session-data-leila` (arranca vacío → pedirá QR por LAN en `whatsapp-leila.lan.e-dani.com/qr/page`) |
 | Telegram | 3002 | ✅ | gramjs (send + realtime); personal + professional |
 | Telegram-sync | 3080 | ✅ | telethon, ingestion → Postgres |
 | Instagram | 3003 | ✅ 2 cuentas | skirmshop (~7.135), barbelpapis (~14.949) |
 | MCP server (interno) | 3000 | ✅ | |
 | MCP SSE (público) | 3010 | ✅ | Bearer token |
+| social-api (SC-1197) | 3020 | ⏸ inerte (`replicas: 0`, `SOCIAL_PAIRING_API=off`) | imagen mcp-server; única cara de la API de emparejamientos por `sub`, solo in-cluster desde ns `messages` / `app: dgx-messages` (netpol `whatsapp-mcp-allow-messages-social-api`), sin IngressRoute; verifica el JWT |
+| whatsapp-pairing (SC-1197) | 3001 | ⏸ inerte (`replicas: 0`) | imagen whatsapp-connector; pool baileys por `sub`, `Recreate`, `SESSION_PATH` en `emptyDir` de memoria (persistencia solo en el credential store); solo lo alcanza social-api |
+| telegram-pairing (SC-1197) | 3002 | ⏸ inerte (`replicas: 0`) | imagen telegram-connector; pool mtcute por `sub`, `Recreate`, `emptyDir` de memoria; solo lo alcanza social-api |
 
 > **WhatsApp Cloud API eliminado (2026-05-27).** Se sustituyó por una segunda cuenta Baileys. Motivo: coste cero (no Meta) y poder contestar a mano desde el móvil.
 

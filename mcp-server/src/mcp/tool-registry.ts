@@ -31,7 +31,11 @@ const channel = {
 const accountId = {
   type: 'string',
   minLength: 1,
-  description: "Configured provider account, for example 'personal' or 'professional'.",
+  description:
+    "Configured provider account, for example 'personal', 'professional' or 'leila' " +
+    '(WhatsApp), ' +
+    "'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be " +
+    'bound to the verified caller.',
 } as const;
 
 const target = {
@@ -61,7 +65,23 @@ const attachment = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    url: { type: 'string', format: 'uri' },
+    url: {
+      type: 'string',
+      format: 'uri',
+      description:
+        'Media reference the CONNECTOR fetches server-side with a plain HTTP fetch before ' +
+        'uploading to the provider. MUST be an http(s) URL reachable from the connector pod ' +
+        '(it runs inside the cluster). Supported: public https URLs, cluster-internal http ' +
+        'URLs, and presigned S3/MinIO http URLs (e.g. from the skirmshop-drive bucket the ' +
+        'connector itself has credentials for). NOT supported — the fetch throws ' +
+        '"Failed to fetch file from <url>": file:// paths, s3:// URIs (the connector is not ' +
+        'an S3 client; s3:// only appears in READ results because ingestion presigns them), ' +
+        'and internal hosts that resolve to nothing (labels.local-style). The response ' +
+        'Content-Type decides the WhatsApp message type: image/* → photo, video/* → video, ' +
+        'audio/* → audio, anything else → document (fileName taken from the URL last path ' +
+        'segment, so prefer URLs ending in the real filename). Telegram fetches http(s) ' +
+        'connector-side too; non-http paths pass through and fail for cluster-internal URLs.',
+    },
     name: { type: 'string' },
     mimeType: { type: 'string' },
     caption: { type: 'string' },
@@ -780,7 +800,11 @@ export const SOCIAL_TOOL_REGISTRY: readonly SocialToolDefinition[] = [
   tool({
     name: 'social_manage_session',
     title: 'Manage provider session',
-    description: 'Renew a WhatsApp QR session or repair a WhatsApp group encryption session.',
+    description:
+      'Renew a WhatsApp QR session, repair a WhatsApp group encryption session, or start ' +
+      'Instagram pairing for the verified user (action=startPairing on channel=instagram ' +
+      'returns the Instagram Login authorize link; it needs no accountId and only works when ' +
+      'the call carries the gateway-verified user identity).',
     effect: 'externalWrite',
     authScope: 'social.write',
     capability: 'sessions.manage',
@@ -788,22 +812,26 @@ export const SOCIAL_TOOL_REGISTRY: readonly SocialToolDefinition[] = [
     inputSchema: objectSchema(
       {
         ...writeProperties,
-        action: { type: 'string', enum: ['renewQr', 'repairGroup'] },
+        action: { type: 'string', enum: ['renewQr', 'repairGroup', 'startPairing'] },
         confirmDisconnect: { type: 'boolean' },
       },
-      ['channel', 'accountId', 'action'],
+      ['channel', 'action'],
       {
         allOf: [
           {
             if: { properties: { action: { const: 'renewQr' } } },
             then: {
-              required: ['confirmDisconnect'],
+              required: ['accountId', 'confirmDisconnect'],
               properties: { confirmDisconnect: { const: true } },
             },
           },
           {
             if: { properties: { action: { const: 'repairGroup' } } },
-            then: { required: ['target'] },
+            then: { required: ['accountId', 'target'] },
+          },
+          {
+            if: { properties: { action: { const: 'startPairing' } } },
+            then: { properties: { channel: { const: 'instagram' } } },
           },
         ],
       }
@@ -827,9 +855,15 @@ export const SOCIAL_TOOL_REGISTRY: readonly SocialToolDefinition[] = [
           minLength: 1,
           description: 'Exact Telegram callback payload from the selected inline button.',
         },
+        dataB64: {
+          type: 'string',
+          minLength: 1,
+          description:
+            "Button's dataB64 from social_list_messages, echoed back verbatim. Required for bots whose callback payload is binary (BotFather); takes precedence over data.",
+        },
         threadId: { type: ['string', 'integer', 'null'] },
       },
-      ['channel', 'accountId', 'target', 'messageId', 'data']
+      ['channel', 'accountId', 'target', 'messageId']
     ),
     destructive: true,
   }),

@@ -6,7 +6,7 @@
 import { Pool } from 'pg';
 import pino from 'pino';
 import {
-  ACCOUNTS,
+  ingestNamespaces,
   Account,
   Cursor,
   ensureLiveCursorTable,
@@ -20,8 +20,13 @@ import {
 
 const logger = pino({ transport: { target: 'pino-pretty', options: { colorize: true } } });
 
-const DATABASE_URL =
-  process.env.DATABASE_URL || 'postgresql://whatsappmcp:whatsappmcp_dev@localhost:5438/whatsappmcp';
+// SC-1239 C2: no hardcoded fallback — fail at startup naming the variable.
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL is unset: refusing to start the brain-ingest job without an explicit database connection'
+  );
+}
 const BRAIN_URL =
   process.env.BRAIN_URL || 'http://skirmshop-brain.skirmshop-brain-prod.svc.cluster.local';
 const BRAIN_API_KEY = process.env.BRAIN_API_KEY || '';
@@ -99,7 +104,7 @@ async function main(): Promise<void> {
   const pool = new Pool({ connectionString: DATABASE_URL, max: 4 });
   try {
     await ensureLiveCursorTable(pool);
-    for (const account of ACCOUNTS) {
+    for (const account of ingestNamespaces()) {
       await ingestAccount(pool, account);
     }
   } finally {

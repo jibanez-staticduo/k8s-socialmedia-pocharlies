@@ -23,6 +23,7 @@ import {
   normalizePhoneForWhatsApp,
   WhatsAppContactSeedInput,
 } from '../contact-sync';
+import { MessageUnavailableError } from '../durable-message-store';
 
 function statusForSendFailure(
   failureClass: WhatsAppSendFailureClass | 'disabled_sending' | 'invalid_request'
@@ -501,6 +502,7 @@ export function createRouter(
   });
 
   // Get QR code (no auth required for local dev)
+  // CONTRACT: http.whatsapp-connector.auth-qr — path, no-auth and {qrCode, expiresAt} are frozen
   router.get('/auth/qr', (req: Request, res: Response) => {
     const qr = qrHandler.getCurrentQR();
     if (!qr) {
@@ -944,12 +946,17 @@ export function createRouter(
         });
         res.json({ sent: true, sentAt: new Date().toISOString() });
       } catch (e) {
+        if (e instanceof MessageUnavailableError) {
+          res.status(e.status).json({ error: e.message, failureClass: e.failureClass });
+          return;
+        }
         res.status(500).json({ error: String(e) });
       }
     })();
   });
 
   // Forward message
+  // CONTRACT: http.whatsapp-connector.messages-forward.v1 — body, {forwarded, messageId}, 404 message_unavailable
   router.post('/messages/forward', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {
@@ -962,9 +969,13 @@ export function createRouter(
           res.status(400).json({ error: 'Missing chatId, messageId, or toChatId' });
           return;
         }
-        await client.forwardMessage(chatId, messageId, toChatId);
-        res.json({ forwarded: true });
+        const forwardedMessageId = await client.forwardMessage(chatId, messageId, toChatId);
+        res.json({ forwarded: true, messageId: forwardedMessageId });
       } catch (e) {
+        if (e instanceof MessageUnavailableError) {
+          res.status(e.status).json({ error: e.message, failureClass: e.failureClass });
+          return;
+        }
         res.status(500).json({ error: String(e) });
       }
     })();
