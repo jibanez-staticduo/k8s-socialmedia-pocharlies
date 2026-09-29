@@ -1993,6 +1993,24 @@ export function installFeatureUI({
     }
   }
 
+  function reactionHint(hint) {
+    if (hint?.reason !== 'reaction-to-own-message' || hint.account !== runtime.account ||
+      !documentRef.hidden || runtime.notificationPermission !== 'granted') return;
+    const chatId = text(hint.conversation_id);
+    const messageId = text(hint.wa_message_id || hint.message_id);
+    const chat = runtime.chatListBaseline.get(`${runtime.account}:${chatId}`);
+    if (!chat || !messageId || chat.muted) return;
+    const delivery = notificationSettings?.reactionPayloadFor?.({ isGroup: chat.isGroup, name: chat.name });
+    if (!delivery) return;
+    try {
+      new windowRef.Notification(delivery.title, {
+        body: delivery.body,
+        silent: delivery.silent,
+        tag: `socialmedia-reaction-${runtime.account}-${chatId}-${messageId}`,
+      });
+    } catch { /* Notification delivery is optional. */ }
+  }
+
   function addHeaderControls() {
     const sidebarHeader = documentRef.querySelector('.chat-sidebar-header');
     const sidebarActions = node('div', 'chat-sidebar-actions');
@@ -2193,6 +2211,7 @@ export function installFeatureUI({
     matchesChat,
     accountChanged,
     chatsChanged: chatListChanged,
+    reactionHint,
     chatChanged,
     messagesChanged,
     getSendPayload,

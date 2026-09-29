@@ -115,9 +115,18 @@ export async function ensureDurableTables(): Promise<void> {
       reaction_wa_message_id text,
       emoji text,
       removed boolean NOT NULL DEFAULT false,
+      from_me boolean,
       updated_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY (account, target_wa_message_id, reactor_jid)
     )
+  `);
+    // CREATE TABLE IF NOT EXISTS is a no-op on a table that migration 011 (or an
+    // older connector) already built, so the widening is stated separately. Both
+    // the fresh and the existing shape end with from_me, and NULL simply means
+    // the author side was never observed.
+    await client.query(`
+    ALTER TABLE whatsapp_message_reactions
+      ADD COLUMN IF NOT EXISTS from_me boolean
   `);
     await client.query('COMMIT');
     tablesReady = true;
@@ -420,15 +429,26 @@ export async function storeMessageReaction(input: {
   reactorJid: string;
   reactionMessageId?: string;
   emoji: string;
+  /**
+   * Whether this account authored the reaction: `true` for a reaction we sent
+   * or that Baileys echoed back from one of our own devices, `false` for a peer
+   * (including a LID participant), and `undefined` or `null` -- Baileys can hand
+   * over a key with no side at all -- when nothing said, which stores NULL. The
+   * database turns this into the `reaction-to-own-message` hint only for an
+   * explicit `false`, so guessing `false` here would notify the user about their
+   * own tap.
+   */
+  fromMe?: boolean | null;
 }): Promise<void> {
   await pool().query(
     `INSERT INTO whatsapp_message_reactions
-       (account, target_wa_message_id, reactor_jid, reaction_wa_message_id, emoji, removed)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (account, target_wa_message_id, reactor_jid, reaction_wa_message_id, emoji, removed, from_me)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      ON CONFLICT (account, target_wa_message_id, reactor_jid) DO UPDATE SET
        reaction_wa_message_id = EXCLUDED.reaction_wa_message_id,
        emoji = EXCLUDED.emoji,
        removed = EXCLUDED.removed,
+       from_me = COALESCE(EXCLUDED.from_me, whatsapp_message_reactions.from_me),
        updated_at = now()`,
     [
       connectorAccount(),
@@ -437,6 +457,7 @@ export async function storeMessageReaction(input: {
       input.reactionMessageId ? accountKey(input.reactionMessageId) : null,
       input.emoji || null,
       !input.emoji,
+      input.fromMe ?? null,
     ]
   );
 }

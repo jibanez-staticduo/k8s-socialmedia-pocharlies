@@ -94,7 +94,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Web-session logout | Verified | OIDC local-session revocation; keeps connector paired; Basic auth browser cache remains |
 | Own profile and account settings | Verified | Name/photo/about API and controls deployed; own identity/name and panel verified on both accounts, mutations tested synthetically |
 | Privacy and disappearing messages | Partial | Online/group-add and status-audience fields are available; existing exclusions remain visible without inventing their members. Blocked-list viewing and confirmed unblock are deployed. Exclusion editor and About visibility remain |
-| Notifications | Partial | Account-scoped message/group/sound/preview preferences deployed 8ad9dd9. A new unread chat now notifies while the tab is hidden, including after an initially empty list; older chats added by pagination stay silent. Reaction/status notifications and closed-tab push remain |
+| Notifications | In validation | Account-scoped message/group/sound/preview preferences are deployed. A new unread chat notifies while the tab is hidden, including after an initially empty list; older chats added by pagination stay silent. A separate reaction switch and hidden-tab alert for a reaction by another person to an outgoing message have synthetic tests; provider attribution and production delivery still need verification. Status notifications and closed-tab push remain |
 | Keyboard shortcuts | Verified | Supported shortcuts only; focus/IME guards |
 | Presence | In validation | Account/chat-scoped presence events reach the open header over authenticated SSE, with polling fallback; typing/recording indicators expire after 8 seconds and stream listeners are released on disconnect. Real-provider delivery and privacy behavior remain unverified |
 | Real-time updates | In validation | Account-scoped message/chat change hints use authenticated SSE with reconnect resync, bounded bursts and polling fallback. Reaction insert/removal now emits a post-commit message hint for its existing target; a disposable PostgreSQL integration test covers account isolation, unchanged writes and rollback. Live reaction delivery from WhatsApp remains to verify |
@@ -142,6 +142,13 @@ not assumptions about the newest documentation, determines the contract.
   roster. Keep these editors unavailable until a provider-backed read and
   confirmed write contract can be tested; preserve an existing exclusion
   setting rather than replacing its unknown members.
+- Baileys rc13 exposes `chatModify({ clear: true, lastMessages })` and
+  `chatModify({ delete: true, lastMessages })`, but the returned promise is only
+  an app-state patch acknowledgement. It does not prove that another WhatsApp
+  device removed the chat; upstream reports silent no-ops for clear and
+  per-message delete in linked-device sessions. Keep these actions unavailable until a provider
+  read-back or a controlled cross-device test can distinguish success from a
+  silent failure. Do not erase local history on an unverified acknowledgement.
 - Pin-message documentation differs from the installed rc13 source: this
   version accepts `{ pin: messageKey, type, time }`, not nested pin options.
   Its enum uses `PIN_FOR_ALL=1`, `UNPIN_FOR_ALL=2`; the README's unpin value

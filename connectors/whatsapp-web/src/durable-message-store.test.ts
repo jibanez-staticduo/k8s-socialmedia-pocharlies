@@ -43,6 +43,12 @@ test('durable table bootstrap holds one transaction advisory lock on a dedicated
       const at = calls.indexOf(ddl);
       assert.ok(at > 0 && at < commitAt, `partial index DDL not inside bootstrap: ${ddl}`);
     }
+    // A reaction table created by migration 011 has no author side, so the
+    // bootstrap must widen it in the same transaction instead of silently
+    // keeping a table whose INSERT would fail on the unknown column.
+    const widenAt = calls.findIndex(sql => /ALTER TABLE whatsapp_message_reactions/.test(sql));
+    assert.ok(widenAt > 0 && widenAt < commitAt, 'reaction widening not inside bootstrap');
+    assert.match(calls[widenAt]!, /ADD COLUMN IF NOT EXISTS from_me boolean/);
   } finally {
     (pg.Pool.prototype as any).connect = original;
   }
@@ -282,6 +288,37 @@ test('reactions use an account-scoped target and explicit removal state', async 
     assert.equal(calls[0].params[1], 'professional:target');
     assert.equal(calls[0].params[5], false);
     assert.equal(calls[1].params[5], true);
+  } finally {
+    restore();
+  }
+});
+
+test('reactions record the author side and never invent one on re-ingest', async () => {
+  process.env.CONNECTOR_ACCOUNT = 'professional';
+  const { calls, restore } = stubPool();
+  try {
+    await storeMessageReaction({
+      targetMessageId: 'target',
+      reactorJid: '34600',
+      emoji: ':+1:',
+      fromMe: false,
+    });
+    await storeMessageReaction({
+      targetMessageId: 'target',
+      reactorJid: '10000:5@s.whatsapp.net',
+      emoji: '❤️',
+      fromMe: true,
+    });
+    await storeMessageReaction({ targetMessageId: 'target', reactorJid: '34600', emoji: ':+1:' });
+    assert.equal(calls[0].params[6], false, 'a peer reaction');
+    assert.equal(calls[1].params[6], true, 'our own device');
+    assert.equal(calls[2].params[6], null, 'a key that never said stays unknown');
+    assert.match(
+      calls[0].sql,
+      /from_me = COALESCE\(EXCLUDED\.from_me, whatsapp_message_reactions\.from_me\)/,
+      'a history re-ingest that lacks the side must not erase the one already stored'
+    );
+    for (const call of calls) assertDenseParameters(call.sql, call.params);
   } finally {
     restore();
   }

@@ -117,8 +117,13 @@ test('SSE route emits account-scoped ID-only message/chat/resync hints', async t
   assert.match(second.frame, /"wa_message_id":"wa-id-1"/);
   assert.doesNotMatch(second.frame, /private text|content/);
 
+  realtime.publish({ ...message, reason: 'reaction-to-own-message', emoji: 'private', reactor_jid: 'private' });
+  const reaction = await nextFrame(reader, second.rest);
+  assert.match(reaction.frame, /"reason":"reaction-to-own-message"/);
+  assert.doesNotMatch(reaction.frame, /emoji|reactor_jid|private/);
+
   realtime.publish({ kind: 'chat', account: 'personal', conversation_id: 'chat@g.us' });
-  const third = await nextFrame(reader, second.rest);
+  const third = await nextFrame(reader, reaction.rest);
   assert.match(third.frame, /event: chat/);
   assert.match(third.frame, /"account":"personal"/);
 

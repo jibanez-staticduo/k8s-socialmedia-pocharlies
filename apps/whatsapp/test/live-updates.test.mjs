@@ -5,6 +5,7 @@ import {createLiveUpdates} from '../public/live-updates.mjs';
 function fixture() {
   const sources = [];
   const calls = [];
+  const hints = [];
   const intervals = new Map();
   const timeouts = new Map();
   const listeners = new Map();
@@ -17,6 +18,7 @@ function fixture() {
   const updates = createLiveUpdates({
     documentRef,
     refresh: async context => { calls.push(context); },
+    onHint: hint => { hints.push(hint); },
     eventSource: url => {
       const source = {url, readyState: 1, closed: false, listeners: new Map(),
         addEventListener(type, callback) { this.listeners.set(type, callback); },
@@ -35,8 +37,49 @@ function fixture() {
     for (const callback of callbacks) callback();
     await new Promise(resolve => setImmediate(resolve));
   };
-  return {updates, sources, calls, intervals, timeouts, listeners, documentRef, flush};
+  return {updates, sources, calls, hints, intervals, timeouts, listeners, documentRef, flush};
 }
+
+test('reaction hints reach the UI once for the active account while refresh still coalesces', async () => {
+  const item = fixture();
+  item.updates.start('secondary');
+  item.sources[0].onopen();
+  await item.flush();
+  item.hints.length = 0;
+  item.calls.length = 0;
+  const reaction = {account:'secondary', conversation_id:'secondary:chat', wa_message_id:'secondary:target', reason:'reaction-to-own-message'};
+  item.sources[0].listeners.get('message')({data:JSON.stringify(reaction)});
+  item.sources[0].listeners.get('message')({data:JSON.stringify({...reaction, account:'personal'})});
+  await item.flush();
+  assert.deepEqual(item.hints, [reaction]);
+  assert.equal(item.calls.length, 1);
+  item.updates.start('personal');
+  item.sources[0].listeners.get('message')({data:JSON.stringify(reaction)});
+  assert.deepEqual(item.hints, [reaction], 'a closed stream cannot deliver stale hints');
+  item.updates.destroy();
+});
+
+test('a notification handler failure cannot stop the message refresh', async () => {
+  let refreshes = 0;
+  let source;
+  const timers = [];
+  const updates = createLiveUpdates({
+    refresh: async () => { refreshes += 1; },
+    onHint: () => { throw Error('notifications unavailable'); },
+    documentRef: { hidden: true, addEventListener() {}, removeEventListener() {} },
+    eventSource: () => (source = {addEventListener(type, listener) { this[type] = listener; }, close() {}}),
+    setIntervalRef: () => 1,
+    clearIntervalRef: () => {},
+    setTimeoutRef: callback => { timers.push(callback); return timers.length; },
+    clearTimeoutRef: () => {},
+  });
+  updates.start('personal');
+  source.message({data:'{"account":"personal","reason":"reaction-to-own-message"}'});
+  for (const timer of timers) timer();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshes, 1);
+  updates.destroy();
+});
 
 test('SSE coalesces change hints, filters accounts and resyncs after opening', async () => {
   const item = fixture();

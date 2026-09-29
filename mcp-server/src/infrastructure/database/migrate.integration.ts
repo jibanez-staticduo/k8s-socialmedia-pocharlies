@@ -1,6 +1,7 @@
 // Run explicitly against disposable PostgreSQL: DATABASE_URL=... tsx --test this-file.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,10 @@ const migrationFiles = (): string[] =>
     .sort();
 const legacyMigrationFiles = (): string[] =>
   migrationFiles().filter(file => /^00[1-7]_/.test(file));
+
+/** Everything an already-running installation holds before 012 exists. */
+const preOwnReasonMigrationFiles = (): string[] =>
+  migrationFiles().filter(file => Number(file.slice(0, 3)) < 12);
 
 async function database(label: string): Promise<{ client: Client; url: string }> {
   assert.ok(process.env.DATABASE_URL, 'Use a disposable PostgreSQL DATABASE_URL');
@@ -405,6 +410,250 @@ test('reaction hints follow commit, target account, removal, and visible changes
     await client.query('ROLLBACK');
     await settle();
     assert.equal(hints.length, 2, 'rolled-back changes never reach the browser');
+  } finally {
+    await listener.end();
+    await client.end();
+  }
+});
+
+/** The hint vocabulary the app is allowed to rely on. */
+const HINT_KEYS = ['account', 'conversation_id', 'kind', 'message_id', 'reason', 'wa_message_id'];
+
+async function hintFixture(label: string) {
+  const { client, url } = await database(label);
+  const listener = new Client({ connectionString: url });
+  await listener.connect();
+  await runMigrations(client);
+  await client.query(
+    `INSERT INTO conversations(id,account,name) VALUES
+       ('secondary:peer','secondary','Peer'), ('secondary:sent','secondary','Sent')`
+  );
+  const insertMessage = async (waMessageId: string, direction: string) =>
+    (
+      await client.query(
+        `INSERT INTO messages
+           (conversation_id,wa_message_id,account,wa_timestamp,direction,sender_wa_id,
+            message_type,platform)
+         VALUES ('secondary:peer',$1,'secondary',now(),$2,'secondary:peer','TEXT','whatsapp')
+         RETURNING id`,
+        [waMessageId, direction]
+      )
+    ).rows[0].id as string;
+  const hints: Record<string, unknown>[] = [];
+  listener.on('notification', message => {
+    if (message.payload) hints.push(JSON.parse(message.payload));
+  });
+  await listener.query('LISTEN socialmedia_changes');
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  const react = async (
+    target: string,
+    reactor: string,
+    emoji: string | null,
+    fromMe: boolean | null,
+    action: 'INSERT' | 'UPDATE' = 'INSERT'
+  ) =>
+    client.query(
+      action === 'INSERT'
+        ? `INSERT INTO whatsapp_message_reactions
+             (account,target_wa_message_id,reactor_jid,emoji,from_me)
+           VALUES ('secondary',$1,$2,$3,$4)`
+        : `UPDATE whatsapp_message_reactions
+              SET emoji=$3::text,
+                  removed=($3::text IS NULL),
+                  from_me=COALESCE($4::boolean, from_me),
+                  updated_at=now()
+            WHERE account='secondary' AND target_wa_message_id=$1 AND reactor_jid=$2`,
+      [target, reactor, emoji, fromMe]
+    );
+  return { client, listener, hints, settle, react, insertMessage };
+}
+
+test('a reaction earns its own reason only from a peer onto our sent message', async () => {
+  const { client, listener, hints, settle, react, insertMessage } =
+    await hintFixture('reaction_reasons');
+  try {
+    const sent = await insertMessage('secondary:sent-message', 'OUTBOUND');
+    await insertMessage('secondary:incoming-message', 'INBOUND');
+    const reasons = (): string[] => hints.map(hint => String(hint.reason));
+    // The 010 message-INSERT hints for the two rows above are real traffic, not
+    // part of this matrix.
+    await settle();
+    hints.length = 0;
+
+    await react('secondary:sent-message', 'secondary:peer', ':+1:', false);
+    await settle();
+    assert.deepEqual(hints, [
+      {
+        kind: 'message',
+        reason: 'reaction-to-own-message',
+        account: 'secondary',
+        conversation_id: 'secondary:peer',
+        message_id: sent,
+        wa_message_id: 'secondary:sent-message',
+      },
+    ]);
+    assert.deepEqual(
+      Object.keys(hints[0]).sort(),
+      HINT_KEYS,
+      'the hint stays identifiers only: no emoji, no author'
+    );
+
+    // Our own device, an unknown author side, and a reaction on an incoming
+    // message must all keep the reason 011 promised.
+    await react('secondary:sent-message', 'secondary:me', ':heart:', true);
+    await react('secondary:sent-message', 'secondary:imported', ':tada:', null);
+    await react('secondary:incoming-message', 'secondary:other', ':fire:', false);
+    await react('secondary:vanished', 'secondary:ghost', ':eyes:', false);
+    await settle();
+    assert.equal(hints.length, 4, 'the missing target stays silent');
+    assert.deepEqual(reasons().slice(1), ['reaction', 'reaction', 'reaction']);
+
+    // Changing the emoji is a new visible fact on our own message.
+    await react('secondary:sent-message', 'secondary:peer', ':fire:', false, 'UPDATE');
+    await settle();
+    assert.equal(hints.length, 5);
+    assert.equal(reasons()[4], 'reaction-to-own-message');
+
+    // Taking it back is not a new reaction, and neither is re-ingesting it.
+    await react('secondary:sent-message', 'secondary:peer', null, false, 'UPDATE');
+    await settle();
+    assert.equal(hints.length, 6);
+    assert.equal(reasons()[5], 'reaction', 'a withdrawal refreshes without the dedicated reason');
+
+    await client.query(
+      `UPDATE whatsapp_message_reactions SET updated_at=now()
+        WHERE account='secondary' AND target_wa_message_id='secondary:sent-message'
+          AND reactor_jid='secondary:peer'`
+    );
+    await client.query(
+      `INSERT INTO whatsapp_message_reactions
+         (account,target_wa_message_id,reactor_jid,emoji,removed,from_me)
+       VALUES ('secondary','secondary:sent-message','secondary:peer',NULL,true,false)
+       ON CONFLICT (account,target_wa_message_id,reactor_jid) DO UPDATE SET
+         emoji = EXCLUDED.emoji,
+         removed = EXCLUDED.removed,
+         from_me = COALESCE(EXCLUDED.from_me, whatsapp_message_reactions.from_me),
+         updated_at = now()`
+    );
+    await settle();
+    assert.equal(hints.length, 6, 'an identical re-ingest stays silent');
+    assert.equal(
+      (
+        await client.query(
+          `SELECT from_me FROM whatsapp_message_reactions
+            WHERE account='secondary' AND target_wa_message_id='secondary:sent-message'
+              AND reactor_jid='secondary:peer'`
+        )
+      ).rows[0].from_me,
+      false,
+      'a re-ingest must not erase the known author side'
+    );
+  } finally {
+    await listener.end();
+    await client.end();
+  }
+});
+
+test('012 widens a reaction table that 011 installed without reopening its checksum', async () => {
+  const { client, url } = await database('reaction_own_message_existing');
+  const listener = new Client({ connectionString: url });
+  await listener.connect();
+  try {
+    const installed = preOwnReasonMigrationFiles();
+    for (const file of installed) await client.query(readFileSync(join(dir, file), 'utf8'));
+    // The ledger an existing installation already carries, so runMigrations
+    // has exactly one version left and must refuse any drift on 011.
+    await client.query(
+      `CREATE TABLE schema_migrations (
+         version text PRIMARY KEY, checksum text NOT NULL,
+         adopted boolean NOT NULL DEFAULT false,
+         applied_at timestamptz NOT NULL DEFAULT now())`
+    );
+    const checksum = (file: string) =>
+      createHash('sha256')
+        .update(readFileSync(join(dir, file), 'utf8'))
+        .digest('hex');
+    for (const file of installed)
+      await client.query('INSERT INTO schema_migrations(version, checksum) VALUES ($1,$2)', [
+        file,
+        checksum(file),
+      ]);
+    await client.query(
+      `INSERT INTO conversations(id,account,name) VALUES ('secondary:peer','secondary','Peer')`
+    );
+    const sent = (
+      await client.query(
+        `INSERT INTO messages
+           (conversation_id,wa_message_id,account,wa_timestamp,direction,sender_wa_id,
+            message_type,platform)
+         VALUES ('secondary:peer','secondary:sent-message','secondary',now(),'OUTBOUND',
+                 'secondary:peer','TEXT','whatsapp')
+         RETURNING id`
+      )
+    ).rows[0].id;
+    // How a 011-era connector left the row: no author side at all.
+    await client.query(
+      `INSERT INTO whatsapp_message_reactions
+         (account,target_wa_message_id,reactor_jid,emoji)
+       VALUES ('secondary','secondary:sent-message','secondary:imported','heart')`
+    );
+
+    await runMigrations(client);
+
+    assert.equal(
+      (await client.query("SELECT count(*) FROM schema_migrations WHERE version LIKE '012_%'"))
+        .rows[0].count,
+      '1',
+      '012 applies over an existing schema'
+    );
+    assert.equal(
+      (await client.query("SELECT checksum FROM schema_migrations WHERE version LIKE '011_%'"))
+        .rows[0].checksum,
+      checksum(installed.find(file => file.startsWith('011_'))!),
+      '011 stays byte-identical to what existing installs recorded'
+    );
+    assert.equal(
+      (
+        await client.query(
+          `SELECT is_nullable FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='whatsapp_message_reactions'
+              AND column_name='from_me'`
+        )
+      ).rows[0].is_nullable,
+      'YES',
+      'imported reactions keep an unknown author side'
+    );
+    assert.equal(
+      (
+        await client.query(
+          `SELECT from_me FROM whatsapp_message_reactions
+            WHERE reactor_jid='secondary:imported'`
+        )
+      ).rows[0].from_me,
+      null
+    );
+
+    const hints: Record<string, unknown>[] = [];
+    listener.on('notification', message => {
+      if (message.payload) hints.push(JSON.parse(message.payload));
+    });
+    await listener.query('LISTEN socialmedia_changes');
+    await client.query(
+      `INSERT INTO whatsapp_message_reactions
+         (account,target_wa_message_id,reactor_jid,emoji,from_me)
+       VALUES ('secondary','secondary:sent-message','secondary:peer','+1',false)`
+    );
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(hints, [
+      {
+        kind: 'message',
+        reason: 'reaction-to-own-message',
+        account: 'secondary',
+        conversation_id: 'secondary:peer',
+        message_id: sent,
+        wa_message_id: 'secondary:sent-message',
+      },
+    ]);
   } finally {
     await listener.end();
     await client.end();

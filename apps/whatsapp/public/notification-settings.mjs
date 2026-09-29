@@ -7,9 +7,9 @@
  * each Messages/Groups subpage offers "Mostrar notificaciones", "Mostrar
  * notificaciones de reacciones" and "Reproducir sonido", with a preview switch,
  * an outgoing sound and background synchronization above them. A browser tab can
- * honour three of those today: enable per category, native sound through the
- * `silent` option of the Notification constructor, and preview privacy. Only
- * those are controls here; the rest stays pending in
+ * honour category and reaction switches, native sound through the `silent`
+ * option of the Notification constructor, and preview privacy. Only these are
+ * controls here; the rest stays pending in
  * docs/whatsapp-parity-audit.md so the everyday dialog never shows a control
  * that cannot do anything.
  *
@@ -23,12 +23,15 @@ export const NOTIFICATION_CATEGORY_LABELS = Object.freeze({ messages: 'Mensajes'
 export const NOTIFICATION_ROW_LABELS = Object.freeze({
   preview: Object.freeze(['Mostrar vista previa', 'Incluye el nombre del chat y el texto del mensaje en la notificación.']),
   enabled: Object.freeze(['Mostrar notificaciones', 'Avisa cuando llega un mensaje nuevo a este tipo de chat.']),
+  reactions: Object.freeze(['Mostrar notificaciones de reacciones', 'Avisa cuando otra persona reacciona a uno de tus mensajes.']),
   sound: Object.freeze(['Reproducir sonido', 'Usa el sonido de aviso del sistema para estas notificaciones.']),
 });
 /** Content used when previews are off: neither the chat nor the message text. */
 export const NOTIFICATION_HIDDEN_TITLE = 'SocialMedia';
 export const NOTIFICATION_HIDDEN_BODY = 'Mensaje nuevo';
 export const NOTIFICATION_EMPTY_BODY = 'Nuevo mensaje';
+export const NOTIFICATION_REACTION_BODY = 'Han reaccionado a tu mensaje';
+export const NOTIFICATION_REACTION_HIDDEN_BODY = 'Nueva reacción';
 
 function text(value) {
   return value == null ? '' : String(value);
@@ -41,8 +44,8 @@ function switchValue(value, fallback = true) {
 }
 
 export const NOTIFICATION_DEFAULTS = Object.freeze({
-  messages: Object.freeze({ enabled: true, sound: true }),
-  groups: Object.freeze({ enabled: true, sound: true }),
+  messages: Object.freeze({ enabled: true, reactions: true, sound: true }),
+  groups: Object.freeze({ enabled: true, reactions: true, sound: true }),
   preview: true,
 });
 
@@ -51,7 +54,7 @@ export function normalizeNotificationPreferences(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
   const category = name => {
     const raw = source[name] && typeof source[name] === 'object' ? source[name] : {};
-    return { enabled: switchValue(raw.enabled, true), sound: switchValue(raw.sound, true) };
+    return { enabled: switchValue(raw.enabled, true), reactions: switchValue(raw.reactions, true), sound: switchValue(raw.sound, true) };
   };
   return { messages: category('messages'), groups: category('groups'), preview: switchValue(source.preview, true) };
 }
@@ -104,7 +107,7 @@ export function createNotificationStore(storage = null) {
       return preferences;
     },
     setCategory(account, category, flag, value) {
-      if (!NOTIFICATION_CATEGORY_LABELS[category] || !['enabled', 'sound'].includes(flag)) {
+      if (!NOTIFICATION_CATEGORY_LABELS[category] || !['enabled', 'reactions', 'sound'].includes(flag)) {
         return { preferences: this.read(account), saved: false, ignored: true };
       }
       const current = this.read(account);
@@ -131,6 +134,17 @@ export function notificationPayload(preferences = {}, { isGroup = false, name = 
   return {
     title: normalized.preview ? text(name).trim() || NOTIFICATION_HIDDEN_TITLE : NOTIFICATION_HIDDEN_TITLE,
     body: normalized.preview ? text(preview).trim() || NOTIFICATION_EMPTY_BODY : NOTIFICATION_HIDDEN_BODY,
+    silent: !category.sound,
+  };
+}
+
+export function reactionNotificationPayload(preferences = {}, { isGroup = false, name = '' } = {}) {
+  const normalized = normalizeNotificationPreferences(preferences);
+  const category = isGroup ? normalized.groups : normalized.messages;
+  if (!category.enabled || !category.reactions) return null;
+  return {
+    title: normalized.preview ? text(name).trim() || NOTIFICATION_HIDDEN_TITLE : NOTIFICATION_HIDDEN_TITLE,
+    body: normalized.preview ? NOTIFICATION_REACTION_BODY : NOTIFICATION_REACTION_HIDDEN_BODY,
     silent: !category.sound,
   };
 }
@@ -179,6 +193,10 @@ export function installNotificationSettings({
     return notificationPayload(preferences(), { isGroup, name, preview });
   }
 
+  function reactionPayloadFor({ isGroup = false, name = '' } = {}) {
+    return reactionNotificationPayload(preferences(), { isGroup, name });
+  }
+
   function showStorageFailure(saved) {
     storageFailure = saved ? '' : 'No se pueden guardar las preferencias en este navegador; se aplican mientras dure la sesión.';
     if (storageNotice) {
@@ -223,6 +241,7 @@ export function installNotificationSettings({
     section.append(
       heading,
       switchRow(`${category}.enabled`, { title: NOTIFICATION_ROW_LABELS.enabled[0], hint: NOTIFICATION_ROW_LABELS.enabled[1], checked: current.enabled }),
+      switchRow(`${category}.reactions`, { title: NOTIFICATION_ROW_LABELS.reactions[0], hint: NOTIFICATION_ROW_LABELS.reactions[1], checked: current.reactions }),
       switchRow(`${category}.sound`, { title: NOTIFICATION_ROW_LABELS.sound[0], hint: NOTIFICATION_ROW_LABELS.sound[1], checked: current.sound }),
     );
     return section;
@@ -292,6 +311,7 @@ export function installNotificationSettings({
     open,
     preferences,
     payloadFor,
+    reactionPayloadFor,
     store,
     isOpen: () => Boolean(body?.isConnected) && text(getAccount()) === openedFor,
   };

@@ -1,6 +1,6 @@
 // SSE carries change hints only; the existing account-scoped API remains the
 // source of message and chat projections.
-export function createLiveUpdates({refresh, eventSource = url => new EventSource(url), documentRef = document,
+export function createLiveUpdates({refresh, onHint = () => {}, eventSource = url => new EventSource(url), documentRef = document,
   setIntervalRef = setInterval, clearIntervalRef = clearInterval, setTimeoutRef = setTimeout,
   clearTimeoutRef = clearTimeout, pollMs = 10000, debounceMs = 250} = {}) {
   let account = '';
@@ -69,10 +69,12 @@ export function createLiveUpdates({refresh, eventSource = url => new EventSource
     };
     for (const type of ['message', 'chat', 'resync']) source.addEventListener(type, event => {
       if (currentGeneration !== generation) return;
+      let payload;
       try {
-        const payload = JSON.parse(event.data);
+        payload = JSON.parse(event.data);
         if (payload.account && payload.account !== account) return;
       } catch { return; }
+      try { onHint(payload); } catch { /* A notification cannot stop chat updates. */ }
       scheduleRefresh();
     });
   }

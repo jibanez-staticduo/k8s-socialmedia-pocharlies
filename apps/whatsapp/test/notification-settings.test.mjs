@@ -6,10 +6,13 @@ import {
   NOTIFICATION_EMPTY_BODY,
   NOTIFICATION_HIDDEN_BODY,
   NOTIFICATION_HIDDEN_TITLE,
+  NOTIFICATION_REACTION_BODY,
+  NOTIFICATION_REACTION_HIDDEN_BODY,
   NOTIFICATION_STORAGE_PREFIX,
   createNotificationStore,
   installNotificationSettings,
   notificationPayload,
+  reactionNotificationPayload,
   notificationPermissionLabel,
   normalizeNotificationPreferences,
 } from '../public/notification-settings.mjs';
@@ -304,8 +307,8 @@ function openNotificationDialog(shell) {
 
 test('stored preferences keep only the switches the browser can honour', () => {
   assert.deepEqual(normalizeNotificationPreferences({}), {
-    messages: { enabled: true, sound: true },
-    groups: { enabled: true, sound: true },
+    messages: { enabled: true, reactions: true, sound: true },
+    groups: { enabled: true, reactions: true, sound: true },
     preview: true,
   });
   assert.deepEqual(normalizeNotificationPreferences({
@@ -315,14 +318,14 @@ test('stored preferences keep only the switches the browser can honour', () => {
     calls: true,
     statuses: { enabled: false },
   }), {
-    messages: { enabled: false, sound: false },
-    groups: { enabled: true, sound: true },
+    messages: { enabled: false, reactions: true, sound: false },
+    groups: { enabled: true, reactions: true, sound: true },
     preview: true,
   });
   for (const junk of [null, 'x', 42, [], true]) {
     assert.deepEqual(normalizeNotificationPreferences(junk), {
-      messages: { enabled: true, sound: true },
-      groups: { enabled: true, sound: true },
+      messages: { enabled: true, reactions: true, sound: true },
+      groups: { enabled: true, reactions: true, sound: true },
       preview: true,
     });
   }
@@ -336,7 +339,7 @@ test('preferences live under one key per account and broken JSON falls back', ()
 
   const saved = store.setCategory(ALPHA, 'groups', 'enabled', false);
   assert.equal(saved.saved, true);
-  assert.equal(storage.snapshot().get(alphaKey), '{"messages":{"enabled":true,"sound":true},"groups":{"enabled":false,"sound":true},"preview":true}');
+  assert.equal(storage.snapshot().get(alphaKey), '{"messages":{"enabled":true,"reactions":true,"sound":true},"groups":{"enabled":false,"reactions":true,"sound":true},"preview":true}');
   assert.equal(storage.snapshot().get(betaKey), '{"groups":{"enabled":false}}', 'saving alpha must not rewrite beta');
 });
 
@@ -378,6 +381,18 @@ test('turning previews off hides the chat name and the message text', () => {
   }
 });
 
+test('reaction alerts use a separate per-category switch and respect preview privacy', () => {
+  assert.deepEqual(reactionNotificationPayload({}, { name: 'Ana' }), {
+    title: 'Ana', body: NOTIFICATION_REACTION_BODY, silent: false,
+  });
+  const hidden = reactionNotificationPayload({ preview: false }, { name: 'Ana' });
+  assert.deepEqual([hidden.title, hidden.body], [NOTIFICATION_HIDDEN_TITLE, NOTIFICATION_REACTION_HIDDEN_BODY]);
+  const directOff = { messages: { enabled: true, reactions: false }, groups: { enabled: true, reactions: true } };
+  assert.equal(reactionNotificationPayload(directOff, { name: 'Ana' }), null);
+  assert.equal(reactionNotificationPayload(directOff, { isGroup: true, name: 'Equipo' }).title, 'Equipo');
+  assert.equal(reactionNotificationPayload({ groups: { enabled: false } }, { isGroup: true }), null);
+});
+
 test('the permission state is stated before the user is ever asked', () => {
   assert.match(notificationPermissionLabel('granted'), /activadas/);
   assert.match(notificationPermissionLabel('denied'), /permisos del sitio/);
@@ -393,18 +408,20 @@ test('the dialog offers only the switches that work and no technical notes', asy
   assert.ok(dialog, 'the Notificaciones row must open a modal');
   assert.deepEqual(
     [...dialog.querySelectorAll('input[type="checkbox"]')].map(input => input.id),
-    ['notification-preview', 'notification-messages-enabled', 'notification-messages-sound', 'notification-groups-enabled', 'notification-groups-sound'],
+    ['notification-preview', 'notification-messages-enabled', 'notification-messages-reactions', 'notification-messages-sound', 'notification-groups-enabled', 'notification-groups-reactions', 'notification-groups-sound'],
   );
   assert.deepEqual([...dialog.querySelectorAll('.feature-section-title')].map(heading => heading.textContent), ['Mensajes', 'Grupos']);
   assert.deepEqual(dialog.querySelectorAll('.settings-switch').map(row => row.querySelector('strong').textContent), [
     'Mostrar vista previa',
     'Mostrar notificaciones',
+    'Mostrar notificaciones de reacciones',
     'Reproducir sonido',
     'Mostrar notificaciones',
+    'Mostrar notificaciones de reacciones',
     'Reproducir sonido',
   ]);
   const text = dialog.textContent;
-  for (const hidden of ['reacci', 'estados', 'llamada', 'segundo plano', 'silent', 'Firefox', 'pendiente']) {
+  for (const hidden of ['estados', 'llamada', 'segundo plano', 'silent', 'Firefox', 'pendiente']) {
     assert.equal(text.toLowerCase().includes(hidden), false, `the everyday dialog must not carry "${hidden}" copy`);
   }
   assert.ok(dialog.getElementById('notification-permission-request'), 'an unasked permission needs an explicit activation button');
@@ -429,7 +446,7 @@ test('switches persist per account and a rejected write says so without losing t
   const shell = installShell({ storage });
   const { dialog } = openNotificationDialog(shell);
   dialog.getElementById('notification-groups-enabled').click();
-  assert.equal(storage.snapshot().get(alphaKey), '{"messages":{"enabled":true,"sound":true},"groups":{"enabled":false,"sound":true},"preview":true}');
+  assert.equal(storage.snapshot().get(alphaKey), '{"messages":{"enabled":true,"reactions":true,"sound":true},"groups":{"enabled":false,"reactions":true,"sound":true},"preview":true}');
   assert.equal(storage.snapshot().get(betaKey), '{"messages":{"enabled":false,"sound":true}}', 'alpha must not touch the beta key');
   assert.equal(dialog.getElementById('notification-storage-status').hidden, true, 'a successful write shows no warning');
 
@@ -491,7 +508,7 @@ test('reading window.localStorage may throw before any switch is drawn', () => {
   });
   assert.deepEqual(settings.preferences(), NOTIFICATION_DEFAULTS, 'a throwing storage falls back to the documented defaults');
   settings.open();
-  assert.equal(documentRef.querySelectorAll('.settings-switch').length, 5);
+  assert.equal(documentRef.querySelectorAll('.settings-switch').length, 7);
   documentRef.getElementById('notification-messages-sound').click();
   assert.match(documentRef.getElementById('notification-storage-status').textContent, /no se pueden guardar/i);
   assert.equal(settings.payloadFor({ isGroup: false, name: 'Ana', preview: 'Hola' }).silent, true);
@@ -589,8 +606,31 @@ test('muted chats and an account switch keep the notification baseline honest', 
   const dialog = openNotificationDialog({ ...shell, documentRef: shell.documentRef }).dialog;
   assert.equal(dialog.textContent.includes('Equipo'), false);
   dialog.getElementById('notification-groups-enabled').click();
-  assert.equal(shell.storage.snapshot().get(betaKey), '{"messages":{"enabled":true,"sound":true},"groups":{"enabled":false,"sound":true},"preview":true}');
+  assert.equal(shell.storage.snapshot().get(betaKey), '{"messages":{"enabled":true,"reactions":true,"sound":true},"groups":{"enabled":false,"reactions":true,"sound":true},"preview":true}');
   assert.equal(shell.storage.snapshot().has(alphaKey), false, 'beta changes must not create an alpha key');
+});
+
+test('reaction hints notify only for a known unmuted chat in the hidden active account', () => {
+  const shell = installShell();
+  const own = chat('peer@c.us', 'Ana');
+  shell.featureUI.chatsChanged([own, chat('muted@g.us', 'Equipo', { isGroup: true, muted: true })]);
+  const hint = { account: ALPHA, conversation_id: own.id, wa_message_id: 'target', reason: 'reaction-to-own-message' };
+  shell.featureUI.reactionHint(hint);
+  assert.deepEqual(shell.notifications.map(item => [item.title, item.body, item.silent]), [['Ana', NOTIFICATION_REACTION_BODY, false]]);
+  shell.featureUI.reactionHint({ ...hint, reason: 'reaction' });
+  shell.featureUI.reactionHint({ ...hint, account: BETA });
+  shell.featureUI.reactionHint({ ...hint, conversation_id: 'unknown' });
+  shell.featureUI.reactionHint({ ...hint, conversation_id: 'muted@g.us' });
+  assert.equal(shell.notifications.length, 1);
+
+  const dialog = openNotificationDialog(shell).dialog;
+  dialog.getElementById('notification-messages-reactions').click();
+  shell.documentRef.pressKey('Escape');
+  shell.featureUI.reactionHint(hint);
+  assert.equal(shell.notifications.length, 1, 'the reaction switch suppresses only reaction alerts');
+  shell.featureUI.accountChanged(BETA);
+  shell.featureUI.reactionHint(hint);
+  assert.equal(shell.notifications.length, 1, 'an old account hint cannot follow the switch');
 });
 
 function notificationKeys(storage) {

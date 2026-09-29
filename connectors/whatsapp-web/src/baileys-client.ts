@@ -1838,6 +1838,12 @@ export class BaileysClient extends EventEmitter {
         reactorJid: waMessage.senderWaId,
         reactionMessageId: waMessage.waMessageId,
         emoji: String(waMessage.metadata?.emoji || waMessage.content || ''),
+        // The key side decides whether the database may raise a
+        // reaction-to-own-message hint: false is a peer reacting to our message,
+        // true is one of our own devices (including the echo of reactToMessage).
+        // Passed raw so a key that never said stays unknown instead of becoming
+        // a false peer reaction.
+        fromMe: msg.key.fromMe,
       }).catch(error =>
         this.logger.warn(
           `reaction persistence failed for ${waMessage.waMessageId}: ${error?.message || error}`
@@ -2960,6 +2966,9 @@ export class BaileysClient extends EventEmitter {
       reactorJid: this.meJid || 'me',
       reactionMessageId: sent?.key?.id || undefined,
       emoji,
+      // Sent from this account, so the row must never read as a peer reaction
+      // even when the target message is one we sent ourselves.
+      fromMe: true,
     }).catch(error =>
       this.logger.warn(
         `outgoing reaction persistence failed for ${messageId}: ${error?.message || error}`

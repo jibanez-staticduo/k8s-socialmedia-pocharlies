@@ -69,7 +69,7 @@ let novedadesUI = null;
 let pinnedUI = null;
 let liveUpdates = null;
 const liveReady = import('./live-updates.mjs').then(({createLiveUpdates}) => {
-  liveUpdates = createLiveUpdates({refresh: async ({hidden}) => {
+  liveUpdates = createLiveUpdates({onHint: hint => featureUI?.reactionHint?.(hint), refresh: async ({hidden}) => {
     await Promise.all([loadChats({background: true}), hidden ? null : loadMessages(), hidden ? null : pinnedUI?.refresh()]);
   }});
 });

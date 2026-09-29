@@ -1445,10 +1445,17 @@ async function runDesktop(page, state, report) {
       const browserState = await page.evaluate(() => ({ permission: Notification.permission, hidden: document.hidden, notifications: window.__fixtureNotifications }));
       throw new Error(`${error.message}; browser=${JSON.stringify(browserState)}; alpha=${JSON.stringify(state.chats.alpha.find(chat => chat.id === 'alpha-direct'))}; recent=${JSON.stringify(state.log.slice(-8))}`);
     }
+    await page.evaluate(() => {
+      const stream = window.__presenceStreams.find(item => item.url.includes('/api/events?account=alpha') && !item.closed);
+      if (!stream) throw new Error('Live change stream missing');
+      stream.listeners.get('message')?.({data:JSON.stringify({account:'alpha', conversation_id:'alpha-direct', wa_message_id:'own-message', reason:'reaction-to-own-message'})});
+    });
+    await page.waitForFunction(() => (window.__fixtureNotifications || []).some(item => item.body === 'Han reaccionado a tu mensaje'));
     await selectAccount(page, 'beta', 'Bruno Fixture');
     const notifications = await page.evaluate(() => window.__fixtureNotifications || []);
     assert(notifications.some(item => item.title === 'Ana Fixture' && item.body.includes('Nuevo mensaje Alpha')), `alpha notification missing: ${JSON.stringify(notifications)}`);
     assert(notifications.find(item => item.body.includes('Nuevo mensaje Alpha')).silent, 'message sound preference was ignored');
+    assert(notifications.find(item => item.body === 'Han reaccionado a tu mensaje')?.silent, 'reaction sound preference was ignored');
     assert(!notifications.some(item => item.title === 'Bruno Fixture' && item.body.includes('Nuevo mensaje Alpha')), 'alpha notification leaked to beta');
     await openSettings(page);
     await page.locator('#feature-notifications').click();
