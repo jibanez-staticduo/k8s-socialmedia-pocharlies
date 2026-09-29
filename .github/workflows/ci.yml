@@ -82,7 +82,7 @@ jobs:
           # Matches the images and the root engines field. Node 20 went EOL in
           # April 2026 and cannot run the pinned pnpm.
           node-version: "22"
-      # corepack picks up packageManager (pnpm@11.17.0) from package.json.
+      # corepack picks up packageManager (pnpm@11.18.0) from package.json.
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm contract:check
@@ -95,7 +95,7 @@ jobs:
     with:
       runner: ${{ github.repository_owner == 'pocharlies-org' && 'arc-k8s' || 'ubuntu-latest' }}
       node_version: "22"
-      pnpm_version: "11.17.0"
+      pnpm_version: "11.18.0"
       # En pull_request, github.repository_owner es el dueño de la base, así que también
       # es 'pocharlies-org' en PRs de fork: esas ejecuciones no reciben secretos de Harbor
       # (las imágenes base del proxy-cache contestan 401). Se construye solo cuando el
