@@ -34,7 +34,7 @@ jobs:
       - run: python3 -m unittest scripts/test_render_connectors.py
 
   whatsapp-app:
-    runs-on: ${{ github.repository_owner == 'pocharlies-org' && 'arc-k8s' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: apps/whatsapp
