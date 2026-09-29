@@ -105,6 +105,9 @@ jobs:
       # SC-1225: the whatsapp-web connector suite (node:test) — credential-session,
       # the per-sub pairing pool and its internal API.
       - run: pnpm --filter @mcp-socialmedia/connector test
+        env:
+          # Import-time validation requires an explicit URL; tests mock DB calls.
+          DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
 
   standard:
     needs: [s3-tests]
