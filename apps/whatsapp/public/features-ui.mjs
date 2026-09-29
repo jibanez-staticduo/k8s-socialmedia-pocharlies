@@ -483,6 +483,7 @@ export function installFeatureUI({
   });
   const statusNotifications = createStatusNotificationMonitor({
     documentRef,
+    windowRef,
     getAccount: () => runtime.account,
     permission: () => runtime.notificationPermission,
     loadAuthors: account => api(`/api/novedades/status/authors?${new URLSearchParams({ account })}`),

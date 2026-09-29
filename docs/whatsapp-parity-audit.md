@@ -103,7 +103,7 @@ means work remains; it must not be hidden by a disabled or cosmetic control.
 | Channels | In validation | Account-scoped catalogue and timeline are available. Explicit provider lookup and confirmed follow/unfollow have synthetic proxy, API and browser coverage. A read-only live lookup of an existing personal-account channel returned HTTP 200 with the exact requested identity on 29 Sep; live follow/unfollow and remote directory discovery remain unverified |
 | Chat list options and contact names | Partial | Context-menu actions and saved-name precedence deployed 9b3056c; targeted live name backfill verified. Block/unblock in contact info and the row menu requires provider confirmation. Clear/delete need provider/local-history synchronization; chat lock has no public Baileys rc13 operation |
 | Chat export / block / clear / delete / lock | Partial | TXT export of synchronized history verified; block/clear/delete/lock require backend semantics and safe tests |
-| Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes navigation, browser Back/Forward between chat and list, reload after an open chat, account switching, no horizontal overflow, safe areas and 16px inputs; manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
+| Accessibility, responsive layouts and iOS install | In validation | iPhone-sized Playwright QA passes in Chromium and WebKit: navigation, browser Back/Forward between chat and list, reload after an open chat, account switching, no horizontal overflow, safe areas and 16px inputs. Manifest, PNG icons and iOS standalone metadata pass. Real Safari Home Screen install remains unverified |
 
 The global library's longest-first option orders by saved audio/video seconds,
 then timestamp and attachment ID for stable pagination. The connector records
@@ -579,6 +579,10 @@ Safari fetch installation metadata without making chats or scripts public.
 The check must include a fresh Keycloak login from the Home Screen app: its
 external-domain redirect may leave standalone mode on iOS, which the static
 manifest and Chromium test cannot validate.
+On 2026-09-29 the same mobile fixture also passed in WebKit. WebKit exposed a
+navigation edge: its `visibilitychange` fires while a pending status-catalog
+request can be aborted by reload. The status monitor now defers the hidden-tab
+check and cancels it at `pagehide`; a regression test covers that ordering.
 On 2026-09-28 the mobile Playwright fixture passed at iPhone dimensions and
 320/375/430px widths, including account switching, chat/history navigation,
 safe-area layout, input sizing, and pinch-gesture cancellation outside the
@@ -632,7 +636,10 @@ List names and membership now persist in SocialMedia's account-scoped server
 state and reconcile on account selection, so they follow the account across
 browsers. Legacy browser-only lists remain visible until explicitly changed.
 These are SocialMedia lists: synchronization with WhatsApp's own lists across
-its clients is still absent.
+its clients is still absent. Baileys rc13 exposes `addLabel` and
+`addChatLabel`, but those are label actions, not a proven representation of
+WhatsApp Messenger's custom chat lists; mapping the two would risk mutating a
+different provider feature. No list write is sent through these methods.
 
 Status privacy reads the provider's current audience category per account.
 Baileys 7.0.0-rc13 accepts `all`, `contacts`, `contact_blacklist` and `none`;

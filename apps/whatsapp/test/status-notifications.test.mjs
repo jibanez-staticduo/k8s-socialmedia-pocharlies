@@ -104,3 +104,39 @@ test('a late response from the old account cannot seed or notify the new account
   assert.deepEqual(delivered, []);
   monitor.destroy();
 });
+
+test('pagehide cancels a hidden-tab check before Safari aborts its request', async () => {
+  const handlers = new Map();
+  const windowHandlers = new Map();
+  const scheduled = new Map();
+  let nextTimer = 0;
+  let reads = 0;
+  const documentRef = {
+    hidden: false,
+    addEventListener: (name, handler) => handlers.set(name, handler),
+    removeEventListener: name => handlers.delete(name),
+  };
+  const windowRef = {
+    addEventListener: (name, handler) => windowHandlers.set(name, handler),
+    removeEventListener: name => windowHandlers.delete(name),
+  };
+  const monitor = createStatusNotificationMonitor({
+    documentRef, windowRef,
+    getAccount: () => 'personal', permission: () => 'granted',
+    loadAuthors: async () => { reads += 1; return { account: 'personal', authors: [] }; },
+    onStatus() {},
+    setIntervalRef: () => 1, clearIntervalRef() {},
+    setTimeoutRef: callback => { const id = ++nextTimer; scheduled.set(id, callback); return id; },
+    clearTimeoutRef: id => scheduled.delete(id),
+  });
+  monitor.start('personal');
+  await new Promise(resolve => setImmediate(resolve));
+  documentRef.hidden = true;
+  handlers.get('visibilitychange')();
+  assert.equal(scheduled.size, 1);
+  windowHandlers.get('pagehide')();
+  assert.equal(scheduled.size, 0);
+  assert.equal(reads, 1, 'navigation must not launch another status request');
+  monitor.destroy();
+  assert.equal(windowHandlers.size, 0);
+});

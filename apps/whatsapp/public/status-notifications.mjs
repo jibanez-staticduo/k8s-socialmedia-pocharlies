@@ -6,10 +6,13 @@ export function createStatusNotificationMonitor({
   loadAuthors,
   onStatus,
   documentRef = document,
+  windowRef = globalThis.window,
   getAccount,
   permission,
   setIntervalRef = setInterval,
   clearIntervalRef = clearInterval,
+  setTimeoutRef = setTimeout,
+  clearTimeoutRef = clearTimeout,
   pollMs = DEFAULT_POLL_MS,
 } = {}) {
   let account = '';
@@ -17,6 +20,12 @@ export function createStatusNotificationMonitor({
   let pendingGeneration = -1;
   let baseline = null;
   let timer = null;
+  let visibilityTimer = null;
+
+  function cancelVisibilityCheck() {
+    if (visibilityTimer) clearTimeoutRef(visibilityTimer);
+    visibilityTimer = null;
+  }
 
   async function check() {
     const currentGeneration = generation;
@@ -54,6 +63,7 @@ export function createStatusNotificationMonitor({
     generation += 1;
     account = '';
     baseline = null;
+    cancelVisibilityCheck();
     if (timer) clearIntervalRef(timer);
     timer = null;
   }
@@ -67,7 +77,20 @@ export function createStatusNotificationMonitor({
     timer?.unref?.();
   }
 
-  const visibilityChanged = () => { if (account) void check(); };
+  const visibilityChanged = () => {
+    if (!account) return;
+    cancelVisibilityCheck();
+    if (!documentRef.hidden) { void check(); return; }
+    // Safari fires visibilitychange before pagehide on navigation. Waiting a
+    // moment lets pagehide cancel a request that the browser would abort anyway.
+    visibilityTimer = setTimeoutRef(() => { visibilityTimer = null; void check(); }, 500);
+    visibilityTimer?.unref?.();
+  };
   documentRef.addEventListener('visibilitychange', visibilityChanged);
-  return { start, check, stop, destroy() { stop(); documentRef.removeEventListener('visibilitychange', visibilityChanged); } };
+  windowRef?.addEventListener?.('pagehide', cancelVisibilityCheck);
+  return { start, check, stop, destroy() {
+    stop();
+    documentRef.removeEventListener('visibilitychange', visibilityChanged);
+    windowRef?.removeEventListener?.('pagehide', cancelVisibilityCheck);
+  } };
 }

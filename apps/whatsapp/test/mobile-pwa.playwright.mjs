@@ -36,6 +36,7 @@ try {
       ? {accounts: [{id: 'personal', label: 'Personal'}, {id: 'secondary', label: 'Secundaria'}], sendingEnabled: true}
       : url.pathname === '/api/chats'
         ? {chats: [{id: `${account}-chat`, name: account === 'personal' ? 'Ana' : 'Bruno', preview: 'Hola', unread: 0, pinned: true}]}
+        : url.pathname === '/api/novedades/status/authors' ? {account, authors: []}
         : url.pathname === '/api/messages' ? {messages: [{id: 'one', text: 'Hola', timestamp: '2026-09-28T10:00:00Z'}, {id: 'two', text: `https://example.com/${'unbroken'.repeat(90)}`, timestamp: '2026-09-28T10:01:00Z'}, {id: 'image-current', type: 'IMAGE', timestamp: '2026-09-28T10:02:00Z', attachments: [{id: 'attachment-current', name: 'current.png', mimeType: 'image/png', url: `/api/media/attachment-current?account=${account}&chat=${account}-chat`}]}]}
           : url.pathname === '/api/chats/media' ? {account, chat: url.searchParams.get('chat'), items: url.searchParams.get('cursor')
             ? [{id: 'attachment-older', url: `/api/media/attachment-older?account=${account}&chat=${account}-chat`, name: 'older.png'}]
