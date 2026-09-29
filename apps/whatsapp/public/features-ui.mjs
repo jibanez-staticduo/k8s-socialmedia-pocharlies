@@ -2,6 +2,7 @@
 
 import { createPageFetcher, exportConversationText, ChatExportCanceled } from './chat-export.mjs';
 import { installNotificationSettings } from './notification-settings.mjs';
+import { createStatusNotificationMonitor } from './status-notifications.mjs';
 import { installContactDirectoryUI } from './contact-directory-ui.mjs';
 import { createPollComposer } from './poll-composer.mjs';
 import { createEventComposer } from './event-composer.mjs';
@@ -479,6 +480,21 @@ export function installFeatureUI({
     openModal,
     permission: () => runtime.notificationPermission,
     requestPermission: () => readNotifications(),
+  });
+  const statusNotifications = createStatusNotificationMonitor({
+    documentRef,
+    getAccount: () => runtime.account,
+    permission: () => runtime.notificationPermission,
+    loadAuthors: account => api(`/api/novedades/status/authors?${new URLSearchParams({ account })}`),
+    onStatus: ({ account, author, name, latest }) => {
+      const delivery = notificationSettings?.statusPayloadFor?.({ name });
+      if (!delivery || !windowRef?.Notification) return;
+      new windowRef.Notification(delivery.title, {
+        body: delivery.body,
+        silent: delivery.silent,
+        tag: `socialmedia-status-${account}-${author}-${latest}`,
+      });
+    },
   });
 
   function prefs() { return store.read(runtime.account); }
@@ -2113,7 +2129,7 @@ export function installFeatureUI({
     runtime.presenceStream?.close(); runtime.presenceStream = null;
     runtime.presenceEventVersion = 0;
     runtime.closeAttachMenu?.();
-    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); runtime.notificationSnapshots.clear(); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
+    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); runtime.notificationSnapshots.clear(); statusNotifications.start(runtime.account); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
   }
 
   async function markVisibleRead() {

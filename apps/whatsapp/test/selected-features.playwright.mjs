@@ -151,6 +151,7 @@ function makeMockState() {
     avatarFails: process.env.QA_AVATAR_404_ONLY === '1',
     directPresence: 'online',
     blockedContacts: new Map(),
+    statusAuthors: { alpha: [], beta: [] },
   };
 }
 
@@ -256,6 +257,7 @@ async function fulfillApi(route, state) {
   }
 
   if (pathName === '/api/accounts' && request.method() === 'GET') return jsonResponse(route, { accounts, sendingEnabled: true });
+  if (pathName === '/api/novedades/status/authors' && request.method() === 'GET') return jsonResponse(route, { account, authors: clone(state.statusAuthors[account] || []) });
   if (pathName === '/api/models' && request.method() === 'GET') return jsonResponse(route, { models: [{ id: 'fixture-model' }], defaultModel: 'fixture-model' });
 
   if (pathName === '/api/chats' && request.method() === 'GET') {
@@ -1451,11 +1453,16 @@ async function runDesktop(page, state, report) {
       stream.listeners.get('message')?.({data:JSON.stringify({account:'alpha', conversation_id:'alpha-direct', wa_message_id:'own-message', reason:'reaction-to-own-message'})});
     });
     await page.waitForFunction(() => (window.__fixtureNotifications || []).some(item => item.body === 'Han reaccionado a tu mensaje'));
+    await waitForCondition(() => state.log.some(item => item.path === '/api/novedades/status/authors' && item.query.account === 'alpha'), 'status baseline missing');
+    state.statusAuthors.alpha = [{ id: '111111111@s.whatsapp.net', name: 'Estado Fixture', own: false, count: 1, unseen: 1, latestTimestamp: new Date().toISOString() }];
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.waitForFunction(() => (window.__fixtureNotifications || []).some(item => item.title === 'Estado Fixture' && item.body === 'Nuevo estado'));
     await selectAccount(page, 'beta', 'Bruno Fixture');
     const notifications = await page.evaluate(() => window.__fixtureNotifications || []);
     assert(notifications.some(item => item.title === 'Ana Fixture' && item.body.includes('Nuevo mensaje Alpha')), `alpha notification missing: ${JSON.stringify(notifications)}`);
     assert(notifications.find(item => item.body.includes('Nuevo mensaje Alpha')).silent, 'message sound preference was ignored');
     assert(notifications.find(item => item.body === 'Han reaccionado a tu mensaje')?.silent, 'reaction sound preference was ignored');
+    assert.equal(notifications.filter(item => item.body === 'Nuevo estado').length, 1, 'one new status should alert once');
     assert(!notifications.some(item => item.title === 'Bruno Fixture' && item.body.includes('Nuevo mensaje Alpha')), 'alpha notification leaked to beta');
     await openSettings(page);
     await page.locator('#feature-notifications').click();

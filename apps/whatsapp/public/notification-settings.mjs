@@ -7,7 +7,7 @@
  * each Messages/Groups subpage offers "Mostrar notificaciones", "Mostrar
  * notificaciones de reacciones" and "Reproducir sonido", with a preview switch,
  * an outgoing sound and background synchronization above them. A browser tab can
- * honour category and reaction switches, native sound through the `silent`
+ * honour message, group, status and reaction switches, native sound through the `silent`
  * option of the Notification constructor, and preview privacy. Only these are
  * controls here; the rest stays pending in
  * docs/whatsapp-parity-audit.md so the everyday dialog never shows a control
@@ -19,10 +19,11 @@
  */
 
 export const NOTIFICATION_STORAGE_PREFIX = 'socialmedia-wa-notifications:';
-export const NOTIFICATION_CATEGORY_LABELS = Object.freeze({ messages: 'Mensajes', groups: 'Grupos' });
+export const NOTIFICATION_CATEGORY_LABELS = Object.freeze({ messages: 'Mensajes', groups: 'Grupos', statuses: 'Estados' });
 export const NOTIFICATION_ROW_LABELS = Object.freeze({
   preview: Object.freeze(['Mostrar vista previa', 'Incluye el nombre del chat y el texto del mensaje en la notificación.']),
   enabled: Object.freeze(['Mostrar notificaciones', 'Avisa cuando llega un mensaje nuevo a este tipo de chat.']),
+  statusesEnabled: Object.freeze(['Mostrar notificaciones', 'Avisa cuando otra persona publica un estado nuevo.']),
   reactions: Object.freeze(['Mostrar notificaciones de reacciones', 'Avisa cuando otra persona reacciona a uno de tus mensajes.']),
   sound: Object.freeze(['Reproducir sonido', 'Usa el sonido de aviso del sistema para estas notificaciones.']),
 });
@@ -32,6 +33,7 @@ export const NOTIFICATION_HIDDEN_BODY = 'Mensaje nuevo';
 export const NOTIFICATION_EMPTY_BODY = 'Nuevo mensaje';
 export const NOTIFICATION_REACTION_BODY = 'Han reaccionado a tu mensaje';
 export const NOTIFICATION_REACTION_HIDDEN_BODY = 'Nueva reacción';
+export const NOTIFICATION_STATUS_BODY = 'Nuevo estado';
 
 function text(value) {
   return value == null ? '' : String(value);
@@ -46,6 +48,7 @@ function switchValue(value, fallback = true) {
 export const NOTIFICATION_DEFAULTS = Object.freeze({
   messages: Object.freeze({ enabled: true, reactions: true, sound: true }),
   groups: Object.freeze({ enabled: true, reactions: true, sound: true }),
+  statuses: Object.freeze({ enabled: true, sound: true }),
   preview: true,
 });
 
@@ -54,9 +57,9 @@ export function normalizeNotificationPreferences(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
   const category = name => {
     const raw = source[name] && typeof source[name] === 'object' ? source[name] : {};
-    return { enabled: switchValue(raw.enabled, true), reactions: switchValue(raw.reactions, true), sound: switchValue(raw.sound, true) };
+    return { enabled: switchValue(raw.enabled, true), ...(name === 'statuses' ? {} : { reactions: switchValue(raw.reactions, true) }), sound: switchValue(raw.sound, true) };
   };
-  return { messages: category('messages'), groups: category('groups'), preview: switchValue(source.preview, true) };
+  return { messages: category('messages'), groups: category('groups'), statuses: category('statuses'), preview: switchValue(source.preview, true) };
 }
 
 /**
@@ -149,6 +152,16 @@ export function reactionNotificationPayload(preferences = {}, { isGroup = false,
   };
 }
 
+export function statusNotificationPayload(preferences = {}, { name = '' } = {}) {
+  const normalized = normalizeNotificationPreferences(preferences);
+  if (!normalized.statuses.enabled) return null;
+  return {
+    title: normalized.preview ? text(name).trim() || NOTIFICATION_HIDDEN_TITLE : NOTIFICATION_HIDDEN_TITLE,
+    body: normalized.preview ? NOTIFICATION_STATUS_BODY : 'Nuevo estado disponible',
+    silent: !normalized.statuses.sound,
+  };
+}
+
 export function notificationPermissionLabel(permission = 'default', supported = true) {
   if (!supported) return 'Este navegador no ofrece notificaciones de escritorio.';
   if (permission === 'granted') return 'Las notificaciones están activadas en este navegador.';
@@ -197,6 +210,10 @@ export function installNotificationSettings({
     return reactionNotificationPayload(preferences(), { isGroup, name });
   }
 
+  function statusPayloadFor({ name = '' } = {}) {
+    return statusNotificationPayload(preferences(), { name });
+  }
+
   function showStorageFailure(saved) {
     storageFailure = saved ? '' : 'No se pueden guardar las preferencias en este navegador; se aplican mientras dure la sesión.';
     if (storageNotice) {
@@ -238,10 +255,11 @@ export function installNotificationSettings({
     const heading = make('h3', 'feature-section-title', NOTIFICATION_CATEGORY_LABELS[category]);
     heading.id = `notification-${category}-title`;
     const current = preferences()[category];
+    const enabledLabel = category === 'statuses' ? NOTIFICATION_ROW_LABELS.statusesEnabled : NOTIFICATION_ROW_LABELS.enabled;
     section.append(
       heading,
-      switchRow(`${category}.enabled`, { title: NOTIFICATION_ROW_LABELS.enabled[0], hint: NOTIFICATION_ROW_LABELS.enabled[1], checked: current.enabled }),
-      switchRow(`${category}.reactions`, { title: NOTIFICATION_ROW_LABELS.reactions[0], hint: NOTIFICATION_ROW_LABELS.reactions[1], checked: current.reactions }),
+      switchRow(`${category}.enabled`, { title: enabledLabel[0], hint: enabledLabel[1], checked: current.enabled }),
+      ...(category === 'statuses' ? [] : [switchRow(`${category}.reactions`, { title: NOTIFICATION_ROW_LABELS.reactions[0], hint: NOTIFICATION_ROW_LABELS.reactions[1], checked: current.reactions })]),
       switchRow(`${category}.sound`, { title: NOTIFICATION_ROW_LABELS.sound[0], hint: NOTIFICATION_ROW_LABELS.sound[1], checked: current.sound }),
     );
     return section;
@@ -292,7 +310,7 @@ export function installNotificationSettings({
   function render() {
     if (!body?.isConnected) return;
     const active = text(documentRef.activeElement?.dataset?.notificationSetting);
-    body.replaceChildren(permissionSection(), previewSection(), categorySection('messages'), categorySection('groups'));
+    body.replaceChildren(permissionSection(), previewSection(), categorySection('messages'), categorySection('groups'), categorySection('statuses'));
     if (active) body.querySelector?.(`[data-notification-setting="${active}"]`)?.focus?.();
   }
 
@@ -312,6 +330,7 @@ export function installNotificationSettings({
     preferences,
     payloadFor,
     reactionPayloadFor,
+    statusPayloadFor,
     store,
     isOpen: () => Boolean(body?.isConnected) && text(getAccount()) === openedFor,
   };
