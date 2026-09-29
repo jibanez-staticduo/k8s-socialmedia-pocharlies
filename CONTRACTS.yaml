@@ -125,6 +125,7 @@ contracts:
   - id: http.whatsapp-connector.auth-qr.v2
     kind: http-route
     value: /auth/qr
+    anchor: auth/qr
     role: provider
     files:
       - connectors/whatsapp-web/src/api/controller.ts
