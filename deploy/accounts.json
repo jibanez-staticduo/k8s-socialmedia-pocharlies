@@ -21,6 +21,7 @@
   {
     "channel": "instagram",
     "accountId": "instagram",
+    "namespace": "personal",
     "label": "Instagram",
     "connectorUrl": "http://instagram-connector:3003",
     "enabled": true,
