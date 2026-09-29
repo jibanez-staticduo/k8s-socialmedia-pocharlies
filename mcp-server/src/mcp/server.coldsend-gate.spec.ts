@@ -322,7 +322,7 @@ describe('handleForwardMessage cold-send gate (professional)', () => {
         toChatId: '34660242739',
         account: 'PROFESSIONAL',
       })
-    ).rejects.toThrow("Unknown or disabled account: PROFESSIONAL");
+    ).rejects.toThrow("Unknown or disabled whatsapp account: PROFESSIONAL");
     expect(query).not.toHaveBeenCalled();
     expect(connectorCall).not.toHaveBeenCalled();
   });

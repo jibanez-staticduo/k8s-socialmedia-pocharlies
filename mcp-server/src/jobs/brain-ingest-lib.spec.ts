@@ -16,7 +16,8 @@ describe('brain ingest lib', () => {
 
   it('routes account and platform to Brain instance and adapter', () => {
     expect(instanceForAccount('personal')).toBe('personal');
-    expect(instanceForAccount('professional')).toBe('professional');
+    // The namespace 'professional' routes into the registry's Skirmshop brain.
+    expect(instanceForAccount('professional')).toBe('skirmshop');
     expect(adapterForPlatform('telegram')).toBe('telegram');
     expect(adapterForPlatform('instagram')).toBe('instagram');
     expect(adapterForPlatform('whatsapp')).toBe('whatsapp');
@@ -49,5 +50,24 @@ describe('brain ingest lib', () => {
     expect(doc.metadata.account).toBe('personal');
     expect(doc.metadata.conversation_id).toBe('conv1');
     expect(doc.metadata.custom).toBe('value');
+  });
+});
+
+describe('registry-driven namespaces and brain instances', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const lib = require('./brain-ingest-lib');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useTestAccounts } = require('../domain/test-accounts');
+
+  it('ingests every registry namespace, routed to its brainInstance', () => {
+    useTestAccounts({
+      whatsapp: { personal: 'http://wa', professional: 'http://wa-pro', leila: 'http://wa-l' },
+    });
+    const ns: string[] = lib.ingestNamespaces();
+    expect(ns).toEqual(expect.arrayContaining(['personal', 'professional', 'leila']));
+    expect(lib.instanceForAccount('professional')).toBe('skirmshop');
+    expect(lib.instanceForAccount('personal')).toBe('personal');
+    expect(lib.instanceForAccount('leila')).toBe('personal');
+    expect(() => lib.instanceForAccount('ghost')).toThrow(/not declared/);
   });
 });

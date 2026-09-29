@@ -19,6 +19,7 @@ import {
   StatusSendUncertainError,
   type NovedadesStatusPublishInput,
 } from '../baileys-client';
+import { MessageUnavailableError } from '../durable-message-store';
 import { QRHandler } from '../qr-handler';
 import { createHMACAuth, AuthenticatedRequest } from './auth';
 import { contactBlockJid, ContactBlockError } from '../contact-block';
@@ -454,6 +455,12 @@ function errorMessage(error: unknown): string {
 }
 
 function capabilityErrorResponse(res: Response, error: unknown): void {
+  if (error instanceof MessageUnavailableError) {
+    res
+      .status(error.status)
+      .json({ ok: false, error: { code: error.failureClass, message: error.message } });
+    return;
+  }
   if (error instanceof ContactBlockError) {
     res
       .status(error.status)
@@ -952,7 +959,8 @@ export function createRouter(
     })();
   });
 
-  // QR access is protected by the router access middleware.
+  // CONTRACT: http.whatsapp-connector.auth-qr — path and {qrCode, expiresAt} are frozen.
+  // The connector access middleware protects this QR response.
   router.get('/auth/qr', (req: Request, res: Response) => {
     const qr = qrHandler.getCurrentQR();
     if (!qr) {
@@ -1879,6 +1887,10 @@ export function createRouter(
           ...(viewOnceRequested ? { viewOnce: true } : {}),
         });
       } catch (e) {
+        if (e instanceof MessageUnavailableError) {
+          res.status(e.status).json({ error: e.message, failureClass: e.failureClass });
+          return;
+        }
         if (e instanceof SendAlreadyClaimedError) {
           res.status(409).json({
             error: 'Send outcome is uncertain; check message history before a new send',
@@ -1954,6 +1966,7 @@ export function createRouter(
   }
 
   // Forward message
+  // CONTRACT: http.whatsapp-connector.messages-forward.v1 — body, {forwarded, messageId}, 404 message_unavailable
   router.post('/messages/forward', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {
@@ -1972,6 +1985,10 @@ export function createRouter(
         const forwardedMessageId = await client.forwardMessage(chatId, messageId, toChatId);
         res.json({ ok: true, forwarded: true, messageId: forwardedMessageId });
       } catch (e) {
+        if (e instanceof MessageUnavailableError) {
+          res.status(e.status).json({ error: e.message, failureClass: e.failureClass });
+          return;
+        }
         capabilityErrorResponse(res, e);
       }
     })();

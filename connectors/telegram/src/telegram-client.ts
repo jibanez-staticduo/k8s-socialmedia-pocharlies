@@ -1,8 +1,76 @@
-import { TelegramClient, MemoryStorage, InputMedia, Message, Peer, Chat } from '@mtcute/node';
+import {
+  TelegramClient,
+  MemoryStorage,
+  MemoryStorageDriver,
+  MemoryKeyValueRepository,
+  MemoryAuthKeysRepository,
+  MemoryPeersRepository,
+  MemoryRefMessagesRepository,
+  InputMedia,
+  Message,
+  Peer,
+  Chat,
+} from '@mtcute/node';
+import type { ITelegramStorageProvider } from '@mtcute/node';
 import type { CommonSendParams } from '@mtcute/node/methods.js';
 import { EventEmitter } from 'events';
 import pino from 'pino';
 import { notifyDashboard as dashboardNotify } from './dashboard-notifier';
+import { isSessionInvalidatedError } from './credential-session';
+
+/**
+ * SC-1145: in-memory storage driver with a save() hook.
+ *
+ * mtcute persists session state by calling StorageManager.save(), which
+ * delegates to `driver.save?.()` — on session import (start()), on every
+ * per-DC auth-key creation, and on update-state sync. The plain
+ * MemoryStorageDriver has no save() (nothing to write); this subclass adds
+ * one, using the extension point mtcute exports (IStorageDriver.save is
+ * optional), so the connector gets the exact counterpart of the baileys
+ * `saveCreds` trigger: every library persist schedules the credential-store
+ * write-back.
+ */
+export class HookedMemoryStorageDriver extends MemoryStorageDriver {
+  constructor(private readonly onPersist: () => void) {
+    super();
+  }
+
+  save(): void {
+    this.onPersist();
+  }
+}
+
+/**
+ * SC-1145: the storage provider for a per-sub connector — the same four
+ * memory repositories MemoryStorage builds, all wired to the hooked driver.
+ */
+export class PersistHookedStorage implements ITelegramStorageProvider {
+  readonly driver: HookedMemoryStorageDriver;
+  readonly kv: MemoryKeyValueRepository;
+  readonly authKeys: MemoryAuthKeysRepository;
+  readonly peers: MemoryPeersRepository;
+  readonly refMessages: MemoryRefMessagesRepository;
+
+  constructor(onPersist: () => void) {
+    this.driver = new HookedMemoryStorageDriver(onPersist);
+    this.kv = new MemoryKeyValueRepository(this.driver);
+    this.authKeys = new MemoryAuthKeysRepository(this.driver);
+    this.peers = new MemoryPeersRepository(this.driver);
+    this.refMessages = new MemoryRefMessagesRepository(this.driver);
+  }
+}
+
+/**
+ * SC-1145: storage selection. Only a per-sub connector (credentialSessionKey
+ * set) gets the persist hook; the house accounts (no key, flags OFF) keep a
+ * plain `new MemoryStorage()`, byte-identical to before.
+ */
+export function createTelegramStorage(
+  credentialSessionKey: string | null | undefined,
+  onPersist: () => void
+): ITelegramStorageProvider {
+  return credentialSessionKey ? new PersistHookedStorage(onPersist) : new MemoryStorage();
+}
 
 export interface TelegramMessage {
   conversationId: string;
@@ -36,12 +104,37 @@ export interface TelegramMessage {
   isOutbound: boolean;
   chatType: 'private' | 'group' | 'supergroup' | 'channel';
   chatTitle?: string;
+  /**
+   * Inline keyboard rows, when the message carries one.
+   *
+   * Needed to drive third-party bots (BotFather, etc.) over the API: their
+   * callback_data is an opaque token, so a caller cannot guess it — it has to
+   * read the button and then press it. `data` is the UTF-8 decoding and is
+   * only present when it round-trips byte-for-byte; `dataB64` is always the
+   * exact bytes and is what a click should send back.
+   */
+  inlineButtons?: InlineKeyboardButton[][];
+}
+
+export interface InlineKeyboardButton {
+  /** Button label as shown to the user. */
+  text: string;
+  /** mtcute button kind: callback | url | game | web_app | ... */
+  type: string;
+  /** UTF-8 payload, only when it re-encodes to the original bytes. */
+  data?: string;
+  /** Exact callback bytes, base64. Use this to click losslessly. */
+  dataB64?: string;
+  /** Target for url / web_app buttons. */
+  url?: string;
 }
 
 export interface TelegramClientConfig {
   apiId: number;
   apiHash: string;
   sessionString?: string;
+  /** SC-1145: set only on a per-sub connector; unset = house account, legacy path. */
+  credentialSessionKey?: string | null;
 }
 
 /**
@@ -66,6 +159,51 @@ function mapChatType(peer: Peer | undefined | null): TelegramMessage['chatType']
   return 'supergroup';
 }
 
+/**
+ * Extract inline keyboard rows from a message's reply markup.
+ *
+ * Returns undefined when the message has no inline keyboard. Button `data` is
+ * kept only when its UTF-8 decoding re-encodes to the original bytes, so a
+ * caller can never click a lossy string by accident; `dataB64` always carries
+ * the exact bytes.
+ */
+function inlineButtonsOf(markup: unknown): InlineKeyboardButton[][] | undefined {
+  const rows = markup as { type?: string; buttons?: unknown[][] } | null;
+  if (!rows || rows.type !== 'inline' || !Array.isArray(rows.buttons)) return undefined;
+
+  const out: InlineKeyboardButton[][] = [];
+  for (const row of rows.buttons) {
+    if (!Array.isArray(row)) continue;
+    const buttons: InlineKeyboardButton[] = [];
+    for (const raw of row) {
+      const btn = raw as {
+        _?: string;
+        text?: string;
+        data?: Uint8Array;
+        url?: string;
+        web_app?: { url?: string };
+      };
+      if (!btn || typeof btn.text !== 'string') continue;
+      const button: InlineKeyboardButton = {
+        text: btn.text,
+        type: (btn._ || '').replace(/^keyboardButton/, '').toLowerCase() || 'unknown',
+      };
+      if (btn.data && btn.data.length > 0) {
+        const bytes = Buffer.from(btn.data);
+        button.dataB64 = bytes.toString('base64');
+        const asText = bytes.toString('utf8');
+        // Only offer the readable form when it survives a re-encode.
+        if (Buffer.from(asText, 'utf8').equals(bytes)) button.data = asText;
+      }
+      const url = btn.url || btn.web_app?.url;
+      if (typeof url === 'string') button.url = url;
+      buttons.push(button);
+    }
+    if (buttons.length > 0) out.push(buttons);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 function chatTitleOf(peer: Peer | undefined | null): string | undefined {
   if (!peer) return undefined;
   if (peer.type === 'chat') return peer.title || undefined;
@@ -81,6 +219,10 @@ export class TelegramClientWrapper extends EventEmitter {
   private selfId?: string;
   private unreadChatsCache: { expiresAtMs: number; value: any[] } | null = null;
   private unreadChatsInflight: Promise<any[]> | null = null;
+  // SC-1145 credential-store hooks (see setSessionPersistHook /
+  // setSessionInvalidatedHook). Unset = legacy behaviour, byte for byte.
+  private sessionPersistHook: (() => void) | null = null;
+  private sessionInvalidatedHook: (() => Promise<void> | void) | null = null;
 
   constructor(config: TelegramClientConfig) {
     super();
@@ -92,7 +234,11 @@ export class TelegramClientWrapper extends EventEmitter {
     this.client = new TelegramClient({
       apiId: config.apiId,
       apiHash: config.apiHash,
-      storage: new MemoryStorage(),
+      // Per-sub connector → hooked driver whose save() fires the persist hook;
+      // house account (no key) → plain MemoryStorage, exactly as before.
+      storage: createTelegramStorage(config.credentialSessionKey, () =>
+        this.sessionPersistHook?.()
+      ),
       // Dispatch outgoing messages we send to the event handler too. mtcute
       // defaults to no-dispatch on self-sent messages; we want them on NATS
       // for parity with the previous gramjs behavior (incoming + outgoing).
@@ -106,7 +252,22 @@ export class TelegramClientWrapper extends EventEmitter {
     }
 
     // start() consumes the session string and signs in
-    await this.client.start({ session: this.sessionString });
+    try {
+      await this.client.start({ session: this.sessionString });
+    } catch (e) {
+      // SC-1145: a session the server rejects (revoked from the user's app,
+      // deactivated) must take its stored row with it — otherwise every pod
+      // restart re-applies the dead credential and loops. The connector still
+      // fails the start (the pairing gesture is the operator's to redo); we
+      // only guarantee the store does not resurrect it.
+      if (isSessionInvalidatedError(e) && this.sessionInvalidatedHook) {
+        this.logger.warn('Telegram session was revoked/expired — invalidating stored credential');
+        await Promise.resolve(this.sessionInvalidatedHook()).catch((err: any) =>
+          this.logger.warn(`session-invalidated hook failed: ${err?.message || err}`)
+        );
+      }
+      throw e;
+    }
 
     const me = await this.client.getMe();
     this.selfId = me.id.toString();
@@ -287,6 +448,7 @@ export class TelegramClientWrapper extends EventEmitter {
         isOutbound,
         chatType: mapChatType(chat),
         chatTitle: chatTitleOf(chat),
+        inlineButtons: inlineButtonsOf(message.markup),
       };
     } catch (e) {
       this.logger.error(`Error parsing message: ${e}`);
@@ -338,7 +500,7 @@ export class TelegramClientWrapper extends EventEmitter {
     chatId: string,
     messageId: number,
     data: string,
-    options?: { timeoutMs?: number; fireAndForget?: boolean }
+    options?: { timeoutMs?: number; fireAndForget?: boolean; dataB64?: string }
   ): Promise<{
     alert: boolean;
     hasUrl: boolean;
@@ -348,10 +510,16 @@ export class TelegramClientWrapper extends EventEmitter {
     cacheTime: number;
   }> {
     if (!this.connected) throw new Error('Not connected to Telegram');
+    // Prefer the exact bytes when the caller echoes back a button's dataB64:
+    // third-party bots (BotFather) use binary callback_data that does not
+    // survive a UTF-8 round-trip, and a lossy payload gets DATA_INVALID.
+    const payload: string | Uint8Array = options?.dataB64
+      ? Buffer.from(options.dataB64, 'base64')
+      : data;
     const answer = await this.client.getCallbackAnswer({
       chatId: toMtcutePeer(chatId),
       message: messageId,
-      data,
+      data: payload,
       ...(options?.timeoutMs ? { timeout: options.timeoutMs } : {}),
       ...(options?.fireAndForget ? { fireAndForget: true } : {}),
     });
@@ -421,6 +589,37 @@ export class TelegramClientWrapper extends EventEmitter {
    */
   getSessionString(): string {
     return this.sessionString;
+  }
+
+  /**
+   * SC-1145: export the CURRENT session string (mtcute folds per-DC auth keys
+   * created at runtime into it). Also refreshes the cached string so
+   * GET /session reflects what the credential store is being given.
+   */
+  async exportSessionString(): Promise<string> {
+    const exported = await this.client.exportSession();
+    this.sessionString = exported;
+    return exported;
+  }
+
+  /**
+   * SC-1145: called on every mtcute storage persist (session import, auth-key
+   * creation, update-state sync). The per-sub connector sets this to the
+   * credential-store write-back; the house connectors leave it unset and
+   * behave exactly as before.
+   */
+  setSessionPersistHook(hook: () => void): void {
+    this.sessionPersistHook = hook;
+  }
+
+  /**
+   * SC-1145: called when the server rejects the session at connect (revoked
+   * from the user's app, deactivated, expired). The per-sub connector uses it
+   * to delete its credential-store row so a restart cannot keep re-applying a
+   * dead session.
+   */
+  setSessionInvalidatedHook(hook: () => Promise<void> | void): void {
+    this.sessionInvalidatedHook = hook;
   }
 
   /**
@@ -870,26 +1069,29 @@ export class TelegramClientWrapper extends EventEmitter {
    * Fetch the per-reactor identity for a given message: who reacted with what.
    * Returns null if the message isn't reachable. Used by the dashboard's
    * reaction-badge tooltip to show "Alice, Bob — 👍".
+   *
+   * Telegram caps `messages.getMessageReactionsList` at 100 reactors per call
+   * and hands back a `next` offset plus the REAL `total`. A single call
+   * therefore silently truncates any message with more than 100 reactions
+   * (a poll or a contest looks like a 100-way tie), so we page until we have
+   * `limit` reactors or Telegram runs out, and surface `total` untouched.
    */
   async getReactionUsers(
     chatId: string,
     messageId: number,
     limit = 100
-  ): Promise<Array<{
-    emoji: string;
-    userId: number;
-    displayName: string | null;
-    mine: boolean;
-  }> | null> {
+  ): Promise<{
+    total: number;
+    reactors: Array<{
+      emoji: string;
+      userId: number;
+      displayName: string | null;
+      mine: boolean;
+    }>;
+  } | null> {
     if (!this.connected) throw new Error('Not connected');
     try {
       const peer = toMtcutePeer(chatId);
-      const result: any = await (this.client as any).getReactionUsers({
-        chatId: peer,
-        message: messageId,
-        limit,
-      });
-      const raw = Array.isArray(result) ? result : result?.items || [];
       const meId = this.selfId ? Number(this.selfId) : null;
       const out: Array<{
         emoji: string;
@@ -897,16 +1099,41 @@ export class TelegramClientWrapper extends EventEmitter {
         displayName: string | null;
         mine: boolean;
       }> = [];
-      for (const pr of raw) {
-        const emoji = typeof pr.emoji === 'string' ? pr.emoji : String(pr.emoji);
-        const peerObj: any = pr.peer;
-        const userId: number | undefined = peerObj?.id ?? peerObj?.userId;
-        if (typeof userId !== 'number') continue;
-        const displayName: string | null =
-          peerObj?.displayName || peerObj?.firstName || peerObj?.username || peerObj?.title || null;
-        out.push({ emoji, userId, displayName, mine: meId !== null && userId === meId });
+      let total = 0;
+      let offset: string | undefined;
+      // Hard stop on the page count as well: a runaway `next` offset must not
+      // loop forever against Telegram.
+      for (let page = 0; page < 50; page++) {
+        const pageSize = Math.min(100, limit - out.length);
+        if (pageSize <= 0) break;
+        const result: any = await (this.client as any).getReactionUsers({
+          chatId: peer,
+          message: messageId,
+          limit: pageSize,
+          ...(offset ? { offset } : {}),
+        });
+        const raw = Array.isArray(result) ? result : result?.items || [];
+        // `total` is the count Telegram reports for the whole message, not for
+        // the page — it is already the answer to "how many reactions?".
+        if (typeof result?.total === 'number') total = result.total;
+        for (const pr of raw) {
+          const emoji = typeof pr.emoji === 'string' ? pr.emoji : String(pr.emoji);
+          const peerObj: any = pr.peer;
+          const userId: number | undefined = peerObj?.id ?? peerObj?.userId;
+          if (typeof userId !== 'number') continue;
+          const displayName: string | null =
+            peerObj?.displayName ||
+            peerObj?.firstName ||
+            peerObj?.username ||
+            peerObj?.title ||
+            null;
+          out.push({ emoji, userId, displayName, mine: meId !== null && userId === meId });
+        }
+        offset = result?.next;
+        if (!offset || raw.length === 0) break;
       }
-      return out;
+      if (!total) total = out.length;
+      return { total, reactors: out };
     } catch (e) {
       this.logger.warn(
         `getReactionUsers failed for ${chatId}/${messageId}: ${(e as Error).message}`

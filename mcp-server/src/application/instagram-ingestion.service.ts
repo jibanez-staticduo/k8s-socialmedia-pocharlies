@@ -8,13 +8,13 @@
  * 5-MCP split happens, this code moves to mcps/instagram/ and shares a
  * `@mcp-socialmedia/core` repository with the others.
  */
-import { requireAccount } from '../domain/account-registry';
 import { Pool } from 'pg';
+import { requireAccount } from '../domain/account-registry';
 import pino from 'pino';
 
 export interface InstagramEvent {
   platform: 'instagram';
-  account: string;
+  account: string; // an instagram accountId of the account registry
   eventType: 'dm' | 'comment' | 'mention' | 'story_mention' | 'media' | 'unknown';
   senderId: string;
   senderUsername?: string;
@@ -38,7 +38,10 @@ export class InstagramIngestionService {
 
   async handleEvent(event: InstagramEvent): Promise<void> {
     try {
-      const account = requireAccount('instagram', event.account).accountId;
+      // DB namespace declared by the registry (skirmshop → professional,
+      // barbelpapis → personal today). An undeclared account is refused: it
+      // used to be filed under 'personal' silently.
+      const account = requireAccount('instagram', event.account).namespace;
       // DM events have a real message id and conversation; comments/mentions are
       // attached to a media post and we synthesise a conversation key per post.
       const ts = new Date(event.timestamp || new Date().toISOString());
@@ -51,50 +54,53 @@ export class InstagramIngestionService {
       let content = event.text || '';
 
       if (event.eventType === 'dm') {
-        convId = `instagram:${event.account}:thread_${event.conversationId || event.senderId}`;
+        convId = `ig_${event.account}_thread_${event.conversationId || event.senderId}`;
         convName = event.senderUsername || event.senderId;
         convType = 'INDIVIDUAL';
         messageType = 'TEXT';
         waMessageId = event.messageId
-          ? `instagram:${event.account}:${event.messageId}`
-          : `instagram:${event.account}:${event.senderId}_${ts.getTime()}`;
+          ? `ig_${event.account}_${event.messageId}`
+          : `ig_${event.account}_${event.senderId}_${ts.getTime()}`;
       } else if (event.eventType === 'comment') {
-        convId = `instagram:${event.account}:post_${event.mediaId || 'unknown'}`;
+        convId = `ig_${event.account}_post_${event.mediaId || 'unknown'}`;
         convName = `Post ${event.mediaId || ''}`.trim();
         convType = 'GROUP'; // comments stream — multiple users contribute
         messageType = 'COMMENT';
         waMessageId = event.messageId
-          ? `instagram:${event.account}:comment_${event.messageId}`
-          : `instagram:${event.account}:comment_${event.senderId}_${ts.getTime()}`;
+          ? `ig_${event.account}_comment_${event.messageId}`
+          : `ig_${event.account}_comment_${event.senderId}_${ts.getTime()}`;
       } else if (event.eventType === 'mention') {
-        convId = `instagram:${event.account}:mentions`;
+        convId = `ig_${event.account}_mentions`;
         convName = 'Mentions';
         convType = 'GROUP';
         messageType = 'MENTION';
-        waMessageId = `instagram:${event.account}:mention_${event.mediaId || event.senderId}_${ts.getTime()}`;
+        waMessageId = `ig_${event.account}_mention_${event.mediaId || event.senderId}_${ts.getTime()}`;
         content = content || `mention by @${event.senderUsername || event.senderId}`;
       } else if (event.eventType === 'story_mention') {
-        convId = `instagram:${event.account}:story_mentions`;
+        convId = `ig_${event.account}_story_mentions`;
         convName = 'Story mentions';
         convType = 'GROUP';
         messageType = 'STORY_MENTION';
-        waMessageId = `instagram:${event.account}:story_${event.mediaId || event.senderId}_${ts.getTime()}`;
+        waMessageId = `ig_${event.account}_story_${event.mediaId || event.senderId}_${ts.getTime()}`;
         content = content || `story mention by @${event.senderUsername || event.senderId}`;
       } else if (event.eventType === 'media') {
-        convId = `instagram:${event.account}:media`;
+        convId = `ig_${event.account}_media`;
         convName = `Instagram ${event.account} media`;
         convType = 'GROUP';
         messageType = 'MEDIA';
         waMessageId = event.mediaId
-          ? `instagram:${event.account}:media_${event.mediaId}`
-          : `instagram:${event.account}:media_${ts.getTime()}`;
+          ? `ig_${event.account}_media_${event.mediaId}`
+          : `ig_${event.account}_media_${ts.getTime()}`;
         content = content || `instagram media ${event.mediaId || ''}`.trim();
       } else {
         this.logger.debug(`Skipping unknown IG event type: ${event.eventType}`);
         return;
       }
 
-      const senderWaId = `instagram:${event.account}:sender:${event.senderId}`;
+      // Scoped by Instagram account: the same IGSID seen by two accounts is two
+      // participants. The bare `ig_<id>` key made the upsert below re-file the
+      // participant under whichever account wrote last.
+      const senderWaId = `ig_${event.account}_${event.senderId}`;
       const isGroup = convType === 'GROUP';
       const senderName = event.senderUsername || null;
 
@@ -108,6 +114,9 @@ export class InstagramIngestionService {
 
       await this.dbClient.query(
         `INSERT INTO conversations (id, name, is_group, type, wa_chat_id, last_message_at, account)
+         -- ::text casts: the NAS fork rekeyed these identity columns to text
+         -- (migration 008_provider_identity_schema); a text literal must not be
+         -- offered as an untyped parameter on a column that could still be uuid.
          VALUES ($1::text, $2, $3, $4, $1::text, $5, $6)
          ON CONFLICT (id) DO UPDATE SET
            name = COALESCE(EXCLUDED.name, conversations.name),
@@ -156,6 +165,8 @@ export class InstagramIngestionService {
       }
     } catch (error) {
       this.logger.error(`Failed to ingest IG event: ${error}`);
+      // Fail the caller: the NAS event pipeline retries on rejection, and a
+      // swallowed error here used to drop the message without a trace.
       throw error;
     }
   }

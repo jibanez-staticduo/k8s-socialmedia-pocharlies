@@ -2,7 +2,7 @@
   "schemaVersion": "2.0",
   "service": "socialmedia",
   "digestAlgorithm": "sha256",
-  "digest": "sha256:b42fb33a0130f15b8577c08677f731a80cdc37ca10c26bf6bd8ce107311eaec0",
+  "digest": "sha256:76971b3ca3e2ca4329ec6dcff4045845502f1e914cbc859894878a5c8786eedd",
   "tools": [
     {
       "name": "social_approve_draft",
@@ -27,7 +27,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -136,7 +136,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -198,7 +198,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -222,6 +222,11 @@
             "minLength": 1,
             "description": "Exact Telegram callback payload from the selected inline button."
           },
+          "dataB64": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Button's dataB64 from social_list_messages, echoed back verbatim. Required for bots whose callback payload is binary (BotFather); takes precedence over data."
+          },
           "threadId": {
             "type": [
               "string",
@@ -234,8 +239,7 @@
           "channel",
           "accountId",
           "target",
-          "messageId",
-          "data"
+          "messageId"
         ]
       },
       "outputSchema": {
@@ -323,7 +327,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -385,7 +389,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -500,7 +504,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -562,7 +566,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -694,7 +698,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -756,7 +760,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -866,7 +870,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1016,7 +1020,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1078,7 +1082,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "query": {
             "type": "string",
@@ -1200,7 +1204,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1262,7 +1266,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -1384,7 +1388,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1446,7 +1450,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -1554,7 +1558,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1616,7 +1620,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "digestId": {
             "type": "string",
@@ -1723,7 +1727,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1785,7 +1789,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -1902,7 +1906,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -1964,7 +1968,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -2108,7 +2112,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -2170,7 +2174,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -2283,7 +2287,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -2345,7 +2349,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "readSource": {
             "type": "string",
@@ -2447,7 +2451,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -2593,7 +2597,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -2655,7 +2659,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -2763,7 +2767,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -2825,7 +2829,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "kind": {
             "type": "string",
@@ -2941,7 +2945,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -3003,7 +3007,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "query": {
             "type": "string"
@@ -3110,7 +3114,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -3172,7 +3176,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -3288,7 +3292,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -3350,7 +3354,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "limit": {
             "type": "integer",
@@ -3458,7 +3462,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -3520,7 +3524,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -3646,7 +3650,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -3708,7 +3712,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -3822,7 +3826,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -3884,7 +3888,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -4071,7 +4075,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -4133,7 +4137,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -4272,7 +4276,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -4334,7 +4338,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -4651,7 +4655,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -4693,7 +4697,7 @@
     {
       "name": "social_manage_session",
       "title": "Manage provider session",
-      "description": "Renew a WhatsApp QR session or repair a WhatsApp group encryption session.",
+      "description": "Renew a WhatsApp QR session, repair a WhatsApp group encryption session, or start Instagram pairing for the verified user (action=startPairing on channel=instagram returns the Instagram Login authorize link; it needs no accountId and only works when the call carries the gateway-verified user identity).",
       "effect": "externalWrite",
       "authScope": "social.write",
       "capability": "sessions.manage",
@@ -4713,7 +4717,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -4730,7 +4734,8 @@
             "type": "string",
             "enum": [
               "renewQr",
-              "repairGroup"
+              "repairGroup",
+              "startPairing"
             ]
           },
           "confirmDisconnect": {
@@ -4739,7 +4744,6 @@
         },
         "required": [
           "channel",
-          "accountId",
           "action"
         ],
         "allOf": [
@@ -4753,6 +4757,7 @@
             },
             "then": {
               "required": [
+                "accountId",
                 "confirmDisconnect"
               ],
               "properties": {
@@ -4772,8 +4777,25 @@
             },
             "then": {
               "required": [
+                "accountId",
                 "target"
               ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "startPairing"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "channel": {
+                  "const": "instagram"
+                }
+              }
             }
           }
         ]
@@ -4863,7 +4885,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -4925,7 +4947,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -5033,7 +5055,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -5095,7 +5117,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -5298,7 +5320,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -5448,7 +5470,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -5510,7 +5532,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "query": {
             "type": "string",
@@ -5623,7 +5645,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -5685,7 +5707,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -5838,7 +5860,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -5994,7 +6016,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -6056,7 +6078,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -6165,7 +6187,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -6227,7 +6249,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -6408,7 +6430,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -6470,7 +6492,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -6613,7 +6635,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -6675,7 +6697,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "target": {
             "type": "string",
@@ -6894,7 +6916,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"
@@ -6956,7 +6978,7 @@
           "accountId": {
             "type": "string",
             "minLength": 1,
-            "description": "Configured provider account, for example 'personal' or 'professional'."
+            "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
           },
           "readSource": {
             "type": "string",
@@ -7058,7 +7080,7 @@
                     "accountId": {
                       "type": "string",
                       "minLength": 1,
-                      "description": "Configured provider account, for example 'personal' or 'professional'."
+                      "description": "Configured provider account, for example 'personal', 'professional' or 'leila' (WhatsApp), 'skirmshop'/'barbelpapis' (Instagram). With SOCIAL_IDENTITY_BINDING=on it must be bound to the verified caller."
                     },
                     "code": {
                       "type": "string"

@@ -1,3 +1,4 @@
+
 ---
 apiVersion: v1
 kind: Namespace
@@ -23,14 +24,14 @@ metadata:
   name: whatsapp-mcp-secrets
   namespace: whatsapp-mcp
 spec:
-  refreshInterval: 1h
-  secretStoreRef: { name: vault-backend, kind: ClusterSecretStore }
+  refreshInterval: 24h
+  secretStoreRef: { name: onepassword, kind: ClusterSecretStore }
   target:
     name: whatsapp-mcp-secrets
     creationPolicy: Owner
     deletionPolicy: Retain
   dataFrom:
-    - extract: { key: secret/whatsapp-mcp }
+    - extract: { key: whatsapp-mcp }
 
 ---
 apiVersion: v1
@@ -128,6 +129,11 @@ spec:
       containers:
         - name: minio
           image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          # Digest-pinned: declare the policy explicitly. Git never set it, so
+          # ArgoCD never owned the field and a stale `Always` (inherited from an
+          # old tag-based deploy) survived forever, re-pulling docker.io on every
+          # reschedule -> anonymous Docker Hub rate-limit on the OVH egress.
+          imagePullPolicy: IfNotPresent
           args: [server, /data, --console-address, ":9001"]
           ports:
             - { name: api, containerPort: 9000 }
@@ -162,26 +168,6 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: whatsapp-session-data
-  namespace: whatsapp-mcp
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: { requests: { storage: 1Gi } }
-  storageClassName: longhorn
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: whatsapp-session-data-professional
-  namespace: whatsapp-mcp
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: { requests: { storage: 1Gi } }
-  storageClassName: longhorn
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
   name: whatsapp-open-worker-profile-professional
   namespace: whatsapp-mcp
 spec:
@@ -189,158 +175,9 @@ spec:
   resources: { requests: { storage: 2Gi } }
   storageClassName: longhorn
 
-# ── Connectors (stateless) ────────────────────────────────────────────────────
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: whatsapp-connector
-  namespace: whatsapp-mcp
-spec:
-  replicas: 1
-  strategy: { type: Recreate }
-  selector: { matchLabels: { app: whatsapp-connector } }
-  template:
-    metadata: { labels: { app: whatsapp-connector } }
-    spec:
-      enableServiceLinks: false
-      nodeSelector: { topology: lan, kubernetes.io/hostname: ubuntu, kubernetes.io/arch: amd64 }
-      containers:
-        - name: whatsapp-connector
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:1357057afaf6@sha256:6a0789feb3fe2b268659508bbab259cfdf4a997513f83bc58fa181245aa67aae
-          ports: [{ name: http, containerPort: 3001 }]
-          env:
-            - name: SHARED_VALKEY_SOCIALMEDIA_PASSWORD
-              valueFrom: { secretKeyRef: { name: socialmedia-shared-valkey, key: password } }
-            - { name: REDIS_URL, value: "redis://socialmedia:$(SHARED_VALKEY_SOCIALMEDIA_PASSWORD)@shared-valkey-master.databases.svc.cluster.local:6379/0" }
-            - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
-            - { name: DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp" }
-            - { name: ENABLE_SENDING, value: "true" }
-            - { name: SESSION_PATH, value: "/app/persistent-session" }
-            - { name: WA_QR_PUBLIC_URL, value: "https://whatsapp.e-dani.com/qr/page" }
-            - { name: S3_ENDPOINT, value: "http://skirmshop-drive-s3.backup-hub.svc.cluster.local:9000" }
-            - { name: S3_BUCKET, value: "skirmshop-drive" }
-            - { name: S3_REGION, value: "us-east-1" }
-            - { name: S3_PREFIX, value: "socialmedia" }
-            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_ACCESS_KEY_ID } } }
-            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_SECRET_ACCESS_KEY } } }
-            - { name: LEGACY_MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: LEGACY_MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: LEGACY_MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: LEGACY_MINIO_USE_SSL, value: "false" }
-            - { name: LEGACY_MINIO_BUCKET, value: "socialmedia-media" }
-            - { name: MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: MINIO_USE_SSL, value: "false" }
-            - { name: MINIO_BUCKET, value: "socialmedia-media" }
-            - { name: EMBEDDING_BASE_URL, value: "http://bge-m3-embedding.llm.svc.cluster.local:8000/v1" }
-            - { name: EMBEDDING_MODEL, value: "bge-m3" }
-            - { name: EMBEDDING_DIMENSION, value: "1024" }
-          envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
-          resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits:   { memory: 512Mi }
-          readinessProbe:
-            httpGet: { path: /api/v1/health, port: 3001 }
-            initialDelaySeconds: 15
-            timeoutSeconds: 3
-          volumeMounts:
-            - name: whatsapp-session-data
-              mountPath: /app/persistent-session
-      volumes:
-        - name: whatsapp-session-data
-          persistentVolumeClaim: { claimName: whatsapp-session-data }
----
-apiVersion: v1
-kind: Service
-metadata: { name: whatsapp-connector, namespace: whatsapp-mcp }
-spec:
-  selector: { app: whatsapp-connector }
-  ports: [{ name: http, port: 3001, targetPort: 3001 }]
----
-# ── WhatsApp professional: a SECOND Baileys (WhatsApp Web) connector ──────────
-# Same image as the personal connector; CONNECTOR_ACCOUNT=professional tags its
-# events so ingestion namespaces ids. Own session PVC (RWO, can't be shared).
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: whatsapp-connector-professional
-  namespace: whatsapp-mcp
-spec:
-  replicas: 1
-  strategy: { type: Recreate }
-  selector: { matchLabels: { app: whatsapp-connector-professional } }
-  template:
-    metadata: { labels: { app: whatsapp-connector-professional } }
-    spec:
-      enableServiceLinks: false
-      nodeSelector: { topology: lan, kubernetes.io/hostname: ubuntu, kubernetes.io/arch: amd64 }
-      containers:
-        - name: whatsapp-connector-professional
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:1357057afaf6@sha256:6a0789feb3fe2b268659508bbab259cfdf4a997513f83bc58fa181245aa67aae
-          ports: [{ name: http, containerPort: 3001 }]
-          env:
-            - name: SHARED_VALKEY_SOCIALMEDIA_PASSWORD
-              valueFrom: { secretKeyRef: { name: socialmedia-shared-valkey, key: password } }
-            - { name: REDIS_URL, value: "redis://socialmedia:$(SHARED_VALKEY_SOCIALMEDIA_PASSWORD)@shared-valkey-master.databases.svc.cluster.local:6379/0" }
-            - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
-            - { name: DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp" }
-            - { name: ENABLE_SENDING, value: "true" }
-            - { name: SESSION_PATH, value: "/app/persistent-session" }
-            # professional account → published events carry account=professional
-            - { name: CONNECTOR_ACCOUNT, value: "professional" }
-            - { name: WA_QR_PUBLIC_URL, value: "https://whatsapp-pro.e-dani.com/qr/page" }
-            # F1.7 honest voice (professional ONLY): upload voice notes to S3
-            # BEFORE the NATS emit and ride a presigned URL on the event so the
-            # synapse conversation adapter (on sauvage, outside the cluster) can
-            # transcribe them. S3_PUBLIC_ENDPOINT is the Traefik LAN
-            # IngressRoute for skirmshop-drive-s3 (LAN/Tailscale/pod CIDRs) —
-            # presigned URLs embed the signed host, so the in-cluster svc host
-            # would be unreachable from sauvage. Old images ignore these envs.
-            - { name: WA_EMIT_AUDIO_ATTACHMENTS, value: "true" }
-            - { name: S3_PUBLIC_ENDPOINT, value: "https://skirmshop-s3.e-dani.com" }
-            - { name: S3_PRESIGN_EXPIRY_SECONDS, value: "3600" }
-            - { name: S3_ENDPOINT, value: "http://skirmshop-drive-s3.backup-hub.svc.cluster.local:9000" }
-            - { name: S3_BUCKET, value: "skirmshop-drive" }
-            - { name: S3_REGION, value: "us-east-1" }
-            - { name: S3_PREFIX, value: "socialmedia" }
-            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_ACCESS_KEY_ID } } }
-            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_SECRET_ACCESS_KEY } } }
-            - { name: LEGACY_MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: LEGACY_MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: LEGACY_MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: LEGACY_MINIO_USE_SSL, value: "false" }
-            - { name: LEGACY_MINIO_BUCKET, value: "socialmedia-media" }
-            - { name: MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: MINIO_USE_SSL, value: "false" }
-            - { name: MINIO_BUCKET, value: "socialmedia-media" }
-            - { name: EMBEDDING_BASE_URL, value: "http://bge-m3-embedding.llm.svc.cluster.local:8000/v1" }
-            - { name: EMBEDDING_MODEL, value: "bge-m3" }
-            - { name: EMBEDDING_DIMENSION, value: "1024" }
-          envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
-          resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits:   { memory: 512Mi }
-          readinessProbe:
-            httpGet: { path: /api/v1/health, port: 3001 }
-            initialDelaySeconds: 15
-            timeoutSeconds: 3
-          volumeMounts:
-            - name: whatsapp-session-data-professional
-              mountPath: /app/persistent-session
-      volumes:
-        - name: whatsapp-session-data-professional
-          persistentVolumeClaim: { claimName: whatsapp-session-data-professional }
----
-apiVersion: v1
-kind: Service
-metadata: { name: whatsapp-connector-professional, namespace: whatsapp-mcp }
-spec:
-  selector: { app: whatsapp-connector-professional }
-  ports: [{ name: http, port: 3001, targetPort: 3001 }]
+# ── Per-account connectors (WhatsApp Baileys, Telegram connector + sync) ────
+# GENERATED from the account registry: see k8s/base/generated/connectors.yaml
+# (scripts/render-connectors.py). Edit k8s/base/social-accounts.json, not here.
 ---
 # ── WhatsApp professional Cloud API connector ─────────────────────────────────
 # Brain ingestion: push WhatsApp/Telegram messages into SkirmBrain RAG, one
@@ -427,11 +264,18 @@ spec:
                 - { name: BRAIN_PUSH_TIMEOUT_MS, value: "90000" }
                 - { name: BRAIN_PUSH_RETRY_MAX_DELAY_MS, value: "10000" }
                 - { name: BRAIN_PUSH_CONCURRENCY, value: "1" }
-                # BRAIN_API_KEY comes from the whatsapp-mcp-secrets (Vault) via envFrom.
+                # Namespaces e instancia del brain por cuenta: registro de cuentas.
+                - { name: SOCIAL_ACCOUNTS_FILE, value: "/accounts/social-accounts.json" }
+                # BRAIN_API_KEY comes from the whatsapp-mcp-secrets (1Password) via envFrom.
               envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
+              volumeMounts:
+                - { name: accounts, mountPath: /accounts, readOnly: true }
               resources:
                 requests: { cpu: 50m, memory: 128Mi }
                 limits:   { memory: 512Mi }
+          volumes:
+            - name: accounts
+              configMap: { name: social-accounts }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -453,6 +297,17 @@ spec:
           ports: [{ name: http, containerPort: 3003 }]
           env:
             - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
+            # SC-1194 P1: per-sub credential store plumbing (code ships dark).
+            # CREDENTIAL_STORE_ENABLED stays explicitly false until PR2 of
+            # SC-1144 lands the 007 migration + image pin (devops flips the
+            # overlay). DATABASE_URL feeds the store's pool; the connector
+            # never opens it while the flag is off. INSTAGRAM_OAUTH_REDIRECT_URI
+            # must match a Valid OAuth Redirect URI registered on the Meta app
+            # (operator gesture) and is served by the path rule added to the
+            # whatsapp-public IngressRoute below.
+            - { name: CREDENTIAL_STORE_ENABLED, value: "false" }
+            - { name: DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp" }
+            - { name: INSTAGRAM_OAUTH_REDIRECT_URI, value: "https://whatsapp.e-dani.com/oauth/instagram/callback" }
           envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
           resources:
             requests: { cpu: 30m, memory: 64Mi }
@@ -464,44 +319,6 @@ metadata: { name: instagram-connector, namespace: whatsapp-mcp }
 spec:
   selector: { app: instagram-connector }
   ports: [{ name: http, port: 3003, targetPort: 3003 }]
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: telegram-connector
-  namespace: whatsapp-mcp
-spec:
-  replicas: 1
-  strategy: { type: Recreate }
-  selector: { matchLabels: { app: telegram-connector } }
-  template:
-    metadata: { labels: { app: telegram-connector } }
-    spec:
-      enableServiceLinks: false
-      nodeSelector: { topology: lan, kubernetes.io/arch: amd64 }
-      containers:
-        - name: telegram-connector
-          image: harbor.e-dani.com/homelab/whatsappmcp-telegram-connector:latest
-          ports: [{ name: http, containerPort: 3002 }]
-          livenessProbe:
-            httpGet: { path: /health, port: 3002 }
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 4
-          env:
-            - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
-          envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
-          resources:
-            requests: { cpu: 30m, memory: 256Mi }
-            limits:   { memory: 768Mi }   # OOM audit 2026-07-06: p95/max ~255/290Mi; 512Mi still OOMKilled once under burst.
----
-apiVersion: v1
-kind: Service
-metadata: { name: telegram-connector, namespace: whatsapp-mcp }
-spec:
-  selector: { app: telegram-connector }
-  ports: [{ name: http, port: 3002, targetPort: 3002 }]
 ---
 # MCP server (patched image)
 apiVersion: apps/v1
@@ -516,7 +333,7 @@ spec:
     metadata:
       labels: { app: mcp-server }
       annotations:
-        contracts.e-dani.com/socialmedia-digest: "sha256:b42fb33a0130f15b8577c08677f731a80cdc37ca10c26bf6bd8ce107311eaec0"
+        contracts.e-dani.com/socialmedia-digest: "sha256:76971b3ca3e2ca4329ec6dcff4045845502f1e914cbc859894878a5c8786eedd"
     spec:
       enableServiceLinks: false
       nodeSelector: { topology: lan, kubernetes.io/arch: amd64 }
@@ -531,12 +348,13 @@ spec:
             - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
             - { name: DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp" }
             - { name: WHATSAPP_PROFESSIONAL_URL, value: "http://whatsapp-connector-professional.whatsapp-mcp.svc.cluster.local:3001" }
+            - { name: WHATSAPP_LEILA_URL, value: "http://whatsapp-connector-leila.whatsapp-mcp.svc.cluster.local:3001" }
             - { name: S3_ENDPOINT, value: "http://skirmshop-drive-s3.backup-hub.svc.cluster.local:9000" }
             - { name: S3_BUCKET, value: "skirmshop-drive" }
             - { name: S3_REGION, value: "us-east-1" }
             - { name: S3_PREFIX, value: "socialmedia" }
-            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_ACCESS_KEY_ID } } }
-            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_SECRET_ACCESS_KEY } } }
+            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-socialmedia, key: AWS_ACCESS_KEY_ID } } }
+            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-socialmedia, key: AWS_SECRET_ACCESS_KEY } } }
             - { name: LEGACY_MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
             - { name: LEGACY_MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
             - { name: LEGACY_MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
@@ -545,6 +363,9 @@ spec:
             - { name: EMBEDDING_BASE_URL, value: "http://bge-m3-embedding.llm.svc.cluster.local:8000/v1" }
             - { name: EMBEDDING_MODEL, value: "bge-m3" }
             - { name: EMBEDDING_DIMENSION, value: "1024" }
+            # Registro de cuentas (k8s/base/social-accounts.json -> ConfigMap
+            # social-accounts): namespaces validos para la ingesta.
+            - { name: SOCIAL_ACCOUNTS_FILE, value: "/accounts/social-accounts.json" }
           envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
           resources:
             requests: { cpu: 50m, memory: 128Mi }
@@ -557,6 +378,13 @@ spec:
             httpGet: { path: /health, port: 3000 }
             initialDelaySeconds: 30
             periodSeconds: 30
+          volumeMounts:
+            - name: accounts
+              mountPath: /accounts
+              readOnly: true
+      volumes:
+        - name: accounts
+          configMap: { name: social-accounts }
 ---
 apiVersion: v1
 kind: Service
@@ -579,7 +407,7 @@ spec:
     metadata:
       labels: { app: mcp-sse }
       annotations:
-        contracts.e-dani.com/socialmedia-digest: "sha256:b42fb33a0130f15b8577c08677f731a80cdc37ca10c26bf6bd8ce107311eaec0"
+        contracts.e-dani.com/socialmedia-digest: "sha256:76971b3ca3e2ca4329ec6dcff4045845502f1e914cbc859894878a5c8786eedd"
     spec:
       enableServiceLinks: false
       nodeSelector:
@@ -604,6 +432,19 @@ spec:
             - { name: REDIS_URL, value: "redis://socialmedia:$(SHARED_VALKEY_SOCIALMEDIA_PASSWORD)@shared-valkey-master.databases.svc.cluster.local:6379/0" }
             - { name: CONNECTOR_URL, value: "http://whatsapp-connector.whatsapp-mcp.svc.cluster.local:3001" }
             - { name: WHATSAPP_PROFESSIONAL_URL, value: "http://whatsapp-connector-professional.whatsapp-mcp.svc.cluster.local:3001" }
+            - { name: WHATSAPP_LEILA_URL, value: "http://whatsapp-connector-leila.whatsapp-mcp.svc.cluster.local:3001" }
+            # SC-1144 fase 2: vinculos sub->cuentas (k8s/base/social-identity-bindings.yaml
+            # -> ConfigMap social-identity-bindings, montado en /identity). La bandera
+            # sale OFF del repo: con OFF el enrutado es byte-identico al de hoy (cero
+            # lecturas del fichero). Volcarla a "on" es decision del operador, y exige
+            # que el llamante traiga el x-user-sub que estampa el AgentGateway — por la
+            # LAN con el bearer compartido no hay sub => fail-closed. Ver el riesgo
+            # residual documentado en CLAUDE.md (lo cierra SC-1146, parte 5).
+            - { name: SOCIAL_IDENTITY_BINDING, value: "off" }
+            - { name: SOCIAL_IDENTITY_BINDINGS_FILE, value: "/identity/social-identity-bindings.yaml" }
+            # Registro de cuentas: catalogo, enrutado a conectores, health y
+            # politica de envio en frio salen de aqui (account-registry.ts).
+            - { name: SOCIAL_ACCOUNTS_FILE, value: "/accounts/social-accounts.json" }
             - { name: TELEGRAM_CONNECTOR_URL, value: "http://telegram-connector.whatsapp-mcp.svc.cluster.local:3002" }
             - { name: INSTAGRAM_CONNECTOR_URL, value: "http://instagram-connector.whatsapp-mcp.svc.cluster.local:3003" }
             - { name: LLM_BASE_URL, value: "http://litellm.litellm.svc.cluster.local:4000/v1" }
@@ -612,8 +453,8 @@ spec:
             - { name: S3_BUCKET, value: "skirmshop-drive" }
             - { name: S3_REGION, value: "us-east-1" }
             - { name: S3_PREFIX, value: "socialmedia" }
-            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_ACCESS_KEY_ID } } }
-            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_SECRET_ACCESS_KEY } } }
+            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-socialmedia, key: AWS_ACCESS_KEY_ID } } }
+            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-socialmedia, key: AWS_SECRET_ACCESS_KEY } } }
             - { name: LEGACY_MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
             - { name: LEGACY_MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
             - { name: LEGACY_MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
@@ -635,6 +476,22 @@ spec:
             httpGet: { path: /health, port: 3010 }
             initialDelaySeconds: 30
             periodSeconds: 30
+          volumeMounts:
+            - name: identity
+              mountPath: /identity
+              readOnly: true
+            - name: accounts
+              mountPath: /accounts
+              readOnly: true
+      volumes:
+        - name: accounts
+          configMap: { name: social-accounts }
+        # SC-1144 fase 2: la tabla de vinculos sub->cuentas (ConfigMap generado
+        # desde k8s/base/social-identity-bindings.yaml por el kustomization de
+        # base, nombre estatico a proposito: el codigo relee el fichero montado
+        # al cambiar, asi editar un vinculo no reinicia el pod).
+        - name: identity
+          configMap: { name: social-identity-bindings }
 ---
 apiVersion: v1
 kind: Service
@@ -656,51 +513,48 @@ spec:
   entryPoints: [websecure]
   ingressClassName: traefik-edge
   routes:
+    # SC-1194 P1: the Instagram Login OAuth callback (user's browser lands here
+    # after consent). Path-scoped to the single callback route so nothing else
+    # of the instagram connector's internal API becomes public; the connector
+    # answers it with the whatsapp-public host already provisioned (DNS, cert,
+    # Cloudflare). Traefik prefers the more specific rule over the Host-only
+    # one below.
+    - match: Host(`whatsapp.e-dani.com`) && Path(`/oauth/instagram/callback`)
+      kind: Rule
+      services:
+        - name: instagram-connector
+          port: 3003
+    - match: Host(`whatsapp.e-dani.com`) && PathPrefix(`/api/public`)
+      kind: Rule
+      middlewares:
+        - { name: connector-public-api-deny, namespace: whatsapp-mcp }
+      services:
+        - name: whatsapp-connector
+          port: 3001
+    # Everything else (QR page, status) only behind the generic Keycloak chain:
+    # this host is internet-facing through Cloudflare.
     - match: Host(`whatsapp.e-dani.com`)
       kind: Rule
+      middlewares:
+        - { name: sso-chain, namespace: keycloak }
       services:
         - name: whatsapp-connector
           port: 3001
   tls:
     store: { name: default, namespace: traefik-edge }
 ---
-# LAN-only IngressRoute so in-host workloads (e.g. the synapse-adapter-messaging
-# Hermes worker running on sauvage under user-systemd) can POST
-# /api/v1/messages/send to the WhatsApp connector without going out to
-# Cloudflare. Mirrors the firecrawl-lan / brain-lan pattern.
+# Deny-all for the connector's unauthenticated /api/public/* surface (chat list,
+# full history, media backfill). In-cluster consumers (mcp-server) reach the
+# Service directly and never cross an IngressRoute, so no ingress host needs it.
+# ipAllowList with loopback only: every real client gets 403.
 apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
+kind: Middleware
 metadata:
-  name: whatsapp-lan
+  name: connector-public-api-deny
   namespace: whatsapp-mcp
 spec:
-  entryPoints: [websecure]
-  routes:
-    - match: Host(`whatsapp.lan.e-dani.com`)
-      kind: Rule
-      services:
-        - name: whatsapp-connector
-          port: 3001
-  tls:
-    store: { name: default, namespace: traefik-lan }
----
-# LAN-only IngressRoute for the professional (business) Baileys connector — used
-# only for QR/session inspection if we deliberately re-enable Baileys later.
-apiVersion: traefik.io/v1alpha1
-kind: IngressRoute
-metadata:
-  name: whatsapp-pro-lan
-  namespace: whatsapp-mcp
-spec:
-  entryPoints: [websecure]
-  routes:
-    - match: Host(`whatsapp-pro.lan.e-dani.com`)
-      kind: Rule
-      services:
-        - name: whatsapp-connector-professional
-          port: 3001
-  tls:
-    store: { name: default, namespace: traefik-lan }
+  ipAllowList:
+    sourceRange: ["127.0.0.1/32"]
 ---
 # LAN-only IngressRoute for the MCP SSE server (port 3010) — so Claude/Codex
 # clients on any LAN/Tailscale host (pc, mac, dgx, dgx2, x86, sauvage) can
@@ -723,164 +577,50 @@ spec:
   tls:
     store: { name: default, namespace: traefik-lan }
 ---
-# Telegram-sync (message sync worker)
-apiVersion: apps/v1
-kind: Deployment
+# ── SC-705 / SC-1214: GitOps application of the DB migrations (idempotent) ───
+# migrate.ts keeps a `_migrations` ledger: recorded files are skipped, a
+# pre-ledger schema is BASELINED (recorded without executing), and each new
+# file runs in its own transaction — so this Job is safe on every sync
+# (architect verdict SC-1144, 21-09). It returns together with the image
+# re-pin that carries migrations/007_user_channel_credentials.sql, the
+# precondition that made the original deferral necessary (a failing PreSync
+# blocks the whole `socialmedia` sync).
+# ArgoCD PreSync hook: executes BEFORE the workloads sync (the credential
+# store must find table 007 once PR-2 turns CREDENTIAL_STORE_ENABLED on).
+# Fixed metadata.name: the Job is removed before each new sync and again on
+# success — hook-delete-policy BeforeHookCreation,HookSucceeded, the company
+# pattern (only HookSucceeded/HookFailed/BeforeHookCreation are valid values;
+# anything else ArgoCD drops falls back to BeforeHookCreation, so a completed
+# Job would linger and mark the app OutOfSync). ttlSecondsAfterFinished: 3600
+# as backstop.
+# Image = mcp-server (ships src + tsx); the prod overlay `images:` pin
+# rewrites its tag+digest exactly as for the mcp-server Deployment. The
+# $(DB_USER)/$(DB_PASSWORD) expansion in DATABASE_URL is done by the kubelet
+# from the envFrom secret (measured in a live pod, SC-1214 pasada 2).
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: telegram-sync
+  name: whatsapp-mcp-migrate
   namespace: whatsapp-mcp
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
-  replicas: 1
-  strategy: { type: Recreate }
-  selector: { matchLabels: { app: telegram-sync } }
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
   template:
-    metadata: { labels: { app: telegram-sync } }
     spec:
-      enableServiceLinks: false
-      nodeSelector: { topology: lan, kubernetes.io/hostname: ubuntu, kubernetes.io/arch: amd64 }
-      containers:
-        - name: telegram-sync
-          image: harbor.e-dani.com/homelab/whatsappmcp-telegram-sync:latest
-          ports: [{ name: http, containerPort: 3080 }]
-          env:
-            - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
-            - { name: DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp" }
-            # Session-less: ingest Telegram via the connector (NATS + HMAC /api/v1),
-            # no Telethon session. CONNECTOR_SHARED_SECRET comes via envFrom.
-            - { name: CONNECTOR_BASE_URL, value: "http://telegram-connector.whatsapp-mcp.svc.cluster.local:3002" }
-            - { name: S3_ENDPOINT, value: "http://skirmshop-drive-s3.backup-hub.svc.cluster.local:9000" }
-            - { name: S3_BUCKET, value: "skirmshop-drive" }
-            - { name: S3_REGION, value: "us-east-1" }
-            - { name: S3_PREFIX, value: "socialmedia" }
-            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_ACCESS_KEY_ID } } }
-            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_SECRET_ACCESS_KEY } } }
-            - { name: LEGACY_MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: LEGACY_MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: LEGACY_MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: LEGACY_MINIO_USE_SSL, value: "false" }
-            - { name: LEGACY_MINIO_BUCKET, value: "socialmedia-media" }
-            - { name: MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: MINIO_USE_SSL, value: "false" }
-            - { name: MINIO_BUCKET, value: "socialmedia-media" }
-          envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
-          resources:
-            requests: { cpu: 100m, memory: 1Gi }
-            limits:   { memory: 3Gi }   # OOM audit 2026-07-06: p95/max ~1850/1929Mi, too close to 2Gi.
-          readinessProbe:
-            httpGet: { path: /health, port: 3080 }
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 3
----
-apiVersion: v1
-kind: Service
-metadata: { name: telegram-sync, namespace: whatsapp-mcp }
-spec:
-  selector: { app: telegram-sync }
-  ports: [{ name: http, port: 3080, targetPort: 3080 }]
----
-# === Professional account: second Telegram instance pair ===
-# Same images as the personal instances; CONNECTOR_ACCOUNT=professional makes
-# telegram-sync namespace its DB ids ("professional:tg_...") and the MCP routes
-# professional Telegram actions/unread here via the code defaults
-# (telegram-connector-professional:3002 / telegram-sync-professional:3080).
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: telegram-connector-professional
-  namespace: whatsapp-mcp
-spec:
-  replicas: 1  # resumed: professional session regenerated against the real professional account
-  strategy: { type: Recreate }
-  selector: { matchLabels: { app: telegram-connector-professional } }
-  template:
-    metadata: { labels: { app: telegram-connector-professional } }
-    spec:
+      restartPolicy: Never
       enableServiceLinks: false
       nodeSelector: { topology: lan, kubernetes.io/arch: amd64 }
       containers:
-        - name: telegram-connector
-          image: harbor.e-dani.com/homelab/whatsappmcp-telegram-connector:latest
-          ports: [{ name: http, containerPort: 3002 }]
-          livenessProbe:
-            httpGet: { path: /health, port: 3002 }
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 4
+        - name: migrate
+          image: harbor.e-dani.com/homelab/whatsappmcp-mcp-server:latest
+          command: ["sh", "-c", "cd mcp-server && tsx src/infrastructure/database/migrate.ts"]
           env:
-            - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
-            - { name: CONNECTOR_ACCOUNT, value: "professional" }
-            # override the personal session loaded via envFrom with the professional one
-            - name: TELEGRAM_SESSION_STRING
-              valueFrom: { secretKeyRef: { name: whatsapp-mcp-secrets, key: TELEGRAM_SESSION_STRING_PROFESSIONAL } }
-          envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
-          resources:
-            requests: { cpu: 30m, memory: 256Mi }
-            limits:   { memory: 768Mi }   # OOM audit 2026-07-06: p95/max ~230Mi; keep headroom for reconnect/session bursts.
----
-apiVersion: v1
-kind: Service
-metadata: { name: telegram-connector-professional, namespace: whatsapp-mcp }
-spec:
-  selector: { app: telegram-connector-professional }
-  ports: [{ name: http, port: 3002, targetPort: 3002 }]
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: telegram-sync-professional
-  namespace: whatsapp-mcp
-spec:
-  replicas: 1  # active: sauvageadminbot (skirmshop) ingest via telethon
-  strategy: { type: Recreate }
-  selector: { matchLabels: { app: telegram-sync-professional } }
-  template:
-    metadata: { labels: { app: telegram-sync-professional } }
-    spec:
-      enableServiceLinks: false
-      nodeSelector: { topology: lan, kubernetes.io/hostname: ubuntu, kubernetes.io/arch: amd64 }
-      containers:
-        - name: telegram-sync
-          image: harbor.e-dani.com/homelab/whatsappmcp-telegram-sync:latest
-          ports: [{ name: http, containerPort: 3080 }]
-          env:
-            - { name: NATS_URL, value: "nats://whatsapp-mcp-nats.whatsapp-mcp.svc.cluster.local:4222" }
             - { name: DATABASE_URL, value: "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp" }
-            - { name: CONNECTOR_ACCOUNT, value: "professional" }
-            # Session-less: ingest via the professional connector (no Telethon session).
-            - { name: CONNECTOR_BASE_URL, value: "http://telegram-connector-professional.whatsapp-mcp.svc.cluster.local:3002" }
-            - { name: S3_ENDPOINT, value: "http://skirmshop-drive-s3.backup-hub.svc.cluster.local:9000" }
-            - { name: S3_BUCKET, value: "skirmshop-drive" }
-            - { name: S3_REGION, value: "us-east-1" }
-            - { name: S3_PREFIX, value: "socialmedia" }
-            - { name: AWS_ACCESS_KEY_ID, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_ACCESS_KEY_ID } } }
-            - { name: AWS_SECRET_ACCESS_KEY, valueFrom: { secretKeyRef: { name: skirmshop-drive-s3-app, key: AWS_SECRET_ACCESS_KEY } } }
-            - { name: LEGACY_MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: LEGACY_MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: LEGACY_MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: LEGACY_MINIO_USE_SSL, value: "false" }
-            - { name: LEGACY_MINIO_BUCKET, value: "socialmedia-media" }
-            - { name: MINIO_ENDPOINT, value: "whatsapp-mcp-minio.whatsapp-mcp.svc.cluster.local:9000" }
-            - { name: MINIO_ACCESS_KEY, value: "$(MINIO_ROOT_USER)" }
-            - { name: MINIO_SECRET_KEY, value: "$(MINIO_ROOT_PASSWORD)" }
-            - { name: MINIO_USE_SSL, value: "false" }
-            - { name: MINIO_BUCKET, value: "socialmedia-media" }
           envFrom: [{ secretRef: { name: whatsapp-mcp-secrets } }]
           resources:
-            requests: { cpu: 100m, memory: 1Gi }
-            limits:   { memory: 3Gi }   # OOM audit 2026-07-06: personal sync reached ~1.9Gi; keep both profiles aligned.
-          readinessProbe:
-            httpGet: { path: /health, port: 3080 }
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 3
----
-apiVersion: v1
-kind: Service
-metadata: { name: telegram-sync-professional, namespace: whatsapp-mcp }
-spec:
-  selector: { app: telegram-sync-professional }
-  ports: [{ name: http, port: 3080, targetPort: 3080 }]
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 256Mi }

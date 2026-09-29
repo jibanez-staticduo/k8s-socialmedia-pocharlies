@@ -1,12 +1,15 @@
+import { useTestAccounts } from '../domain/test-accounts';
 import { MCPServer } from './server';
 
 function topicServer() {
   const server = Object.create(MCPServer.prototype) as MCPServer;
   const anyServer = server as any;
-  anyServer.tgUrls = {
-    personal: 'http://telegram-personal',
-    professional: 'http://telegram-professional',
-  };
+  useTestAccounts({
+    telegram: {
+      personal: 'http://telegram-personal',
+      professional: 'http://telegram-professional',
+    },
+  });
   anyServer.connectorCall = jest.fn(async () => ({ success: true }));
   anyServer.dbClient = {
     query: jest.fn(async () => ({ rows: [] })),
@@ -84,6 +87,29 @@ describe('Telegram topic MCP helpers', () => {
         data: 'draft:send:-1003749364241:4775',
         timeoutMs: 10000,
         fireAndForget: true,
+      }
+    );
+  });
+
+  it('forwards dataB64 so binary callback payloads reach the connector intact', async () => {
+    const { server, connectorCall } = topicServer();
+    await server.handleTelegramClickButton({
+      chatId: 'tg_-1003749364241_4775',
+      messageId: '4777',
+      data: '',
+      dataB64: 'ugAAAAAAAAA=',
+    });
+    expect(connectorCall).toHaveBeenCalledWith(
+      'http://telegram-personal',
+      'POST',
+      '/api/v1/messages/callback',
+      {
+        chatId: '-1003749364241',
+        messageId: 4777,
+        data: '',
+        dataB64: 'ugAAAAAAAAA=',
+        timeoutMs: 10000,
+        fireAndForget: false,
       }
     );
   });

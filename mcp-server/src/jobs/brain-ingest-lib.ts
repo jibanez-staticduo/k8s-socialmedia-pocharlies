@@ -1,8 +1,20 @@
 import { Pool } from 'pg';
+import { activeNamespaces, brainInstanceForNamespace } from '../domain/account-registry';
 
-import { getAccounts } from '../domain/account-registry';
-export const accounts = () => [...new Set(getAccounts().map(a => a.accountId))];
+/** A DB namespace of the account registry (the legacy `account` column). */
 export type Account = string;
+
+/**
+ * Namespaces to ingest: every namespace declared in the account registry
+ * (k8s/base/social-accounts.json), so a new account is ingested without a code
+ * change. Each namespace carries its WhatsApp, Telegram and Instagram rows.
+ */
+export function ingestNamespaces(): Account[] {
+  return activeNamespaces();
+}
+
+/** Backwards-compatible name; jobs now enumerate storage namespaces. */
+export const accounts = ingestNamespaces;
 export type Platform = 'whatsapp' | 'telegram' | 'instagram';
 
 export interface Cursor {
@@ -51,8 +63,11 @@ function assertCursorTableName(table: string): void {
   }
 }
 
+/** Brain instance of a namespace: the registry's `brainInstance`. */
 export function instanceForAccount(account: Account): string {
-  return account;
+  const instance = brainInstanceForNamespace(account);
+  if (!instance) throw new Error(`namespace '${account}' is not declared in the account registry`);
+  return instance;
 }
 
 export function sourceId(platform: string, waMessageId: string): string {

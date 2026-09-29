@@ -30,6 +30,7 @@ test('forward uses the durable original WAMessage after an in-memory restart', a
   try {
     const client = new BaileysClient('/tmp/unused', 'key');
     Object.assign(client, {
+      ready: true,
       sock: {
         sendMessage: async (_jid: string, payload: unknown) => {
           sent.push(payload);
@@ -39,14 +40,13 @@ test('forward uses the durable original WAMessage after an in-memory restart', a
     });
     const id = await client.forwardMessage('34600@c.us', 'old', '34699@c.us');
     assert.equal(id, 'new');
-    assert.deepEqual(sent[0], {
-      forward: {
-        key: { remoteJid: '34600@s.whatsapp.net', id: 'old', fromMe: false },
-        message: { conversation: 'old body' },
-        messageTimestamp: 1700000000,
-        pushName: 'Ada',
-      },
-    });
+    const forward = (sent[0] as { forward: any }).forward;
+    assert.equal(forward.key.remoteJid, '34600@s.whatsapp.net');
+    assert.equal(forward.key.id, 'old');
+    assert.equal(forward.key.fromMe, false);
+    assert.equal(forward.message.conversation, 'old body');
+    assert.equal(Number(forward.messageTimestamp), 1700000000);
+    assert.equal(forward.pushName, 'Ada');
   } finally {
     restore();
   }

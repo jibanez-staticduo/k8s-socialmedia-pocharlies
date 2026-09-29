@@ -235,7 +235,7 @@ test('missing quoted media is rejected before WhatsApp send', async () => {
         claimed = true;
       },
     }),
-    /Quoted message is unavailable/
+    /Quoted message .* is unavailable/
   );
   assert.equal(sent, false);
   assert.equal(claimed, false);

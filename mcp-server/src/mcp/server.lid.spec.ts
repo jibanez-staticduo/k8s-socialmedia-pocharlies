@@ -1,3 +1,4 @@
+import { useTestAccounts } from '../domain/test-accounts';
 import {
   isLidJid,
   normalizeDirectWhatsAppJid,
@@ -102,6 +103,14 @@ describe('resolveProfessionalSendTarget', () => {
   it('rejects a destination prefixed for another account', () => {
     expect(resolveProfessionalSendTarget('personal:198517716955152@lid')).toBeNull();
     expect(resolveProfessionalSendTarget('personal:35796658668@s.whatsapp.net')).toBeNull();
+  });
+
+  it('strips the explicit personal namespace for a personal send', () => {
+    expect(resolveAccountSendTarget('personal:198517716955152@lid', {}, 'personal')).toEqual({
+      lookupKey: '198517716955152@lid',
+      lookupKeys: ['198517716955152@lid'],
+      sendJid: '198517716955152@lid',
+    });
   });
 
   it('(b) normalizes a bare phone to @s.whatsapp.net under the professional key', () => {
@@ -271,13 +280,16 @@ describe('handleSendMessage professional @lid + phone fallback behavior', () => 
     global.fetch = originalFetch;
   });
 
-  function sendServer(queryImpl: (sql: string, params: unknown[]) => Promise<{ rows: unknown[] }>) {
+  function sendServer(queryImpl: (sql: string, params: unknown[]) => Promise<{ rows: any[] }>) {
     const server = Object.create(MCPServer.prototype) as MCPServer;
     const query = jest.fn(queryImpl);
     const logger = { error: jest.fn(), warn: jest.fn() };
+    useTestAccounts({
+      whatsapp: { personal: 'http://wa-personal', professional: 'http://wa-professional' },
+      requireInboundBeforeSend: { professional: true },
+    });
     Object.assign(server as unknown as Record<string, unknown>, {
       dbClient: { query },
-      waUrls: { personal: 'http://wa-personal', professional: 'http://wa-professional' },
       logger,
     });
     return {
@@ -351,7 +363,14 @@ describe('approved draft inbound gate', () => {
   function draftServer(conversationId: string, inbound: boolean) {
     const server = Object.create(MCPServer.prototype) as any;
     const draft = { conversationId, content: 'draft body', status: 'APPROVED' };
-    const query = jest.fn(async () => ({ rows: inbound ? [{ id: conversationId }] : [] }));
+    const namespace = conversationId.startsWith('professional:') ? 'professional' : 'personal';
+    const query = jest.fn(async (sql: string) => ({
+      rows: /legacy_namespace AS ns/.test(sql)
+        ? [{ id: conversationId, ns: namespace }]
+        : inbound
+          ? [{ id: conversationId }]
+          : [],
+    }));
     server.dbClient = { query };
     server.draftService = { getDraftById: jest.fn(async () => draft), markAsSent: jest.fn() };
     server.waUrl = jest.fn(() => 'http://wa-professional');
@@ -368,7 +387,7 @@ describe('approved draft inbound gate', () => {
     const { server, query } = draftServer('professional:198517716955152@lid', false);
     await expect(server.handleSendApprovedReply({ sendToken: 'send-draft-123', account: 'professional' }))
       .rejects.toThrow(/only allowed after the customer has sent an inbound message/);
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(server.draftService.markAsSent).not.toHaveBeenCalled();
   });
@@ -380,7 +399,7 @@ describe('approved draft inbound gate', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const { server, query } = draftServer('professional:198517716955152@lid', true);
     await server.handleSendApprovedReply({ sendToken: 'send-draft-123', account: 'professional' });
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).conversationId).toBe('198517716955152@lid');
   });
 
@@ -391,7 +410,7 @@ describe('approved draft inbound gate', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const { server, query } = draftServer('professional:123456789-987654321@g.us', false);
     await server.handleSendApprovedReply({ sendToken: 'send-draft-123', account: 'professional' });
-    expect(query).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).conversationId).toBe('123456789-987654321@g.us');
   });
 
@@ -402,7 +421,7 @@ describe('approved draft inbound gate', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const { server, query } = draftServer('198517716955152@lid', false);
     await server.handleSendApprovedReply({ sendToken: 'send-draft-123', account: 'personal' });
-    expect(query).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).conversationId).toBe('198517716955152@lid');
   });
 });

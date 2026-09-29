@@ -93,9 +93,12 @@ import {
   setConversationWaChatId,
   setConversationName,
   setParticipantName,
+  getUnreadMessageKeysForChat,
+  markMessagesRead,
 } from './db-writer';
 import {
   ensureDurableTables,
+  adoptPayloadTimestampShape,
   applyPinnedChatSnapshot,
   getMessageKeysForChat,
   getRawWAMessage,
@@ -109,6 +112,8 @@ import {
   storeContact,
   storeRawWAMessage,
   upsertChatState,
+  DurablePayloadSource,
+  MessageUnavailableError,
 } from './durable-message-store';
 import {
   buildChatModification,
@@ -773,6 +778,58 @@ export class StatusSendUncertainError extends Error {
     this.name = 'StatusSendUncertainError';
   }
 }
+/**
+ * INFRA-288 (P1 of INFRA-112): limits for the reconnect history backfill.
+ *
+ * When a Baileys socket drops, WhatsApp keeps the messages that arrived while
+ * offline only in the phone; the reconnect itself replays nothing. So on every
+ * `connection.update: open` we ask for the dropped window — bounded, never
+ * unbounded history. Pure function of env so the constructor and the tests
+ * share one reading of the flags:
+ *
+ * - WA_RECONNECT_BACKFILL_WINDOW_HOURS (default 6): how far back the dropped
+ *   window reaches. Hard defensive ceiling 24h.
+ * - WA_RECONNECT_BACKFILL_MAX_MESSAGES (default 500): total messages asked for
+ *   per burst. Hard defensive ceiling 1000.
+ *
+ * `0` or negative on either flag disables the feature entirely (zero fetches).
+ * Batch per chat is 50 — the maximum the Postgres-side history machinery
+ * (backfillHistory / messaging-history.set) handles per request.
+ */
+export function reconnectBackfillLimitsFromEnv(
+  env: NodeJS.ProcessEnv = process.env
+): { windowMs: number; maxMessages: number; batchSize: number } | null {
+  const rawHours = parseInt(env.WA_RECONNECT_BACKFILL_WINDOW_HOURS ?? '', 10);
+  const rawMax = parseInt(env.WA_RECONNECT_BACKFILL_MAX_MESSAGES ?? '', 10);
+  const hours = Number.isNaN(rawHours) ? 6 : rawHours;
+  const max = Number.isNaN(rawMax) ? 500 : rawMax;
+  if (hours <= 0 || max <= 0) return null;
+  return {
+    windowMs: Math.min(hours, 24) * 60 * 60 * 1000,
+    maxMessages: Math.min(max, 1000),
+    batchSize: 50,
+  };
+}
+
+/**
+ * SC-1225: per-instance options. Both default to the legacy behaviour, so a
+ * `new BaileysClient(path, key)` (the house connectors) is unchanged.
+ */
+export interface BaileysClientOptions {
+  /**
+   * When true the QR never leaves memory: no terminal render on stdout and no
+   * `<sessionPath>/qr.png` on disk. The per-sub pairing pool sets it — a QR is
+   * a login credential for someone else's WhatsApp account and must only
+   * reach its owner through the signed pairing API.
+   */
+  quietQr?: boolean;
+  /**
+   * When false the socket only pairs and keeps credentials fresh: no message
+   * or history ingest, no chat/presence handlers, no media-bucket or history
+   * table checks. v1 of the pairing pool does not ingest (SC-1197 D1).
+   */
+  ingest?: boolean;
+}
 
 export class BaileysClient extends EventEmitter {
   private sock: WASocket | null = null;
@@ -786,9 +843,14 @@ export class BaileysClient extends EventEmitter {
       created: number;
     }>;
   } | null = null;
+  private readonly quietQr: boolean;
+  private readonly ingest: boolean;
   private sessionPath: string;
   // kept for backward compat with the old constructor signature; unused.
   private encryptionKey: Buffer;
+  // SC-705 credential-store hooks (see setCredsSavedHook / setSessionInvalidatedHook).
+  private credsSavedHook: (() => void) | null = null;
+  private sessionInvalidatedHook: (() => Promise<void> | void) | null = null;
   private logger: pino.Logger;
 
   // State exposed via getStatus()/getCachedState()/isConnected()
@@ -822,6 +884,12 @@ export class BaileysClient extends EventEmitter {
   // import source; this flag lets Baileys fill whatever WhatsApp sends during
   // a fresh device link without treating those messages as live events.
   private readonly historySyncOnLogin = process.env.WA_HISTORY_SYNC_ON_LOGIN === 'true';
+  // INFRA-288: bounded backfill of the window dropped between a disconnect and
+  // the reconnect. null = feature off (a 0/negative flag). Read once at
+  // construction like the other WA_* knobs.
+  private readonly reconnectBackfillLimits = reconnectBackfillLimitsFromEnv();
+  private lastReconnectBackfillAt = 0;
+  private reconnectBackfillInFlight = false;
   // F1.7 honest voice — OFF by default. Enabled (with S3_PUBLIC_ENDPOINT) only
   // on the professional deployment: awaits the voice-note upload before the
   // NATS emit so the event carries a presigned audio URL synapse can
@@ -863,9 +931,11 @@ export class BaileysClient extends EventEmitter {
   private placeholderResendCache: CacheStore;
   private historyBackfillRequestedUntil = 0;
 
-  constructor(sessionPath: string, encryptionKey: string) {
+  constructor(sessionPath: string, encryptionKey: string, options: BaileysClientOptions = {}) {
     super();
     this.sessionPath = sessionPath;
+    this.quietQr = options.quietQr === true;
+    this.ingest = options.ingest !== false;
     this.encryptionKey = Buffer.from(encryptionKey, 'utf-8');
     this.logger = pino({
       transport: {
@@ -903,16 +973,19 @@ export class BaileysClient extends EventEmitter {
     try {
       await this.destroyCurrentSocket('before connect');
 
-      try {
-        await ensureMediaBucket();
-      } catch (e: any) {
-        this.logger.warn(
-          `MinIO bucket check failed (auto-download may not work): ${e?.message || e}`
-        );
+      if (this.ingest) {
+        try {
+          await ensureMediaBucket();
+        } catch (e: any) {
+          this.logger.warn(
+            `MinIO bucket check failed (auto-download may not work): ${e?.message || e}`
+          );
+        }
+        await ensureHistoryTables();
+        await ensureDurableTables();
+        await adoptPayloadTimestampShape();
+        await ensureNovedadesTables();
       }
-      await ensureHistoryTables();
-      await ensureDurableTables();
-      await ensureNovedadesTables();
 
       const authDir = this.authDir();
       await fsp.mkdir(authDir, { recursive: true });
@@ -980,6 +1053,30 @@ export class BaileysClient extends EventEmitter {
     return join(this.sessionPath, 'baileys-auth');
   }
 
+  /** Public view of the auth dir (SC-705 credential-store wiring in main.ts). */
+  getAuthDir(): string {
+    return this.authDir();
+  }
+
+  /**
+   * SC-705: called after every baileys `saveCreds()` completes. The per-sub
+   * connector sets this to the credential-store write-back; the house
+   * connectors leave it unset and behave exactly as before.
+   */
+  setCredsSavedHook(hook: () => void): void {
+    this.credsSavedHook = hook;
+  }
+
+  /**
+   * SC-705: called when the session is irrecoverably dead (WhatsApp
+   * `loggedOut` — the user unlinked this device). The per-sub connector uses
+   * it to delete its credential-store row so a restart cannot resurrect a
+   * dead session.
+   */
+  setSessionInvalidatedHook(hook: () => Promise<void> | void): void {
+    this.sessionInvalidatedHook = hook;
+  }
+
   private async destroyCurrentSocket(reason: string): Promise<void> {
     const sock = this.sock;
     this.sock = null;
@@ -997,7 +1094,11 @@ export class BaileysClient extends EventEmitter {
     if (!sock) return;
 
     sock.ev.on('creds.update', () => {
-      void saveCreds();
+      // SC-705: after the on-disk save completes, let the per-sub connector
+      // mirror the auth dir into the credential store (no-op for the house).
+      void saveCreds()
+        .then(() => this.credsSavedHook?.())
+        .catch((e: any) => this.logger.warn(`saveCreds failed: ${e?.message || e}`));
     });
 
     sock.ev.on('connection.update', update => {
@@ -1020,6 +1121,8 @@ export class BaileysClient extends EventEmitter {
         this.presenceSubscribed.clear();
         this.presenceState.clear();
         this.markConnected('connection.update open');
+        // SC-1225: a pairing-only socket (ingest off) touches no DB state.
+        if (!this.ingest) return;
         // Pull current unread/archived/pin state from WhatsApp app-state. This
         // emits chats.update events whose handler persists unread_count +
         // archived to the DB, so the dashboard shows the real badges without
@@ -1036,6 +1139,13 @@ export class BaileysClient extends EventEmitter {
         // indicators to the dashboard. baileys auto-renews subscriptions
         // while the socket stays open.
         void this.subscribePresenceForActiveChats(200);
+        // INFRA-288: messages that arrived while the socket was down live only
+        // on the phone until we ask for them — pull the dropped window, bounded.
+        // Skipped when WA_HISTORY_SYNC_ON_LOGIN is on: Baileys already syncs
+        // history there. Fire-and-forget; must never break this handler.
+        void this.backfillReconnectWindow().catch(e =>
+          this.logger.warn(`reconnect backfill failed: ${e?.message || e}`)
+        );
         return;
       }
 
@@ -1060,6 +1170,14 @@ export class BaileysClient extends EventEmitter {
           this.logger.error('WhatsApp session was logged out — rescan QR required');
           // Wipe local creds so next connect() emits a fresh QR.
           void fsp.rm(this.authDir(), { recursive: true, force: true }).catch(() => {});
+          // SC-705: the stored row is dead too — without this the next pod
+          // restart would re-apply it and loop on loggedOut (no-op for the
+          // house connectors, which have no hook).
+          if (this.sessionInvalidatedHook) {
+            void Promise.resolve(this.sessionInvalidatedHook()).catch((e: any) =>
+              this.logger.warn(`session-invalidated hook failed: ${e?.message || e}`)
+            );
+          }
           this.scheduleReconnect('logged out');
           return;
         }
@@ -1067,6 +1185,10 @@ export class BaileysClient extends EventEmitter {
         this.scheduleReconnect(reason);
       }
     });
+
+    // SC-1225: pairing-only sockets stop here — no message/history/chat
+    // handlers, so nothing is ingested for a per-sub session in v1.
+    if (!this.ingest) return;
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify' && type !== 'append') return;
@@ -1535,6 +1657,11 @@ export class BaileysClient extends EventEmitter {
     this.ready = false;
     this.lastState = 'QR';
     this.lastQrAt = new Date();
+    if (this.quietQr) {
+      // SC-1225: the QR stays in memory; only the 'qr' event carries it.
+      this.emit('qr', qr);
+      return;
+    }
     qrcodeTerminal.generate(qr, { small: true });
     QRCode.toFile(join(this.sessionPath, 'qr.png'), qr, { width: 400 }).catch(() => {});
     this.logger.warn(`WhatsApp requires QR scan at ${qrPageUrl()}`);
@@ -1657,7 +1784,11 @@ export class BaileysClient extends EventEmitter {
       normalizeMessageContent(msg.message)?.encEventResponseMessage ||
       normalizeMessageContent(msg.message)?.pinInChatMessage
     ) {
-      await storeRawWAMessage(msg);
+      await this.persistDurablePayload(
+        msg,
+        msg.key.remoteJid || '',
+        options.source === 'baileys_history_sync' ? 'history' : 'live'
+      );
       return { inserted: false };
     }
 
@@ -1753,16 +1884,6 @@ export class BaileysClient extends EventEmitter {
       );
     }
 
-    // Keep the original Baileys key for replies while indexing its payload
-    // under the same canonical conversation used by messages.
-    if (msg.key?.id && msg.message) {
-      await storeRawWAMessage(msg, waMessage.conversationId).catch(e =>
-        this.logger.warn(
-          `durable WhatsApp message store failed for ${msg.key.id}: ${e?.message || e}`
-        )
-      );
-    }
-
     const senderRaw = msg.key.fromMe
       ? this.meJid || waMessage.senderWaId
       : msg.key.participant || rawChatJid;
@@ -1818,6 +1939,12 @@ export class BaileysClient extends EventEmitter {
         ...(waMessage.metadata || {}),
       },
     };
+    // Persist the raw payload before its searchable message row is visible.
+    await this.persistDurablePayload(
+      msg,
+      waMessage.conversationId,
+      options.source === 'baileys_history_sync' ? 'history' : 'live'
+    );
     const msgId = await storeMessage(data);
     await storeMessageKey({
       waMessageId: waMessage.waMessageId,
@@ -2274,34 +2401,66 @@ export class BaileysClient extends EventEmitter {
 
   /**
    * Build a baileys-compatible "quoted" message from a wa_message_id we've
-   * seen before (cached at ingest time). Returns undefined if we don't have
-   * the original — baileys will still send, just without the quote bubble.
+   * seen before: process memory first, then the durable copy (survives
+   * restarts). Returns undefined if we don't have the original — a text reply
+   * still sends, just without the quote bubble.
    */
   private async buildQuotedFromId(
     replyToMessageId: string | undefined,
     chatJid: string
   ): Promise<WAMessage | undefined> {
     if (!replyToMessageId) return undefined;
-    const durable = await getRawWAMessage(replyToMessageId, chatJid).catch(() => undefined);
-    if (durable?.message) {
-      return {
-        ...durable,
-        key: { ...durable.key, id: replyToMessageId, remoteJid: chatJid },
-      } as WAMessage;
-    }
-    const cachedKey = this.keyCache.get(replyToMessageId);
+    const id = stripAccountKey(replyToMessageId);
+    const cachedKey = this.keyCache.get(id);
+    const durable = this.ingest
+      ? (await getRawWAMessage(id, cachedKey?.chatJid || chatJid).catch(() => undefined)) ||
+        (await this.durableMessage(id))
+      : undefined;
+    const original = this.memoryMessage(id) || durable;
+    if (!original?.message) return undefined;
+    return {
+      ...original,
+      key: { ...original.key, id, remoteJid: chatJid },
+    } as WAMessage;
+  }
+
+  /** Full WAMessage (key + content) from the in-memory caches. */
+  private memoryMessage(messageId: string): WAMessage | undefined {
+    const cachedKey = this.keyCache.get(messageId);
     const messageProto =
-      this.retryMessageCache.get<proto.IMessage>(replyToMessageId) ||
+      this.retryMessageCache.get<proto.IMessage>(messageId) ||
       (cachedKey
         ? this.retryMessageCache.get<proto.IMessage>(
-            this.retryMessageCacheKey(cachedKey.chatJid, replyToMessageId)
+            this.retryMessageCacheKey(cachedKey.chatJid, messageId)
           )
         : undefined);
     if (!cachedKey || !messageProto) return undefined;
-    return {
-      key: { ...cachedKey.key, id: replyToMessageId, remoteJid: chatJid },
-      message: messageProto,
-    } as WAMessage;
+    return { key: { ...cachedKey.key, id: messageId }, message: messageProto } as WAMessage;
+  }
+
+  /** Durable copy of a message; never consulted by a pairing-only socket. */
+  private async durableMessage(messageId: string): Promise<WAMessage | undefined> {
+    if (!this.ingest) return undefined;
+    return getRawWAMessage(messageId);
+  }
+
+  /**
+   * Persist the raw message for quote/forward/retry after a restart. SC-1225:
+   * a pairing-only socket (ingest off) writes nothing.
+   */
+  private async persistDurablePayload(
+    msg: WAMessage | undefined,
+    conversationId: string,
+    source: DurablePayloadSource
+  ): Promise<void> {
+    if (!this.ingest || !msg?.key?.id) return;
+    try {
+      await storeRawWAMessage(msg, conversationId, source);
+    } catch (error: any) {
+      this.logger.warn(
+        `durable message persistence failed for ${msg.key.id}: ${error?.message || error}`
+      );
+    }
   }
 
   async sendMessage(
@@ -2382,10 +2541,10 @@ export class BaileysClient extends EventEmitter {
         if (await this.persistSentNovedades(sent, ownJid)) return messageId || undefined;
         this.rememberKey(messageId || '', sent.key, raw);
         this.rememberMessageForRetry(sent.key, sent.message);
-        await storeRawWAMessage(sent).catch(error =>
-          this.logger.warn(
-            `durable sent-message store failed for ${messageId}: ${error?.message || error}`
-          )
+        await this.persistDurablePayload(
+          sent,
+          this.normalizeJid(sent.key.remoteJid || raw),
+          'sent'
         );
       }
       return messageId || undefined;
@@ -2421,10 +2580,10 @@ export class BaileysClient extends EventEmitter {
           if (retried?.key) {
             this.rememberKey(messageId || '', retried.key, raw);
             this.rememberMessageForRetry(retried.key, retried.message);
-            await storeRawWAMessage(retried).catch(error =>
-              this.logger.warn(
-                `durable retried-message store failed for ${messageId}: ${error?.message || error}`
-              )
+            await this.persistDurablePayload(
+              retried,
+              this.normalizeJid(retried.key.remoteJid || raw),
+              'sent'
             );
           }
           return messageId || undefined;
@@ -2570,6 +2729,16 @@ export class BaileysClient extends EventEmitter {
     if (options?.asSticker) refuseViewOnce();
     const raw = this.toRawJid(chatId);
     const ownJid = this.sock.user?.id;
+    // A media reply whose quoted message is unknown is rejected (before the
+    // file is fetched) instead of going out as an unrelated, unquoted media.
+    const quoted = await this.buildQuotedFromId(options?.replyToMessageId, raw);
+    if (options?.replyToMessageId && !quoted) {
+      throw new MessageUnavailableError(
+        `Quoted message ${options.replyToMessageId} is unavailable (not in memory nor in the durable store); send the media without replyTo`,
+        422,
+        'quoted_message_unavailable'
+      );
+    }
     let buf: Buffer;
     let contentType = '';
     try {
@@ -2661,10 +2830,6 @@ export class BaileysClient extends EventEmitter {
       };
     }
 
-    const quoted = await this.buildQuotedFromId(options?.replyToMessageId, raw);
-    if (options?.replyToMessageId && !quoted) {
-      throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'Quoted message is unavailable');
-    }
     await options?.beforeSend?.();
     const sent = await this.sock.sendMessage(raw, payload, {
       ...(quoted ? { quoted } : {}),
@@ -2678,11 +2843,7 @@ export class BaileysClient extends EventEmitter {
       } catch (error: any) {
         this.logger.warn(`sent media cache failed for ${sent.key.id}: ${error?.code || 'unknown'}`);
       }
-      await storeRawWAMessage(sent).catch(error =>
-        this.logger.warn(
-          `durable media-message store failed for ${sent.key?.id}: ${error?.message || error}`
-        )
-      );
+      await this.persistDurablePayload(sent, this.normalizeJid(sent.key.remoteJid || raw), 'sent');
       const fileType =
         'image' in payload
           ? 'IMAGE'
@@ -2764,11 +2925,7 @@ export class BaileysClient extends EventEmitter {
       if (await this.persistSentNovedades(sent, ownJid)) return messageId || undefined;
       this.rememberKey(messageId || '', sent.key, raw);
       this.rememberMessageForRetry(sent.key, sent.message);
-      await storeRawWAMessage(sent).catch(error =>
-        this.logger.warn(
-          `durable voice-message store failed for ${messageId}: ${error?.message || error}`
-        )
-      );
+      await this.persistDurablePayload(sent, this.normalizeJid(sent.key.remoteJid || raw), 'sent');
     }
     return messageId || undefined;
   }
@@ -2977,29 +3134,43 @@ export class BaileysClient extends EventEmitter {
     this.logger.info(`Reacted with ${emoji} to ${messageId}`);
   }
 
+  /**
+   * Real WhatsApp forward: `sendMessage(to, { forward: original })` with the
+   * original WAMessage from memory or the durable store. The source is found
+   * by its (account-scoped) message id; `chatId` only names it in errors.
+   * Returns the id of the new message.
+   */
   async forwardMessage(
     chatId: string,
     messageId: string,
     toChatId: string
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
-    const cached = this.keyCache.get(messageId);
+    if (!this.isConnected())
+      throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
+    const id = stripAccountKey(messageId);
+    const cached = this.keyCache.get(id);
     const original =
-      (await getRawWAMessage(messageId, cached?.chatJid || this.toRawJid(chatId)).catch(
-        () => undefined
-      )) || (await getRawWAMessage(messageId).catch(() => undefined));
+      this.memoryMessage(id) ||
+      (this.ingest
+        ? (await getRawWAMessage(id, cached?.chatJid || this.toRawJid(chatId)).catch(
+            () => undefined
+          )) || (await this.durableMessage(id))
+        : undefined);
     if (!original?.message) {
-      throw new CapabilityError(
-        'CAPABILITY_UNSUPPORTED',
-        `forwardMessage: durable message ${messageId} is unavailable`,
-        { messageId }
+      throw new MessageUnavailableError(
+        `forwardMessage: message ${id} of ${chatId} is unavailable (not in memory nor in the durable store)`,
+        404,
+        'message_unavailable'
       );
     }
-    const forwardable = { ...original, key: { ...original.key, id: messageId } } as WAMessage;
+    const forwardable = { ...original, key: { ...original.key, id } } as WAMessage;
     const rawTarget = this.toRawJid(toChatId);
     const sent = await this.sock.sendMessage(rawTarget, { forward: forwardable });
     await this.persistSentMessage(sent, rawTarget);
-    return sent?.key?.id || undefined;
+    const sentId = sent?.key?.id;
+    this.logger.info(`Forwarded ${id} to ${rawTarget}${sentId ? ` id=${sentId}` : ''}`);
+    return sentId || undefined;
   }
 
   async editMessage(
@@ -3075,9 +3246,45 @@ export class BaileysClient extends EventEmitter {
   async markAsRead(chatId: string): Promise<void> {
     if (!this.sock) throw new Error('Client not initialized');
     const raw = this.toRawJid(chatId);
-    const entries = await getMessageKeysForChat(chatId, { unreadOnly: true });
-    const keys = entries.map(entry => entry.key);
-    if (keys.length) await this.sock.readMessages(keys);
+    // Read receipts for every unread inbound message of the chat (bounded by
+    // the read watermark, see getUnreadMessageKeysForChat), so each sender
+    // sees their message read — not only the author of the latest one.
+    const unread = await getUnreadMessageKeysForChat(chatId);
+    if (unread.length) {
+      await this.sock.readMessages(
+        unread.map(k => ({
+          id: k.id,
+          remoteJid: k.remoteJid,
+          fromMe: k.fromMe,
+          participant: k.participant,
+        }))
+      );
+      await markMessagesRead(unread.map(k => k.id)).catch(e =>
+        this.logger.warn(`markAsRead: read status persist failed: ${e?.message || e}`)
+      );
+    } else {
+      // Nothing pending: read the latest known key for that chat, as before.
+      const pool = getPool();
+      // messages.conversation_id is stored namespaced (see accountKey); the caller
+      // hands us a bare chatId, so namespace it or professional reads zero rows.
+      const r = await pool.query(
+        `SELECT wa_message_id FROM messages WHERE conversation_id = $1 ORDER BY wa_timestamp DESC LIMIT 1`,
+        [accountKey(chatId)]
+      );
+      const stored = r.rows[0]?.wa_message_id as string | undefined;
+      if (!stored) return;
+      // wa_message_id is stored namespaced; the keyCache and the WhatsApp message
+      // key both speak the BARE id, so strip the prefix back off before use.
+      const lastId = stripAccountKey(stored);
+      const cached = this.keyCache.get(lastId);
+      const key = cached?.key ||
+        (await this.reconstructKeyFromDb(lastId, chatId)) || {
+          remoteJid: raw,
+          id: lastId,
+          fromMe: false,
+        };
+      await this.sock.readMessages([key]);
+    }
     const norm = this.normalizeJid(raw);
     const chat = this.chatStore.get(norm);
     if (chat) chat.unreadCount = 0;
@@ -3665,11 +3872,10 @@ export class BaileysClient extends EventEmitter {
     const full = generateWAMessageFromContent(raw, payload, { messageId, userJid: this.meJid });
     await beforeSend();
     await this.sock.relayMessage(raw, full.message as proto.IMessage, { messageId });
-    try {
-      await storeRawWAMessage(full);
-    } catch {
-      this.logger.warn('Pin action relayed; local persistence is pending');
-    }
+    const canonicalChatId = await canonicalConversationId(this.normalizeJid(raw));
+    await this.persistDurablePayload(full, canonicalChatId, 'sent').catch(() =>
+      this.logger.warn('Pin action relayed; local persistence is pending')
+    );
     return messageId;
   }
 
@@ -4137,11 +4343,7 @@ export class BaileysClient extends EventEmitter {
     if (await this.persistSentNovedades(sent, this.sock?.user?.id)) return;
     this.rememberKey(sent.key.id, sent.key, rawJid);
     this.rememberMessageForRetry(sent.key, sent.message);
-    await storeRawWAMessage(sent).catch(error =>
-      this.logger.warn(
-        `durable sent-message store failed for ${sent.key?.id}: ${error?.message || error}`
-      )
-    );
+    await this.persistDurablePayload(sent, this.normalizeJid(sent.key.remoteJid || rawJid), 'sent');
   }
 
   private async persistSentNovedades(sent: WAMessage, ownJid?: string | null): Promise<boolean> {
@@ -4596,6 +4798,97 @@ export class BaileysClient extends EventEmitter {
     return { requested, candidates };
   }
 
+  /**
+   * INFRA-288 (P1 INFRA-112): backfill the window dropped while the socket was
+   * down, triggered from the `connection.update: open` branch.
+   *
+   * Newer-first with a volume cap: for each chat the anchor is the NEWEST known
+   * message at or before the window start (`now - windowHours`); asking
+   * Baileys from that anchor replays the gap forward into
+   * `messaging-history.set`, which ingests it as `baileys_history_sync` while
+   * `historyBackfillRequestedUntil` is armed. Requests stop as soon as the
+   * total asked reaches WA_RECONNECT_BACKFILL_MAX_MESSAGES — never unbounded.
+   *
+   * Chain-reconnect safety: a 60s cooldown between bursts plus an in-flight
+   * flag, so flapping sockets ask for history once, not once per `open`.
+   */
+  async backfillReconnectWindow(): Promise<{ requested: number; chats: number }> {
+    // historySyncOnLogin ON means Baileys already syncs history on login —
+    // asking again would double-fetch the same window.
+    if (!this.sock || this.historySyncOnLogin || !this.reconnectBackfillLimits)
+      return { requested: 0, chats: 0 };
+    if (this.reconnectBackfillInFlight) return { requested: 0, chats: 0 };
+    const now = Date.now();
+    if (now - this.lastReconnectBackfillAt < 60_000) return { requested: 0, chats: 0 };
+    this.reconnectBackfillInFlight = true;
+    this.lastReconnectBackfillAt = now;
+
+    try {
+      const { windowMs, maxMessages, batchSize } = this.reconnectBackfillLimits;
+      const windowStart = now - windowMs;
+      await ensureHistoryTables();
+
+      // whatsapp_message_keys.conversation_id is stored namespaced (see
+      // accountKey); the wire contract speaks bare ids, stripped below. The
+      // table has no account column, so anchors are scoped through messages
+      // (m.account = this connector's account) — same pattern as the unread
+      // keys query in db-writer. Without it the MAX_MESSAGES budget would be
+      // spent on OTHER accounts' chats in the shared DB and this account's
+      // dropped window would stay unfilled.
+      const anchors = (
+        await getPool().query(
+          `SELECT DISTINCT ON (k.conversation_id)
+              k.conversation_id, k.wa_message_id, k.remote_jid, k.from_me,
+              k.participant_jid, k.message_timestamp_ms
+           FROM whatsapp_message_keys k
+           JOIN messages m ON m.wa_message_id = k.wa_message_id
+           WHERE k.message_timestamp_ms <= $1
+             AND m.account = $2
+           ORDER BY k.conversation_id, k.message_timestamp_ms DESC
+           LIMIT $3`,
+          [windowStart, connectorAccount(), 200]
+        )
+      ).rows;
+
+      let requested = 0;
+      let chats = 0;
+      for (const row of anchors) {
+        const remaining = maxMessages - requested;
+        if (remaining <= 0) break;
+        const bareConversationId = stripAccountKey(row.conversation_id);
+        const bareWaMessageId = stripAccountKey(row.wa_message_id);
+        const key: WAMessageKey = {
+          remoteJid: row.remote_jid,
+          id: bareWaMessageId,
+          fromMe: row.from_me,
+          participant: row.participant_jid || undefined,
+        };
+        // Arm the ingest window so messaging-history.set accepts the replay
+        // (same pattern as backfillHistory).
+        this.historyBackfillRequestedUntil = Date.now() + 5 * 60 * 1000;
+        await (this.sock as any).fetchMessageHistory(
+          Math.min(batchSize, remaining),
+          key,
+          Math.floor(Number(row.message_timestamp_ms) / 1000)
+        );
+        requested += Math.min(batchSize, remaining);
+        chats += 1;
+        await recordHistorySyncProgress({
+          conversationId: bareConversationId,
+          oldestMessageId: bareWaMessageId,
+          oldestTimestamp: new Date(Number(row.message_timestamp_ms)),
+          insertedCount: 0,
+          status: 'requested',
+        });
+      }
+      if (requested > 0)
+        this.logger.info(`reconnect backfill requested=${requested} chats=${chats}`);
+      return { requested, chats };
+    } finally {
+      this.reconnectBackfillInFlight = false;
+    }
+  }
+
   async getHistorySyncStatus(limit: number = 200): Promise<HistorySyncState[]> {
     await ensureHistoryTables();
     return getHistorySyncStatus(limit);
@@ -4902,7 +5195,11 @@ export class BaileysClient extends EventEmitter {
       return cached;
     }
 
-    const durable = await getRawWAMessage(messageId, remoteJid || undefined).catch(() => undefined);
+    // Durable copy: the exact content we sent/received, even after a restart.
+    const durable = this.ingest
+      ? (await getRawWAMessage(messageId, remoteJid || undefined).catch(() => undefined)) ||
+        (await this.durableMessage(messageId))
+      : undefined;
     if (durable?.message) {
       this.logger.debug(
         `WhatsApp durable retry message hit remoteJid=${remoteJid || 'unknown'} messageId=${messageId}`

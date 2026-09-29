@@ -31,11 +31,7 @@ function resolverWith(opts: {
     resolve: (chatId: string, messageId: string, requested: Account): Promise<Resolution> =>
       (
         server as unknown as {
-          resolveTelegramMediaAccount: (
-            c: string,
-            m: string,
-            r: Account
-          ) => Promise<Resolution>;
+          resolveTelegramMediaAccount: (c: string, m: string, r: Account) => Promise<Resolution>;
         }
       ).resolveTelegramMediaAccount(chatId, messageId, requested),
   };

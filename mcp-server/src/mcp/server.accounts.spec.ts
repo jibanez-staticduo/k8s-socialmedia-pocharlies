@@ -53,7 +53,9 @@ test('Instagram sender and message keys preserve both accounts', async () => {
   const participants = db.query.mock.calls as unknown as Array<[string, unknown[]]>;
   const writes = participants.filter(([sql]) => sql.includes('INSERT INTO participants'));
   expect(writes[0][1][0]).not.toBe(writes[1][1][0]);
-  expect(writes.map(([, args]) => args[2])).toEqual(['instagram', 'other_ig']);
+  // The stored account dimension is the registry namespace (ADR 0001); the
+  // Instagram accountId lives in the row id (ig_<account>_...) and in metadata.
+  expect(writes.map(([, args]) => args[2])).toEqual(['personal', 'secondary']);
 });
 
 test('cross-account search only includes enabled configured channel/account pairs', async () => {

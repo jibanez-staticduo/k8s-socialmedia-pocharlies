@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { normalizeMessageContent, proto } from '@whiskeysockets/baileys';
 import type { WAMessage, WAMessageKey } from '@whiskeysockets/baileys';
 import {
   accountKey,
@@ -9,6 +10,9 @@ import {
 } from './db-writer';
 import { deserializeDurableValue, serializeDurableValue } from './whatsapp-capabilities';
 import { novedadesKind } from './novedades-store';
+
+/** Re-exported for the upstream durable tests and HTTP callers that import them from here. */
+export { deserializeDurableValue, serializeDurableValue } from './whatsapp-capabilities';
 
 let tablesReady = false;
 
@@ -138,17 +142,42 @@ export async function ensureDurableTables(): Promise<void> {
   }
 }
 
-export async function storeRawWAMessage(
-  message: WAMessage,
-  conversationId?: string
-): Promise<void> {
-  const id = message.key?.id;
-  const remoteJid = message.key?.remoteJid;
-  if (!id || !remoteJid || !message.message) return;
-  if (novedadesKind(message.key)) return;
-  const account = connectorAccount();
-  await pool().query(
-    `INSERT INTO whatsapp_message_payloads
+/**
+ * Persist the raw message (key + content) so quoting, forwarding and the
+ * Baileys retry callback survive restarts. `conversationId` is the bare,
+ * normalised chat id; when omitted the connector resolves the canonical
+ * conversation itself (fork path). `source` drives the history retention
+ * window: live traffic and our own sends are always kept, history-sync only
+ * inside DURABLE_PAYLOAD_HISTORY_DAYS. Key material, thumbnails and protocol
+ * messages never land here; oversized payloads are skipped.
+ *
+ * Three timestamp shapes exist because the deployments diverged: the NAS
+ * table (connectors/whatsapp-web/migrations/001) keys the timestamp on
+ * `message_timestamp_ms bigint`; fresh migration-015 tables carry only
+ * `wa_timestamp timestamptz`; the NAS table EXPANDED by migration 015
+ * (ALTER ADD COLUMN + backfill) has both. Baileys bootstrap calls
+ * `adoptPayloadTimestampShape()` once to pick the shape with two LIMIT-0
+ * probes; if the probe never ran (or a migration lands mid-process), the
+ * insert still self-corrects permanently on the first undefined-column
+ * error. On the converged table both columns are written so the fork scans
+ * and the mcp-server readers see every new row.
+ * Never throws: returns whether the payload is stored.
+ */
+const TS_SHAPE_INSERT = `
+     INSERT INTO whatsapp_message_payloads
+       (wa_message_id, account, conversation_id, message_key, message_payload, wa_timestamp, push_name)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+     ON CONFLICT (wa_message_id) DO UPDATE SET
+       conversation_id = EXCLUDED.conversation_id,
+       message_key = EXCLUDED.message_key,
+       message_payload = EXCLUDED.message_payload,
+       wa_timestamp = COALESCE(EXCLUDED.wa_timestamp, whatsapp_message_payloads.wa_timestamp),
+       push_name = COALESCE(EXCLUDED.push_name, whatsapp_message_payloads.push_name)
+     WHERE whatsapp_message_payloads.message_payload IS DISTINCT FROM EXCLUDED.message_payload
+        OR whatsapp_message_payloads.message_key IS DISTINCT FROM EXCLUDED.message_key`;
+
+const MS_SHAPE_INSERT = `
+     INSERT INTO whatsapp_message_payloads
        (wa_message_id, account, conversation_id, message_key, message_payload,
         message_timestamp_ms, push_name)
      VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
@@ -159,59 +188,223 @@ export async function storeRawWAMessage(
        message_payload = EXCLUDED.message_payload,
        message_timestamp_ms = EXCLUDED.message_timestamp_ms,
        push_name = EXCLUDED.push_name,
-       updated_at = now()`,
-    [
-      accountKey(id),
-      account,
-      accountKey(
-        conversationId || (await canonicalConversationId(storageConversationId(remoteJid)))
-      ),
-      serializeDurableValue(message.key),
-      serializeDurableValue(message.message),
-      message.messageTimestamp ? Number(message.messageTimestamp) * 1000 : null,
-      message.pushName || null,
-    ]
-  );
+       updated_at = now()`;
+
+const BOTH_SHAPE_INSERT = `
+     INSERT INTO whatsapp_message_payloads
+       (wa_message_id, account, conversation_id, message_key, message_payload,
+        wa_timestamp, message_timestamp_ms, push_name)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8)
+     ON CONFLICT (wa_message_id) DO UPDATE SET
+       conversation_id = EXCLUDED.conversation_id,
+       message_key = EXCLUDED.message_key,
+       message_payload = EXCLUDED.message_payload,
+       wa_timestamp = COALESCE(EXCLUDED.wa_timestamp, whatsapp_message_payloads.wa_timestamp),
+       message_timestamp_ms =
+         COALESCE(EXCLUDED.message_timestamp_ms, whatsapp_message_payloads.message_timestamp_ms),
+       push_name = COALESCE(EXCLUDED.push_name, whatsapp_message_payloads.push_name)
+     WHERE whatsapp_message_payloads.message_payload IS DISTINCT FROM EXCLUDED.message_payload
+        OR whatsapp_message_payloads.message_key IS DISTINCT FROM EXCLUDED.message_key`;
+
+async function execPayloadInsert(
+  shape: PayloadShape,
+  base: [string, string, string, string, string],
+  timestamp: number | undefined,
+  pushName: string | null
+): Promise<'ok' | 'missing' | 'column' | 'failed'> {
+  const [idKey, account, convKey, key, payload] = base;
+  const stamp = timestamp === undefined ? null : new Date(timestamp * 1000);
+  const millis = timestamp === undefined ? null : timestamp * 1000;
+  const params =
+    shape === 'both'
+      ? [idKey, account, convKey, key, payload, stamp, millis, pushName]
+      : shape === 'ms'
+        ? [idKey, account, convKey, key, payload, millis, pushName]
+        : [idKey, account, convKey, key, payload, stamp, pushName];
+  const sql =
+    shape === 'both' ? BOTH_SHAPE_INSERT : shape === 'ms' ? MS_SHAPE_INSERT : TS_SHAPE_INSERT;
+  try {
+    await pool().query(sql, params);
+    noteTablePresent();
+    return 'ok';
+  } catch (error) {
+    if (isUndefinedColumn(error)) return 'column';
+    if (isUndefinedTable(error)) {
+      noteTableMissing();
+      return 'missing';
+    }
+    console.warn(`durable payload store failed for ${idKey}: ${describeError(error)}`);
+    return 'failed';
+  }
 }
 
+export async function storeRawWAMessage(
+  message: WAMessage,
+  conversationId?: string,
+  source: DurablePayloadSource = 'live'
+): Promise<boolean> {
+  const id = message?.key?.id;
+  const remoteJid = message?.key?.remoteJid;
+  if (!id || !remoteJid || !message.message) return false;
+  if (novedadesKind(message.key)) return false;
+  const timestamp = unixSeconds(message.messageTimestamp);
+  if (!shouldStoreDurablePayload(source, timestamp)) return false;
+  if (tableKnownMissing()) return false;
+
+  let payload: string;
+  let key: string;
+  try {
+    const content = toDurablePayload(message.message);
+    if (!content) return false;
+    payload = serializeDurableValue(content);
+    key = serializeDurableValue(message.key);
+  } catch (error) {
+    console.warn(`durable payload encode failed for ${id}: ${describeError(error)}`);
+    return false;
+  }
+  if (Buffer.byteLength(payload) > maxPayloadBytes()) {
+    console.warn(`durable payload for ${id} skipped: ${Buffer.byteLength(payload)} bytes over cap`);
+    return false;
+  }
+
+  const conv = conversationId || (await canonicalConversationId(storageConversationId(remoteJid)));
+  const base: [string, string, string, string, string] = [
+    accountKey(id),
+    connectorAccount(),
+    accountKey(conv),
+    key,
+    payload,
+  ];
+  const pushName = message.pushName || null;
+
+  let outcome = await execPayloadInsert(currentPayloadShape(), base, timestamp, pushName);
+  if (outcome === 'column') {
+    flipPayloadShape();
+    outcome = await execPayloadInsert(currentPayloadShape(), base, timestamp, pushName);
+    if (outcome === 'column') {
+      console.warn(`durable payload insert failed on both timestamp shapes for ${id}`);
+      return false;
+    }
+  }
+  return outcome === 'ok';
+}
+
+/**
+ * The stored WAMessage for a Baileys message id (bare or namespaced), scoped to
+ * this connector's account, optionally pinned to one chat (fork path).
+ * undefined when unknown or on any DB error.
+ */
 export async function getRawWAMessage(
   messageId: string,
   chatId?: string
 ): Promise<WAMessage | undefined> {
-  if (!messageId) return undefined;
-  const params: unknown[] = [accountKey(messageId), connectorAccount()];
+  const bare = messageId ? stripAccountKey(messageId) : '';
+  if (!bare || tableKnownMissing()) return undefined;
+  try {
+    let row = await selectRawWAMessage(bare, chatId, currentPayloadShape());
+    if (row === 'column') {
+      flipPayloadShape();
+      row = await selectRawWAMessage(bare, chatId, currentPayloadShape());
+      if (row === 'column') return undefined;
+    }
+    noteTablePresent();
+    if (!row?.message_key || !row.message_payload) return undefined;
+    const key = deserializeDurableValue(row.message_key) as WAMessageKey;
+    const tsMs = toEpochMs(
+      row.message_timestamp_ms !== undefined && row.message_timestamp_ms !== null
+        ? row.message_timestamp_ms
+        : row.wa_timestamp
+    );
+    return {
+      key: { ...key, id: bare },
+      message: fromDurablePayload(row.message_payload),
+      messageTimestamp: Number.isFinite(tsMs) ? Math.floor(tsMs / 1000) : undefined,
+      pushName: row.push_name || undefined,
+    } as WAMessage;
+  } catch (error) {
+    if (isUndefinedTable(error)) {
+      noteTableMissing();
+      return undefined;
+    }
+    console.warn(`durable payload lookup failed for ${bare}: ${describeError(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Both timestamp shapes end as epoch milliseconds: pg hands back the NAS
+ * bigint as a numeric string and migration 015's timestamptz as a Date (or an
+ * ISO string through mocks), and plain `new Date(string)` rejects the first.
+ */
+function toEpochMs(value: unknown): number {
+  if (value === null || value === undefined) return NaN;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric;
+  return Date.parse(String(value));
+}
+
+function payloadTimestampSelect(shape: PayloadShape): string {
+  if (shape === 'ms') return 'message_timestamp_ms';
+  if (shape === 'both')
+    return 'COALESCE(message_timestamp_ms, EXTRACT(EPOCH FROM wa_timestamp)::bigint * 1000) AS message_timestamp_ms';
+  return 'wa_timestamp';
+}
+
+async function selectRawWAMessage(
+  bare: string,
+  chatId: string | undefined,
+  shape: PayloadShape
+): Promise<
+  | 'column'
+  | {
+      message_key?: unknown;
+      message_payload?: unknown;
+      message_timestamp_ms?: string | number | null;
+      wa_timestamp?: Date | string | null;
+      push_name?: string | null;
+    }
+  | undefined
+> {
+  const params: unknown[] = [accountKey(bare), connectorAccount()];
   let where = 'wa_message_id = $1 AND account = $2';
   if (chatId) {
     params.push(accountKey(await canonicalConversationId(storageConversationId(chatId))));
     where += ' AND conversation_id = $3';
   }
-  const result = await pool().query(
-    `SELECT message_key, message_payload, message_timestamp_ms, push_name
-       FROM whatsapp_message_payloads
-      WHERE ${where}
-      LIMIT 1`,
-    params
-  );
-  const row = result.rows[0] as
+  let rows: unknown[];
+  try {
+    const result = await pool().query(
+      `SELECT message_key, message_payload, ${payloadTimestampSelect(shape)}, push_name
+         FROM whatsapp_message_payloads
+        WHERE ${where}
+        LIMIT 1`,
+      params
+    );
+    rows = result.rows;
+  } catch (error) {
+    if (isUndefinedColumn(error)) return 'column';
+    throw error;
+  }
+  const row = rows[0] as
     | {
         message_key?: unknown;
         message_payload?: unknown;
         message_timestamp_ms?: string | number | null;
+        wa_timestamp?: Date | string | null;
         push_name?: string | null;
       }
     | undefined;
-  if (!row?.message_key || !row.message_payload) return undefined;
-  const key = deserializeDurableValue(row.message_key) as WAMessageKey;
-  const message = deserializeDurableValue(row.message_payload) as WAMessage['message'];
-  return {
-    key,
-    message,
-    messageTimestamp:
-      row.message_timestamp_ms == null
-        ? undefined
-        : Math.floor(Number(row.message_timestamp_ms) / 1000),
-    pushName: row.push_name || undefined,
-  } as WAMessage;
+  return row as
+    | {
+        message_key?: unknown;
+        message_payload?: unknown;
+        message_timestamp_ms?: string | number | null;
+        wa_timestamp?: Date | string | null;
+        push_name?: string | null;
+      }
+    | undefined;
 }
 
 export interface DurableMessageKey {
@@ -516,7 +709,7 @@ export async function getRawWAMessagesByIds(
     params.push(accountKey(await canonicalConversationId(storageConversationId(chatId))));
     where += ` AND conversation_id = $${params.length}`;
   }
-  const result = await pool().query(
+  const result = await queryPayloadScan(
     `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
        FROM whatsapp_message_payloads
       WHERE ${where}`,
@@ -543,7 +736,7 @@ export async function listCapturedPollUpdates(
     accountKey(await canonicalConversationId(storageConversationId(chatId))),
     boundedLimit,
   ];
-  const result = await pool().query(
+  const result = await queryPayloadScan(
     `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms
        FROM whatsapp_message_payloads
       WHERE account = $1
@@ -597,7 +790,7 @@ export async function listCapturedEventResponses(
     filters.push(`wa_message_id COLLATE "C" > $${params.length}::text COLLATE "C"`);
   }
   params.push(limit + 1);
-  const result = await pool().query(
+  const result = await queryPayloadScan(
     [
       `SELECT wa_message_id, message_key, message_payload, message_timestamp_ms`,
       `  FROM whatsapp_message_payloads`,
@@ -609,4 +802,258 @@ export async function listCapturedEventResponses(
   );
   const items = toStoredRawRows(result.rows.slice(0, limit));
   return { items, nextCursor: result.rows.length > limit ? items.at(-1)!.waMessageId : null };
+}
+
+// ---------------------------------------------------------------------------
+// Upstream (fase 3 / PR-1) additions: retention, size control, availability
+// ---------------------------------------------------------------------------
+
+export type DurablePayloadSource = 'live' | 'history' | 'sent';
+
+const UNDEFINED_TABLE = '42P01';
+const UNDEFINED_COLUMN = '42703';
+const MISSING_TABLE_RECHECK_MS = 5 * 60 * 1000;
+const DEFAULT_HISTORY_DAYS = 7;
+const DEFAULT_MAX_BYTES = 256 * 1024;
+/** Inline binaries above this size are dropped unless the object carries a mediaKey. */
+const INLINE_BLOB_MAX_BYTES = 16 * 1024;
+
+/**
+ * Fields never persisted: preview thumbnails (the bulk of a media payload; the
+ * media itself stays downloadable through url/directPath/mediaKey) and Signal
+ * key material that rides along some messages.
+ */
+const DROPPED_FIELDS = new Set([
+  'jpegThumbnail',
+  'pngThumbnail',
+  'thumbnail',
+  'senderKeyDistributionMessage',
+  'fastRatchetKeySenderKeyDistributionMessage',
+]);
+
+/**
+ * A referenced message (forward source, quoted message) is neither in memory
+ * nor in the durable store. The HTTP layer maps it to `status`.
+ */
+export class MessageUnavailableError extends Error {
+  readonly status: number;
+  readonly failureClass: string;
+
+  constructor(message: string, status: number, failureClass: string) {
+    super(message);
+    this.name = 'MessageUnavailableError';
+    this.status = status;
+    this.failureClass = failureClass;
+  }
+}
+
+let tableMissingUntil = 0;
+let missingTableLogged = false;
+// NAS tables carry `message_timestamp_ms`; fresh migration-015 tables carry
+// only `wa_timestamp`; the EXPANDED NAS table has both. The bootstrap probe
+// picks the shape up front, the first undefined-column error is the fallback.
+type PayloadShape = 'ts' | 'ms' | 'both';
+let payloadShape: PayloadShape = 'ts';
+// Scan functions read the fork column first; on k8s they flip once to derive
+// the same alias from `wa_timestamp`.
+let scansUseWaTimestamp = false;
+
+/** Test hook: forget cached availability and timestamp-shape state between cases. */
+export function resetDurableStoreStateForTests(): void {
+  tableMissingUntil = 0;
+  missingTableLogged = false;
+  payloadShape = 'ts';
+  scansUseWaTimestamp = false;
+}
+
+function currentPayloadShape(): PayloadShape {
+  return payloadShape;
+}
+
+function flipPayloadShape(): void {
+  // The runtime fallback only ever demotes the fresh-015 default; the probe
+  // has already ruled out ambiguity for 'ms' and 'both'.
+  if (payloadShape === 'ts') payloadShape = 'ms';
+}
+
+/**
+ * One-shot startup probe run next to the table bootstrap: two LIMIT-0
+ * selects settle which timestamp columns the table actually carries before
+ * the first real insert pays a 42703. Table missing → fail soft like every
+ * other durable path; transient DB trouble → keep the default and let the
+ * 42703 fallback handle it.
+ */
+export async function adoptPayloadTimestampShape(): Promise<void> {
+  let hasMs = false;
+  let hasTs = false;
+  for (const column of ['message_timestamp_ms', 'wa_timestamp'] as const) {
+    try {
+      await pool().query(`SELECT ${column} FROM whatsapp_message_payloads LIMIT 0`);
+      if (column === 'message_timestamp_ms') hasMs = true;
+      else hasTs = true;
+    } catch (error) {
+      if (isUndefinedColumn(error)) continue;
+      if (isUndefinedTable(error)) {
+        noteTableMissing();
+        return;
+      }
+      return;
+    }
+  }
+  payloadShape = hasMs && hasTs ? 'both' : hasMs ? 'ms' : 'ts';
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isUndefinedTable(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === UNDEFINED_TABLE;
+}
+
+function isUndefinedColumn(error: unknown): boolean {
+  return (error as { code?: string } | null)?.code === UNDEFINED_COLUMN;
+}
+
+/** true → skip the DB entirely (table known missing, re-probe not due yet). */
+function tableKnownMissing(): boolean {
+  return tableMissingUntil > Date.now();
+}
+
+function noteTableMissing(): void {
+  tableMissingUntil = Date.now() + MISSING_TABLE_RECHECK_MS;
+  if (!missingTableLogged) {
+    missingTableLogged = true;
+    console.warn(
+      'whatsapp_message_payloads does not exist yet (mcp-server migration 015 not applied): ' +
+        'durable message payloads are off, quoting/forward/retry fall back to process memory'
+    );
+  }
+}
+
+function noteTablePresent(): void {
+  if (missingTableLogged) {
+    missingTableLogged = false;
+    console.info('whatsapp_message_payloads is available: durable message payloads are on');
+  }
+  tableMissingUntil = 0;
+}
+
+function envNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+export function historyDays(): number {
+  return envNumber('DURABLE_PAYLOAD_HISTORY_DAYS', DEFAULT_HISTORY_DAYS);
+}
+
+function maxPayloadBytes(): number {
+  return envNumber('DURABLE_PAYLOAD_MAX_BYTES', DEFAULT_MAX_BYTES);
+}
+
+/** Baileys timestamps are number | Long | string | null (seconds). */
+export function unixSeconds(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : undefined;
+  if (typeof value === 'string') {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+  const long = value as { toNumber?: () => number; low?: number; high?: number };
+  if (typeof long.toNumber === 'function') return unixSeconds(long.toNumber());
+  if (typeof long.low === 'number') {
+    return unixSeconds((long.high || 0) * 2 ** 32 + (long.low >>> 0));
+  }
+  return undefined;
+}
+
+/**
+ * Whether a message from `source` with this timestamp is worth storing. History
+ * sync can replay months of chats: only the recent window is kept (0 = none).
+ */
+export function shouldStoreDurablePayload(
+  source: DurablePayloadSource,
+  timestampSeconds: number | undefined,
+  nowMs: number = Date.now()
+): boolean {
+  if (source !== 'history') return true;
+  const days = historyDays();
+  if (days <= 0 || !timestampSeconds) return false;
+  return timestampSeconds * 1000 >= nowMs - days * 24 * 60 * 60 * 1000;
+}
+
+function isBinary(value: unknown): value is Uint8Array {
+  return value instanceof Uint8Array;
+}
+
+function stripHeavyFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripHeavyFields);
+  if (!value || typeof value !== 'object' || isBinary(value)) return value;
+  const obj = value as Record<string, unknown>;
+  const hasMediaKey = obj.mediaKey !== undefined && obj.mediaKey !== null;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(obj)) {
+    if (DROPPED_FIELDS.has(key)) continue;
+    if (isBinary(child) && child.length > INLINE_BLOB_MAX_BYTES && !hasMediaKey) continue;
+    out[key] = stripHeavyFields(child);
+  }
+  return out;
+}
+
+/**
+ * proto.Message → plain object ready for JSONB: enums as numbers, 64-bit ints
+ * as decimal strings (both round-trip through fromObject), bytes kept as
+ * Buffers for the durable serialiser, heavy fields stripped. null → do not
+ * store.
+ */
+export function toDurablePayload(
+  message: proto.IMessage | null | undefined
+): Record<string, unknown> | null {
+  if (!message) return null;
+  const decoded = proto.Message.fromObject(message as Record<string, unknown>);
+  // Also inside ephemeral / view-once wrappers.
+  if (decoded.protocolMessage || normalizeMessageContent(decoded)?.protocolMessage) return null;
+  const plain = proto.Message.toObject(decoded, { longs: String, enums: Number });
+  const stripped = stripHeavyFields(plain) as Record<string, unknown>;
+  return Object.keys(stripped).length ? stripped : null;
+}
+
+/** Inverse of toDurablePayload: a real proto.Message Baileys can encode. */
+export function fromDurablePayload(value: unknown): proto.IMessage {
+  return proto.Message.fromObject(deserializeDurableValue(value) as Record<string, unknown>);
+}
+
+/**
+ * Fork scans (batch lookup, poll votes, RSVP pages) interpolate the NAS
+ * `message_timestamp_ms` column. On migration-015 tables that column does not
+ * exist, so on the first undefined-column error the very same statement is
+ * retried deriving the alias from `wa_timestamp`, and the shape sticks.
+ */
+const SCAN_TS_EXPR = 'EXTRACT(EPOCH FROM wa_timestamp)::bigint * 1000 AS message_timestamp_ms';
+
+function rewriteScanForWaTimestamp(sql: string): string {
+  return sql.replace('message_payload, message_timestamp_ms', `message_payload, ${SCAN_TS_EXPR}`);
+}
+
+async function queryPayloadScan(
+  sql: string,
+  params: unknown[]
+): Promise<{ rows: Array<Record<string, unknown>> }> {
+  if (scansUseWaTimestamp) {
+    return (await pool().query(rewriteScanForWaTimestamp(sql), params)) as {
+      rows: Array<Record<string, unknown>>;
+    };
+  }
+  try {
+    return (await pool().query(sql, params)) as { rows: Array<Record<string, unknown>> };
+  } catch (error) {
+    if (!isUndefinedColumn(error)) throw error;
+    scansUseWaTimestamp = true;
+    return (await pool().query(rewriteScanForWaTimestamp(sql), params)) as {
+      rows: Array<Record<string, unknown>>;
+    };
+  }
 }

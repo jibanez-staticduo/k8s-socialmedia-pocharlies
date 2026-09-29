@@ -8,13 +8,32 @@ spec:
   policyTypes:
     - Ingress
 ---
+# SC-1197 P3 (SC-1226), hallazgo QA H1 + veredicto architect: los tres pods de la
+# API de emparejamientos (social-api, whatsapp-pairing, telegram-pairing) quedan
+# EXCLUIDOS de esta politica — su unico trafico entrante es el que autorizan las
+# politicas explicitas de networkpolicy-social-pairing.yaml (dgx-messages ->
+# social-api:3020; social-api -> los pools). Ningun pod de la casa (mcp-sse,
+# conectores) puede alcanzarlos por red: antes, al ser las NetworkPolicy aditivas,
+# un compromiso de cualquier pod del ns alcanzaba los pools sin mas barrera que
+# el HMAC, que mcp-sse y los conectores ya comparten.
+# Los pods EXISTENTES no cambian de conectividad ni un byte: `app NotIn [...]`
+# selecciona a todos los que seleccionaba `podSelector: {}` (incluidos los que no
+# llevan etiqueta `app` — un label selector NotIn tambien matchea la clave
+# ausente), y el `from` sigue siendo podSelector {}.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: whatsapp-mcp-allow-same-namespace
   namespace: whatsapp-mcp
 spec:
-  podSelector: {}
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: NotIn
+        values:
+          - social-api
+          - whatsapp-pairing
+          - telegram-pairing
   ingress:
     - from:
         - podSelector: {}
@@ -38,6 +57,15 @@ spec:
           podSelector:
             matchLabels:
               app: dgx-dashboard-backend
+        # dgx-messages salio del dashboard a su propio namespace y sirve los
+        # adjuntos (stickers, notas de voz) de socialmedia-media: sin esta regla
+        # el default-deny le devuelve connection refused.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: messages
+          podSelector:
+            matchLabels:
+              app: dgx-messages
       ports:
         - protocol: TCP
           port: 9000
@@ -57,6 +85,7 @@ spec:
         values:
           - whatsapp-connector
           - whatsapp-connector-professional
+          - whatsapp-connector-leila
           - mcp-sse
   ingress:
     - from:
@@ -75,5 +104,88 @@ spec:
           port: 3001
         - protocol: TCP
           port: 3010
+  policyTypes:
+    - Ingress
+---
+# SC-1194 P1: the Instagram Login OAuth callback path on whatsapp.e-dani.com
+# routes to instagram-connector:3003.
+# SC-1254 (2026-09-25, measured by SRE): the traefik-edge pods run with
+# hostNetwork, so their connections arrive from the NODE IP and the
+# namespaceSelector alone never matches — the public callback got 502'd by the
+# default-deny. This is NOT a mirror of the sibling whatsapp-mcp-allow-traefik-
+# http: the security verdict on SC-1254 (nota-security-netpol-instagram-callback.md
+# attached to the issue) rejected the sibling's broad ranges (tailnet /10 +
+# pod-CIDR /16) — port 3003 also serves the unauthenticated connector API and
+# x-user-sub is forgeable. Instead: a per-node /32 allowlist of exactly the
+# hosts running the traefik-edge DaemonSet (hostNetwork source): sauvage plus
+# the three ks5 control-plane nodes. CAVEAT: if traefik-edge moves to another
+# node, its tailnet IP must be added here — a stale /32 silently 502s the
+# public callback again.
+# traefik-lan is NOT hostNetwork (regular pod on ubuntu), so its namespaceSelector
+# keeps carrying the LAN path — mirrored by the now-merged k8s-infra route
+# lan-instagram-callback (PR 191, commit 5bcfb28).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: whatsapp-mcp-allow-traefik-instagram
+  namespace: whatsapp-mcp
+spec:
+  podSelector:
+    matchLabels:
+      app: instagram-connector
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik-lan
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik-edge
+        - ipBlock:
+            cidr: 100.109.183.9/32  # sauvage — public callback arrives with this source IP
+        - ipBlock:
+            cidr: 100.107.21.89/32  # ks5-cp-1
+        - ipBlock:
+            cidr: 100.71.117.127/32 # ks5-cp-2
+        - ipBlock:
+            cidr: 100.75.189.75/32  # ks5-cp-3
+      ports:
+        - protocol: TCP
+          port: 3003
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: whatsapp-mcp-allow-dashboard-telegram
+  namespace: whatsapp-mcp
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - telegram-connector
+          - telegram-connector-professional
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: control-nexus
+          podSelector:
+            matchLabels:
+              app: dgx-dashboard-backend
+        # The messages console left the dashboard (DGX-137): it sends to both
+        # Telegram connectors like it did from control-nexus.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: messages
+          podSelector:
+            matchLabels:
+              app: dgx-messages
+      ports:
+        - protocol: TCP
+          port: 3002
   policyTypes:
     - Ingress

@@ -36,6 +36,7 @@
     "label": "Instagram",
     "connectorUrl": "http://ig",
     "enabled": true,
+    "namespace": "personal",
     "secretEnv": "TEST_IG_SECRET"
   },
   {
@@ -44,6 +45,7 @@
     "label": "Other Instagram",
     "connectorUrl": "http://ig-other",
     "enabled": true,
+    "namespace": "secondary",
     "secretEnv": "TEST_IG_SECRET"
   },
   {
@@ -52,6 +54,7 @@
     "label": "Shared account ID",
     "connectorUrl": "http://ig-personal",
     "enabled": true,
+    "namespace": "personal",
     "secretEnv": "TEST_IG_SECRET"
   },
   {

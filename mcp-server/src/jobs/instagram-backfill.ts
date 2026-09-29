@@ -78,15 +78,26 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+/** SC-1239 C2: no hardcoded fallback — name the missing variable, don't dial a default. */
+function requireDatabaseUrl(): string {
+  if (!process.env.DATABASE_URL) {
+    throw new Error(
+      'DATABASE_URL is unset: refusing to run the instagram backfill without an explicit database connection'
+    );
+  }
+  return process.env.DATABASE_URL;
+}
+
 function configFromEnv(): BackfillConfig {
   if (!process.env.INSTAGRAM_BACKFILL_ACCOUNT)
     throw new Error('INSTAGRAM_BACKFILL_ACCOUNT is required');
   const registered = requireAccount('instagram', process.env.INSTAGRAM_BACKFILL_ACCOUNT);
   return {
-    connectorUrl: registered.connectorUrl.replace(/\/+$/, ''),
-    databaseUrl:
-      process.env.DATABASE_URL ||
-      'postgresql://whatsappmcp:whatsappmcp_dev@localhost:5432/whatsappmcp',
+    connectorUrl: (
+      registered.connectorUrl || process.env.INSTAGRAM_CONNECTOR_URL || 'http://instagram-connector:3003'
+    ).replace(/\/+$/, ''),
+    // No hardcoded DB target; the job must be pointed at the intended database.
+    databaseUrl: requireDatabaseUrl(),
     account: registered.accountId,
     dryRun: boolEnv('INSTAGRAM_BACKFILL_DRY_RUN', true),
     validateOnly: boolEnv('INSTAGRAM_BACKFILL_VALIDATE_ONLY', false),
