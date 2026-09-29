@@ -959,7 +959,7 @@ export function createRouter(
     })();
   });
 
-  // CONTRACT: http.whatsapp-connector.auth-qr — path and {qrCode, expiresAt} are frozen.
+  // CONTRACT: http.whatsapp-connector.auth-qr.v2 — auth, path and response are frozen.
   // The connector access middleware protects this QR response.
   router.get('/auth/qr', (req: Request, res: Response) => {
     const qr = qrHandler.getCurrentQR();
