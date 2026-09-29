@@ -129,6 +129,43 @@ test('legacy UUID rows, attachments, embeddings and reply FKs survive migration 
       client.query('DELETE FROM participants WHERE id=$1', ['old-peer']),
       /foreign key/
     );
+    assert.equal(
+      (
+        await client.query(
+          "SELECT udt_name FROM information_schema.columns WHERE table_name='social_conversation_merges' AND column_name='moved_message_ids'"
+        )
+      ).rows[0].udt_name,
+      '_text'
+    );
+    await client.query(
+      "UPDATE conversations SET account_id='whatsapp:personal', external_id='old-peer' WHERE id='old-peer'"
+    );
+    await client.query(
+      "INSERT INTO conversations(id,wa_chat_id,type,account) VALUES('qa-alias','qa-alias','INDIVIDUAL','personal')"
+    );
+    await client.query("UPDATE messages SET conversation_id='qa-alias' WHERE id=$1", [m]);
+    assert.equal(
+      (await client.query("SELECT social_merge_conversation('qa-alias','old-peer') AS n")).rows[0]
+        .n,
+      1
+    );
+    assert.equal(
+      (
+        await client.query(
+          "SELECT moved_message_ids[1] AS id FROM social_conversation_merges WHERE alias_conversation_id='qa-alias'"
+        )
+      ).rows[0].id,
+      String(m)
+    );
+    assert.equal(
+      (await client.query("SELECT social_unmerge_conversation('qa-alias') AS n")).rows[0].n,
+      1
+    );
+    assert.equal(
+      (await client.query('SELECT conversation_id FROM messages WHERE id=$1', [m])).rows[0]
+        .conversation_id,
+      'qa-alias'
+    );
   } finally {
     await client.end();
   }
