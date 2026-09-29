@@ -347,3 +347,66 @@ test('empty database initializes every version and reruns unchanged', async () =
     await client.end();
   }
 });
+
+test('reaction hints follow commit, target account, removal, and visible changes', async () => {
+  const { client, url } = await database('reactions');
+  const listener = new Client({ connectionString: url });
+  await listener.connect();
+  try {
+    await runMigrations(client);
+    await client.query(`INSERT INTO conversations(id,account,name) VALUES
+      ('personal:peer','personal','Peer'), ('secondary:peer','secondary','Peer')`);
+    const target = (
+      await client.query(`INSERT INTO messages
+      (conversation_id,wa_message_id,account,wa_timestamp,direction,sender_wa_id,message_type,platform)
+      VALUES ('secondary:peer','secondary:target','secondary',now(),'INBOUND','secondary:peer','TEXT','whatsapp')
+      RETURNING id`)
+    ).rows[0].id;
+    const hints: Record<string, unknown>[] = [];
+    listener.on('notification', message => {
+      if (message.payload) hints.push(JSON.parse(message.payload));
+    });
+    await listener.query('LISTEN socialmedia_changes');
+    const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+
+    await client.query(`INSERT INTO whatsapp_message_reactions
+      (account,target_wa_message_id,reactor_jid,emoji)
+      VALUES ('secondary','secondary:target','secondary:reactor','heart')`);
+    await settle();
+    assert.deepEqual(hints, [
+      {
+        kind: 'message',
+        reason: 'reaction',
+        account: 'secondary',
+        conversation_id: 'secondary:peer',
+        message_id: target,
+        wa_message_id: 'secondary:target',
+      },
+    ]);
+
+    await client.query(`UPDATE whatsapp_message_reactions SET emoji='heart',updated_at=now()
+      WHERE account='secondary' AND target_wa_message_id='secondary:target'`);
+    await client.query(`INSERT INTO whatsapp_message_reactions
+      (account,target_wa_message_id,reactor_jid,emoji)
+      VALUES ('personal','secondary:target','personal:reactor','heart'),
+             ('secondary','secondary:missing','secondary:reactor','heart')`);
+    await settle();
+    assert.equal(hints.length, 1, 'unchanged and unmatched reactions stay silent');
+
+    await client.query(`UPDATE whatsapp_message_reactions SET emoji=NULL,removed=true
+      WHERE account='secondary' AND target_wa_message_id='secondary:target'`);
+    await settle();
+    assert.equal(hints.length, 2);
+    assert.deepEqual(hints[1], hints[0], 'removal refreshes the same message');
+
+    await client.query('BEGIN');
+    await client.query(`UPDATE whatsapp_message_reactions SET emoji='heart',removed=false
+      WHERE account='secondary' AND target_wa_message_id='secondary:target'`);
+    await client.query('ROLLBACK');
+    await settle();
+    assert.equal(hints.length, 2, 'rolled-back changes never reach the browser');
+  } finally {
+    await listener.end();
+    await client.end();
+  }
+});

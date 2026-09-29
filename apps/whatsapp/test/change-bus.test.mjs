@@ -118,6 +118,30 @@ test('distinct chats stay distinct hints and other accounts never wake this subs
   await bus.close();
 });
 
+test('a committed reaction hint refreshes only its owning account without leaking emoji', async () => {
+  const { bus, clock, clients } = harness();
+  const personal = [];
+  const secondary = [];
+  bus.subscribe('personal', event => personal.push(event));
+  bus.subscribe('secondary', event => secondary.push(event));
+  bus.start();
+  await settle();
+  personal.length = 0;
+  secondary.length = 0;
+  clients[0].notify(JSON.stringify({
+    kind: 'message', account: 'secondary', conversation_id: 'secondary:chat',
+    message_id: 'target', wa_message_id: 'secondary:target', reason: 'reaction',
+    emoji: 'private', reactor_jid: 'private',
+  }));
+  clock.advance(10);
+  assert.deepEqual(personal, []);
+  assert.deepEqual(secondary, [{
+    kind: 'message', account: 'secondary', conversation_id: 'secondary:chat',
+    message_id: 'target', wa_message_id: 'secondary:target', reason: 'reaction',
+  }]);
+  await bus.close();
+});
+
 test('unparsable or unrecognised payloads are discarded without stopping the bus', async () => {
   const { bus, clock, clients } = harness();
   const events = [];
