@@ -95,6 +95,24 @@ Tres piezas, todas por GitOps (rama `feat/infra-112-p6-integration` → PR → `
 
 Subjects NATS y formato de evento: INTACTOS (los consumen mcp-server/telegram-sync/brain-ingest).
 
+## Release Production (norma del tronco, 2026-09-29)
+
+El workflow `release.yml` corre con `workflow_dispatch` y usa `version = image_tag || github.ref_name`.
+El tronco `main` **no puede** despacharse sin `image_tag` explícito: intentarlo deja el tag Harbor
+inmutable `whatsappmcp-*:main` apuntando al primer digest que lo publicó (medido 29-09: `main` →
+`d1bb1da3`, run 36511436174; los builds de los runs 36517053696/36519841473 generan otros digests y
+mueren en `Harbor immutable tag collision: main is not attached to …`). Los tags `sha-<commit>`
+también colisionan si un run anterior publicó el mismo commit con otro digest (caché de capas: mismo
+commit, distinto byte-code).
+
+- **Norma**: despachar SIEMPRE con `image_tag` (secuencial, p. ej. `v1.3.61`), o desde `deploy/prod`
+  (el patrón histórico: runs 36477444351/36135670213 verdes).
+- La promoción de la rama deploy (`reusable-manifest-release.yml`, push `HEAD:deploy/prod
+  --force-with-lease`) exige que main sea ancestro de deploy/prod: tras el merge #104 lo es; si vuelven
+  a divergir (p. ej. un hotfix directo sobre deploy/prod), reconciliar main ANTES de soltar desde main.
+- El `main` de Harbor es un cadáver inmutable: no borrarlo (protección del registro); ignorarlo como
+  referencia de despliegue — el overlay prod fija imágenes por digest, nunca por tag `main`.
+
 ## Estructura
 
 Tras el refactor del 2026-05-07 (commit `6791fae`), todo bajo carpetas dedicadas:
