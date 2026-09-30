@@ -44,9 +44,12 @@ images:
   # ee71b15, the SC-1143/P1 merge) carries the IG pairing flow + credential
   # resolution (resolveCredential) + the oauth callback route, still dark:
   # CREDENTIAL_STORE_ENABLED stays false until the pre-check (C6) PR.
+  # SC-1256: v1.3.55 -> v1.3.74 (run 36725155383, deploy/prod@7f0dd82 — merge #123):
+  # /health por sub del conector IG (puerta por actor de social_list_accounts) y,
+  # de paso, SC-1258 #96 (tolerar 0 cuentas de env con CREDENTIAL_STORE_ENABLED).
   - name: harbor.e-dani.com/homelab/whatsappmcp-instagram-connector
-    newTag: v1.3.55
-    digest: sha256:bf90ef1679fb212969577b2d16efb17bd25c68f24778fb65efa30bb5ee42d90f
+    newTag: v1.3.74
+    digest: sha256:b69814790dbdb288a5053bb9e11d9a23c20ba5cffc2e8ade71e35ded8df8aeb9
   # fase 3: v1.3.64 (run 36568095620) trajo las migraciones 009/010 (#95/#108);
   # v1.3.65 (run 36603533264, deploy/prod@c8cce97) añade PR-3 #110 (social_delete_message
   # por POST /messages/delete); v1.3.66 (run 36612247560, deploy/prod@c36993e) añade la
@@ -57,9 +60,11 @@ images:
   # encuestas y respuestas a eventos, #125) e imágenes sin pnpm (INFRA-285, #122).
   # v1.3.73 (run 36705379093, deploy/prod@fadad16) añade la migración 014 (temporizador de
   # mensajes temporales, #128). v1.3.71/v1.3.72 quemados por runs fallidos.
+  # v1.3.74 (run 36725155383, deploy/prod@7f0dd82) añade SC-1256 (#123): social_list_accounts
+  # por actor, omite Instagram sin credencial (no_credential). Sin migraciones nuevas.
   - name: harbor.e-dani.com/homelab/whatsappmcp-mcp-server
-    newTag: v1.3.73
-    digest: sha256:34801dd789d0fd9ad6eb97d903d243e2d7534a74bf4507b2021104cdc6142396
+    newTag: v1.3.74
+    digest: sha256:23b6670d01098b860bb93e219d0c8a0cc4b3342e4c5d13561ff9c6442ea6e802
   - name: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-synapse-bridge
     newTag: socialmedia-v2-c88dce16
     digest: sha256:21d7cf9b021dce06af53b779056f9bd5c599722251726e483cdb50917b02263e
