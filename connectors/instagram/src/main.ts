@@ -210,6 +210,7 @@ async function main(): Promise<void> {
   );
 
   // Health check — all accounts
+  // CONTRACT: http.instagram-connector.health.v1
   app.get('/health', async (req, res) => {
     // SC-1256: flag ON + verified sub → per-actor view (never the house accounts).
     const perActor = await resolveHealthForActor({
