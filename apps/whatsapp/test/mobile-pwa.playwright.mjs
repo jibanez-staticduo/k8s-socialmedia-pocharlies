@@ -81,9 +81,14 @@ try {
       const sidebar = rect('.chat-sidebar');
       const conversation = rect('.conversation');
       const composer = rect('.composer');
-      return {width: innerWidth, height: innerHeight, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, rail: rail && {x: rail.x, y: rail.y, width: rail.width, height: rail.height}, sidebar: sidebar && {x: sidebar.x, width: sidebar.width}, conversation: conversation && {x: conversation.x, width: conversation.width}, composer: composer && {y: composer.y, bottom: composer.bottom}};
+      const shell = rect('.app-shell');
+      return {width: innerWidth, height: innerHeight, shell: {top: shell.top, bottom: shell.bottom}, documentWidth: document.documentElement.scrollWidth, bodyWidth: document.body.scrollWidth, rail: rail && {x: rail.x, y: rail.y, width: rail.width, height: rail.height}, sidebar: sidebar && {x: sidebar.x, width: sidebar.width}, conversation: conversation && {x: conversation.x, width: conversation.width}, composer: composer && {y: composer.y, bottom: composer.bottom}};
     });
     assert(state.documentWidth <= state.width + 1 && state.bodyWidth <= state.width + 1, `${label}: horizontal overflow ${JSON.stringify(state)}`);
+    assert(Math.abs(state.shell.top) <= 1 && Math.abs(state.shell.bottom - state.height) <= 1, `${label}: app does not fill the viewport ${JSON.stringify(state)}`);
+    const chatOpen = await page.evaluate(() => document.body.classList.contains('chat-open'));
+    const bottom = chatOpen ? state.composer.bottom : state.rail.y + state.rail.height;
+    assert(Math.abs(bottom - state.height) <= 1, `${label}: unused space below bottom controls ${JSON.stringify(state)}`);
     return state;
   }
   let state = await geometry('chat list');

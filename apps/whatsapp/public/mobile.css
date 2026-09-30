@@ -1,5 +1,15 @@
 @media (max-width: 760px) {
+  /* Percentage root heights leave a gap in iOS standalone's translucent viewport. */
+  html, body {
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
   .app-shell {
+    position: fixed;
+    inset: 0;
+    height: auto;
     touch-action: pan-x pan-y;
     overscroll-behavior: none;
     flex-direction: column;
