@@ -27,8 +27,10 @@ import {
   makeCacheableSignalKeyStore,
   AnyMessageContent,
   CacheStore,
+  MiscMessageGenerationOptions,
   ChatModification,
   GroupMetadata,
+  GroupParticipant,
   Browsers,
   generateMessageIDV2,
   generateWAMessageFromContent,
@@ -81,12 +83,14 @@ import {
   unixSeconds,
 } from './durable-message-store';
 import {
+  loadEditedContent,
   loadStoredMessage,
   markMessageDeletedForMe,
   markMessageEdited,
   markMessageRevoked,
   MessageMutationError,
   StoredMessage,
+  withEditedText,
 } from './message-mutations';
 import { reactionTime, storeMessageReaction } from './message-reactions';
 import {
@@ -159,6 +163,14 @@ import {
   participantApiJid,
   participantIds,
   participantOutcome,
+  participantsIncludeOwn,
+  addRequestOf,
+  AddRequest,
+  GroupInviteResult,
+  InviteRequiredEntry,
+  LINK_INVITE_TTL_SECONDS,
+  parseGroupInviteParticipants,
+  parseGroupInviteText,
   recordGroupChange,
   recordGroupConversation,
   recordInboundGroup,
@@ -187,6 +199,7 @@ import {
   parseDisappearingExpiration,
   readConversationEphemeral,
   recordInboundEphemeral,
+  withEphemeralExpiration,
   writeConversationEphemeral,
 } from './disappearing';
 import {
@@ -558,6 +571,17 @@ export interface GroupParticipantsResult {
   partial: boolean;
   persisted: boolean;
   group: GroupStateView | null;
+  /** add only: the people WhatsApp refused with 403 (privacy: invite only). */
+  inviteRequired?: InviteRequiredEntry[];
+}
+
+/** POST /groups/invite. */
+export interface GroupInvitesResult {
+  groupId: string;
+  results: GroupInviteResult[];
+  succeeded: number;
+  failed: number;
+  partial: boolean;
 }
 
 /**
@@ -1161,6 +1185,13 @@ export class BaileysClient extends EventEmitter {
   // Last forced re-subscribe per chat (a read refreshes an expired presence).
   private presenceRefreshedAt = new Map<string, number>();
   private groupMetaCache = new Map<string, GroupMetadata>(); // by raw JID
+  /**
+   * Private invites WhatsApp handed back with a refused add (403), by
+   * `<raw group>|<participant jid>` (every alias of the person): what POST
+   * /groups/invite sends them. In memory only — after a restart the invite
+   * falls back to the group link.
+   */
+  private pendingGroupInvites = new Map<string, AddRequest>();
   private keyCache = new Map<string, { key: WAMessageKey; chatJid: string }>(); // by waMessageId
   // `<kind>:<bare id>` of our own edits/revokes/deletes-for-me whose echo the
   // inbound handlers must leave alone (see OWN_MUTATION_ECHO_MS).
@@ -1701,6 +1732,9 @@ export class BaileysClient extends EventEmitter {
         },
       });
       this.groupMetaCache.delete(id);
+      // Added to a group that already existed: WhatsApp sends no groups.upsert
+      // for that, only this "add" naming us.
+      if (action === 'add') void this.recordGroupJoined(id, participants);
     });
 
     // A group created (by us or with us in it): its conversation row, so it
@@ -1954,18 +1988,24 @@ export class BaileysClient extends EventEmitter {
       },
     };
     const msgId = await storeMessage(data);
-    await storeMessageKey({
-      waMessageId: waMessage.waMessageId,
-      conversationId: waMessage.conversationId,
-      remoteJid: rawChatJid,
-      fromMe: !!msg.key.fromMe,
-      participantJid: msg.key.participant || undefined,
-      messageTimestampMs: waMessage.waTimestamp.getTime(),
-    }).catch(e =>
-      this.logger.warn(
-        `message key persist failed for ${waMessage.waMessageId}: ${e?.message || e}`
-      )
-    );
+    // Not for a REACTION: prod folds it into the target's messages.reactions
+    // and never writes its row, so the key's FK to messages.wa_message_id can
+    // only fail (a warning per reaction). Nothing reads a reaction's key: it
+    // cannot be quoted, edited nor reacted to.
+    if (waMessage.messageType !== 'REACTION') {
+      await storeMessageKey({
+        waMessageId: waMessage.waMessageId,
+        conversationId: waMessage.conversationId,
+        remoteJid: rawChatJid,
+        fromMe: !!msg.key.fromMe,
+        participantJid: msg.key.participant || undefined,
+        messageTimestampMs: waMessage.waTimestamp.getTime(),
+      }).catch(e =>
+        this.logger.warn(
+          `message key persist failed for ${waMessage.waMessageId}: ${e?.message || e}`
+        )
+      );
+    }
     // Also for an already-stored row (msgId null): a history replay after a
     // relink backfills the payloads of the recent window. A poll / event is
     // kept whatever its age: its secret is what decrypts the votes / responses.
@@ -1977,6 +2017,9 @@ export class BaileysClient extends EventEmitter {
     // Before the msgId check: prod folds REACTION inserts into the target's
     // messages.reactions and skips the row, so msgId is always null for them.
     if (waMessage.messageType === 'REACTION') await this.persistReaction(msg, waMessage);
+    // History sync carries each message's current reactions on the message
+    // itself (no REACTION message of their own): same table, same rules.
+    await this.persistCarriedReactions(msg, waMessage);
 
     if (!msgId) return { inserted: false, waMessage };
 
@@ -2207,12 +2250,31 @@ export class BaileysClient extends EventEmitter {
   ): Promise<WAMessage | undefined> {
     if (!replyToMessageId) return undefined;
     const id = stripAccountKey(replyToMessageId);
-    const original = this.memoryMessage(id) || (await this.durableMessage(id));
+    const original = await this.currentMessage(id);
     if (!original?.message) return undefined;
     return {
       ...original,
       key: { ...original.key, id, remoteJid: chatJid },
     } as WAMessage;
+  }
+
+  /**
+   * A message to quote or forward: memory, else the durable copy — with the
+   * CURRENT text when it was edited since: both copies are the original (an
+   * edit only rewrites the messages row: content, is_edited, edit_history).
+   * The row is read only with ingest; unreadable → the copy as it is.
+   */
+  private async currentMessage(id: string): Promise<WAMessage | undefined> {
+    const original = this.memoryMessage(id) || (await this.durableMessage(id));
+    if (!original?.message || !this.ingest) return original;
+    const edited = await loadEditedContent(id).catch((e: any) => {
+      this.logger.warn(
+        `current text of ${id} unreadable, using its stored copy: ${e?.message || e}`
+      );
+      return undefined;
+    });
+    const message = edited === undefined ? undefined : withEditedText(original.message, edited);
+    return message ? ({ ...original, message } as WAMessage) : original;
   }
 
   /** Full WAMessage (key + content) from the in-memory caches. */
@@ -2233,6 +2295,33 @@ export class BaileysClient extends EventEmitter {
   private async durableMessage(messageId: string): Promise<WAMessage | undefined> {
     if (!this.ingest) return undefined;
     return getRawWAMessage(messageId);
+  }
+
+  /**
+   * Disappearing timer (seconds) an outgoing message to `raw` must carry, when
+   * known and on: a group's cached metadata (what Baileys itself puts on the
+   * stanza), else the canonical conversation row (014) — `conversationId`
+   * when the caller already resolved it. Unknown, off, ingest off or any
+   * failure → undefined: the message goes as before, never blocked by this.
+   */
+  private async outgoingEphemeral(
+    raw: string,
+    conversationId?: string | null
+  ): Promise<number | undefined> {
+    try {
+      if (this.isGroupJid(raw)) {
+        const meta = this.groupMetaCache.get(raw);
+        if (meta) return groupEphemeral(meta) || undefined;
+      }
+      if (!this.ingest) return undefined;
+      const id = conversationId || (await resolveCanonicalConversation(raw))?.id;
+      if (!id) return undefined;
+      const stored = await readConversationEphemeral(id);
+      return stored && stored.expiration > 0 ? stored.expiration : undefined;
+    } catch (e: any) {
+      this.logger.warn(`disappearing timer of ${raw} unreadable, sent without: ${e?.message || e}`);
+      return undefined;
+    }
   }
 
   /**
@@ -2269,6 +2358,39 @@ export class BaileysClient extends EventEmitter {
       reactionMessageId: msg.key.id || undefined,
       reactedAt: reactionTime(reaction.senderTimestampMs, unixSeconds(msg.messageTimestamp)),
     });
+  }
+
+  /**
+   * The reactions a message carries (WebMessageInfo.reactions — what a
+   * history sync brings: the current reaction of each person, no REACTION
+   * message) → whatsapp_message_reactions, with the rules of a live one: the
+   * reactor from the reaction's own key (ours when fromMe; a group needs its
+   * participant, else skipped), an empty text a removal, and an older one
+   * never replacing a newer one (reacted_at = its senderTimestampMs).
+   * SC-1225: a pairing-only socket writes nothing.
+   */
+  private async persistCarriedReactions(msg: WAMessage, waMessage: WhatsAppMessage): Promise<void> {
+    const reactions = (msg as { reactions?: proto.IReaction[] | null }).reactions;
+    if (!this.ingest || !Array.isArray(reactions) || !reactions.length) return;
+    const chatRaw = msg.key.remoteJid || '';
+    const isGroup = !!isJidGroup(chatRaw);
+    for (const item of reactions) {
+      const key = item?.key;
+      if (!key) continue;
+      const reactorRaw = key.fromMe
+        ? this.meJid
+        : key.participant || (isGroup ? null : key.remoteJid || chatRaw);
+      if (!reactorRaw || isJidGroup(reactorRaw)) continue;
+      await storeMessageReaction({
+        targetMessageId: waMessage.waMessageId,
+        conversationId: waMessage.conversationId,
+        reactorJid: this.normalizeJid(reactorRaw),
+        emoji: item.text || '',
+        fromMe: key.fromMe ?? null,
+        reactionMessageId: key.id || undefined,
+        reactedAt: reactionTime(item.senderTimestampMs),
+      });
+    }
   }
 
   /**
@@ -2331,6 +2453,7 @@ export class BaileysClient extends EventEmitter {
       });
     }
     const quoted = await this.buildQuotedFromId(options?.replyToMessageId, raw);
+    const ephemeralExpiration = await this.outgoingEphemeral(raw);
     await options?.beforeSend?.();
     try {
       const sent = await this.sendTextWithTimeout(raw, content, timeoutMs, {
@@ -2338,6 +2461,7 @@ export class BaileysClient extends EventEmitter {
         useUserDevicesCache: isGroup ? false : undefined,
         quoted,
         messageId: options?.messageId,
+        ephemeralExpiration,
       });
       const messageId = sent?.key?.id;
       this.logger.info(
@@ -2393,6 +2517,7 @@ export class BaileysClient extends EventEmitter {
             useUserDevicesCache: false,
             quoted,
             messageId: options?.messageId,
+            ephemeralExpiration,
           });
           const messageId = retried?.key?.id;
           this.logger.info(
@@ -2571,14 +2696,17 @@ export class BaileysClient extends EventEmitter {
         caption,
       };
 
+    const ephemeralExpiration = await this.outgoingEphemeral(raw);
     await options?.beforeSend?.();
-    const sendOptions =
+    const sendOptions = withEphemeralExpiration(
       quoted || options?.messageId
         ? {
             ...(quoted ? { quoted } : {}),
             ...(options?.messageId ? { messageId: options.messageId } : {}),
           }
-        : undefined;
+        : undefined,
+      ephemeralExpiration
+    );
     const sent = await this.sock.sendMessage(raw, payload, sendOptions);
     if (sent?.key?.id) {
       this.rememberKey(sent.key.id, sent.key, raw);
@@ -2601,9 +2729,13 @@ export class BaileysClient extends EventEmitter {
       throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
     const raw = this.toRawJid(chatId);
     const payload: AnyMessageContent = { audio, mimetype, ptt: true };
+    const sendOptions = withEphemeralExpiration(
+      options?.messageId ? { messageId: options.messageId } : undefined,
+      await this.outgoingEphemeral(raw)
+    );
     await options?.beforeSend?.();
-    const sent = options?.messageId
-      ? await this.sock.sendMessage(raw, payload, { messageId: options.messageId })
+    const sent = sendOptions
+      ? await this.sock.sendMessage(raw, payload, sendOptions)
       : await this.sock.sendMessage(raw, payload);
     const messageId = sent?.key?.id;
     if (sent?.key) {
@@ -2735,14 +2867,17 @@ export class BaileysClient extends EventEmitter {
       kind === 'sticker' ? STICKER_MAX_BYTES : GIF_MAX_BYTES
     );
     const content = stickerGifContent(kind, file.bytes, file.contentType, request.caption);
+    const ephemeralExpiration = await this.outgoingEphemeral(target.raw, target.canonicalId);
     await options.beforeSend?.();
-    const sendOptions =
+    const sendOptions = withEphemeralExpiration(
       quoted || options.messageId
         ? {
             ...(quoted ? { quoted } : {}),
             ...(options.messageId ? { messageId: options.messageId } : {}),
           }
-        : undefined;
+        : undefined,
+      ephemeralExpiration
+    );
     const sent = await sock.sendMessage(target.raw, content, sendOptions);
     const messageId = sent?.key?.id;
     if (!sent || !messageId) throw new Error(`WhatsApp returned no message id for the ${kind}`);
@@ -2770,12 +2905,12 @@ export class BaileysClient extends EventEmitter {
     const sock = this.connectedSocket();
     const target = await this.structuredSendTarget(chatId, 'shareContact');
     const content = buildContactShareContent(cards);
-    await options.beforeSend?.();
-    const sent = await sock.sendMessage(
-      target.raw,
-      content,
-      options.messageId ? { messageId: options.messageId } : undefined
+    const sendOptions = withEphemeralExpiration(
+      options.messageId ? { messageId: options.messageId } : undefined,
+      await this.outgoingEphemeral(target.raw, target.canonicalId)
     );
+    await options.beforeSend?.();
+    const sent = await sock.sendMessage(target.raw, content, sendOptions);
     const messageId = sent?.key?.id;
     if (!sent || !messageId) throw new Error('WhatsApp returned no message id for the contact');
     this.rememberKey(messageId, sent.key, target.raw);
@@ -3153,7 +3288,7 @@ export class BaileysClient extends EventEmitter {
   private async structuredSendTarget(
     chatId: string,
     what: string
-  ): Promise<{ raw: string; conversationId: string }> {
+  ): Promise<{ raw: string; conversationId: string; canonicalId: string | null }> {
     const requested = stripAccountKey(String(chatId || '').trim());
     if (!STRUCTURED_CHAT_JID.test(requested)) {
       throw new MessageMutationError(
@@ -3164,7 +3299,7 @@ export class BaileysClient extends EventEmitter {
     }
     const conversation = this.ingest ? await resolveCanonicalConversation(requested) : undefined;
     const raw = this.toRawJid(conversation?.externalId || requested);
-    return { raw, conversationId: this.normalizeJid(raw) };
+    return { raw, conversationId: this.normalizeJid(raw), canonicalId: conversation?.id ?? null };
   }
 
   /** The poll / event behind a vote / response, or the precise reason it cannot be used. */
@@ -3241,12 +3376,12 @@ export class BaileysClient extends EventEmitter {
   ): Promise<StructuredSendResult> {
     const sock = this.connectedSocket();
     const target = await this.structuredSendTarget(chatId, 'sendPoll');
-    await options.beforeSend?.();
-    const sent = await sock.sendMessage(
-      target.raw,
-      buildPollContent(poll),
-      options.messageId ? { messageId: options.messageId } : undefined
+    const sendOptions = withEphemeralExpiration(
+      options.messageId ? { messageId: options.messageId } : undefined,
+      await this.outgoingEphemeral(target.raw, target.canonicalId)
     );
+    await options.beforeSend?.();
+    const sent = await sock.sendMessage(target.raw, buildPollContent(poll), sendOptions);
     return this.afterStructuredSend(sent, target, 'Poll', options.actor);
   }
 
@@ -3257,12 +3392,12 @@ export class BaileysClient extends EventEmitter {
   ): Promise<StructuredSendResult> {
     const sock = this.connectedSocket();
     const target = await this.structuredSendTarget(chatId, 'sendEvent');
-    await options.beforeSend?.();
-    const sent = await sock.sendMessage(
-      target.raw,
-      buildEventContent(event),
-      options.messageId ? { messageId: options.messageId } : undefined
+    const sendOptions = withEphemeralExpiration(
+      options.messageId ? { messageId: options.messageId } : undefined,
+      await this.outgoingEphemeral(target.raw, target.canonicalId)
     );
+    await options.beforeSend?.();
+    const sent = await sock.sendMessage(target.raw, buildEventContent(event), sendOptions);
     return this.afterStructuredSend(sent, target, 'Event', options.actor);
   }
 
@@ -3522,7 +3657,7 @@ export class BaileysClient extends EventEmitter {
     if (!this.isConnected())
       throw new Error(`Client not connected (state=${this.lastState || 'unknown'})`);
     const id = stripAccountKey(messageId);
-    const original = this.memoryMessage(id) || (await this.durableMessage(id));
+    const original = await this.currentMessage(id);
     if (!original?.message) {
       throw new MessageUnavailableError(
         `forwardMessage: message ${id} of ${chatId} is unavailable (not in memory nor in the durable store)`,
@@ -3531,7 +3666,10 @@ export class BaileysClient extends EventEmitter {
       );
     }
     const rawTarget = this.toRawJid(toChatId);
-    const sent = await this.sock.sendMessage(rawTarget, { forward: original });
+    const sendOptions = withEphemeralExpiration(undefined, await this.outgoingEphemeral(rawTarget));
+    const sent = sendOptions
+      ? await this.sock.sendMessage(rawTarget, { forward: original }, sendOptions)
+      : await this.sock.sendMessage(rawTarget, { forward: original });
     const sentId = sent?.key?.id;
     if (sent?.key) {
       this.rememberKey(sentId || '', sent.key, rawTarget);
@@ -4116,6 +4254,31 @@ export class BaileysClient extends EventEmitter {
   // Group management (fase 3 / PR-6; the helpers live in group-management.ts)
   // ---------------------------------------------------------------------------
 
+  /**
+   * A group-participants.update "add": when it names this account (PN or
+   * LID), someone added us to a group — fresh metadata, then its conversation
+   * row (recordGroupConversation: namespaced, account_id, external_id, a live
+   * row only refreshed), active as of now. Anyone else's add changes nothing
+   * here. Never throws (a socket handler); ingest only (bound after the gate).
+   */
+  private async recordGroupJoined(
+    groupJid: string,
+    participants: ReadonlyArray<string | Partial<GroupParticipant>>
+  ): Promise<void> {
+    try {
+      if (!this.ingest || !isJidGroup(groupJid)) return;
+      if (!participantsIncludeOwn(participants, await this.ownIds())) return;
+      const meta = await this.fetchGroupMetadata(groupJid, true).catch((e: any) => {
+        this.logger.warn(`metadata of joined group ${groupJid} unavailable: ${e?.message || e}`);
+        return { id: groupJid } as GroupMetadata;
+      });
+      const id = await recordGroupConversation(meta, { activityAt: new Date() });
+      this.logger.info(`Added to group ${groupJid}${id ? ` (conversation ${id})` : ''}`);
+    } catch (e: any) {
+      this.logger.warn(`joined group ${groupJid} not recorded: ${e?.message || e}`);
+    }
+  }
+
   /** Our own ids (PN and LID), to find this account among a group's participants. */
   private async ownIds(): Promise<string[]> {
     const user = this.sock?.user as { id?: string; lid?: string } | undefined;
@@ -4456,6 +4619,7 @@ export class BaileysClient extends EventEmitter {
     const entries = (answer || []).map(entry => ({
       status: entry?.status === undefined || entry?.status === null ? null : String(entry.status),
       jid: entry?.jid ? jidNormalizedUser(entry.jid) : '',
+      request: verb === 'add' ? addRequestOf((entry as { content?: unknown })?.content) : null,
       used: false,
     }));
     const matched = targets.map(target => {
@@ -4466,9 +4630,9 @@ export class BaileysClient extends EventEmitter {
     // An answer under an id we did not know (a PN WhatsApp maps to a LID):
     // pair the leftovers in order, as WhatsApp answers in request order.
     const leftovers = entries.filter(e => !e.used);
+    const paired = targets.map((target, index) => matched[index] ?? leftovers.shift());
     const results: GroupParticipantResult[] = targets.map((target, index) => {
-      const entry = matched[index] ?? leftovers.shift();
-      const status = entry?.status ?? null;
+      const status = paired[index]?.status ?? null;
       return {
         participant: target.input,
         jid: participantApiJid(target.sent),
@@ -4476,6 +4640,30 @@ export class BaileysClient extends EventEmitter {
         ...participantOutcome(verb, status),
       };
     });
+    // 403 on add: their privacy only allows an invite. WhatsApp's private
+    // code (when it sent one) is kept for POST /groups/invite, never returned.
+    const inviteRequired: InviteRequiredEntry[] | undefined =
+      verb === 'add'
+        ? targets.flatMap((target, index) => {
+            if (results[index].status !== '403') return [];
+            const request = paired[index]?.request || null;
+            if (request) {
+              for (const alias of target.aliases) {
+                this.pendingGroupInvites.set(`${raw}|${alias}`, request);
+              }
+            }
+            return [
+              {
+                participant: target.input,
+                jid: participantApiJid(target.sent),
+                privateInvite: !!request,
+                inviteExpiresAt: request?.expiration
+                  ? new Date(request.expiration * 1000).toISOString()
+                  : null,
+              },
+            ];
+          })
+        : undefined;
     const counts = countResults(results);
     this.logger.info(
       `Group ${raw} ${verb} participants=${targets.length} done=${counts.succeeded}${request.actor ? ` by ${request.actor}` : ''}`
@@ -4485,7 +4673,14 @@ export class BaileysClient extends EventEmitter {
         `WhatsApp did not ${verb} any of the ${targets.length} participant(s) of ${raw}`,
         422,
         'rejected_by_whatsapp',
-        { details: { action: verb, results, ...counts } }
+        {
+          details: {
+            action: verb,
+            results,
+            ...counts,
+            ...(inviteRequired ? { inviteRequired } : {}),
+          },
+        }
       );
     }
     const refreshed = await this.fetchGroupMetadata(raw, true).catch(() => undefined);
@@ -4506,6 +4701,162 @@ export class BaileysClient extends EventEmitter {
       partial: counts.failed > 0,
       persisted,
       group: refreshed ? this.groupView(refreshed, own) : null,
+      ...(inviteRequired ? { inviteRequired } : {}),
+    };
+  }
+
+  /**
+   * Invite people to a group by private message (the card WhatsApp shows with
+   * "Join group"): for those an add was refused with 403 — their privacy only
+   * lets them be invited. Admins only, against fresh metadata. Each person
+   * gets WhatsApp's private code from that refused add when this process
+   * still has it and it has not expired, else the group's invite link code.
+   * The card goes to the person's canonical chat (a merged phone chat → its
+   * LID), with the chat's disappearing timer. Someone already in the group is
+   * reported, not messaged. Nobody invited → 422 with the results; some → 200
+   * with `partial`.
+   */
+  async sendGroupInvites(
+    groupId: string,
+    participants: unknown,
+    request: MessageMutationRequest & { text?: unknown } = {}
+  ): Promise<GroupInvitesResult> {
+    const raw = parseGroupJid(groupId);
+    const members = parseGroupInviteParticipants(participants);
+    const text = parseGroupInviteText(request.text);
+    const sock = this.connectedSocket();
+    const meta = await this.groupMetadataForAction(raw);
+    const own = await this.ownIds();
+    const capabilities = this.checkGroupAccess(meta, own, raw);
+    if (!capabilities.isAdmin) {
+      throw new GroupActionError(`Only admins can invite people to ${raw}`, 403, 'not_group_admin');
+    }
+    for (const member of members) {
+      if (own.includes(member.jid)) {
+        throw new GroupActionError('This account cannot invite itself', 422, 'self_participant');
+      }
+    }
+    let linkCode: string | null | undefined;
+    const results: GroupInviteResult[] = [];
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    for (const member of members) {
+      const base = { participant: member.input, jid: participantApiJid(member.jid) };
+      if (findParticipant(meta, member.jid)) {
+        results.push({
+          ...base,
+          ok: false,
+          reason: 'already_participant',
+          invite: null,
+          messageId: null,
+        });
+        continue;
+      }
+      const aliases = await this.jidAliases(member.jid);
+      const pending = aliases
+        .map(alias => this.pendingGroupInvites.get(`${raw}|${alias}`))
+        .find(item => !!item && (!item.expiration || item.expiration > nowSeconds + 60));
+      let invite: 'private' | 'link' = 'private';
+      let inviteCode = pending?.code;
+      let inviteExpiration = pending?.expiration || nowSeconds + LINK_INVITE_TTL_SECONDS;
+      if (!inviteCode) {
+        invite = 'link';
+        if (linkCode === undefined) {
+          // A refusal here must not lose the invites already sent above.
+          linkCode =
+            (await this.groupCall('the invite link', raw, () => sock.groupInviteCode(raw)).catch(
+              (e: any) => {
+                this.logger.warn(`invite link of ${raw} unavailable: ${e?.message || e}`);
+                return null;
+              }
+            )) || null;
+        }
+        if (!linkCode) {
+          results.push({
+            ...base,
+            ok: false,
+            reason: 'invite_link_unavailable',
+            invite: null,
+            messageId: null,
+          });
+          continue;
+        }
+        inviteCode = linkCode;
+        inviteExpiration = nowSeconds + LINK_INVITE_TTL_SECONDS;
+      }
+      const conversation = this.ingest
+        ? await resolveCanonicalConversation(member.jid).catch(() => undefined)
+        : undefined;
+      const chatJid = this.toRawJid(conversation?.externalId || member.jid);
+      try {
+        // Baileys fetches the group's picture for the card's thumbnail and a
+        // group without one answers 404, which would fail the whole send:
+        // no picture → a card without thumbnail.
+        const sendOptions = {
+          ...withEphemeralExpiration({}, await this.outgoingEphemeral(chatJid, conversation?.id)),
+          getProfilePicUrl: (jid: string, type: 'preview' | 'image') =>
+            sock.profilePictureUrl(jid, type).catch(() => undefined),
+        } as MiscMessageGenerationOptions;
+        const content: AnyMessageContent = {
+          groupInvite: {
+            inviteCode,
+            inviteExpiration,
+            text: text || '',
+            jid: raw,
+            subject: meta.subject || '',
+          },
+        };
+        const sent = await sock.sendMessage(chatJid, content, sendOptions);
+        const messageId = sent?.key?.id || null;
+        if (sent?.key && messageId) {
+          this.rememberKey(messageId, sent.key, chatJid);
+          this.rememberMessageForRetry(sent.key, sent.message);
+          await this.persistDurablePayload(sent, this.normalizeJid(chatJid), 'sent').catch(
+            (e: any) =>
+              this.logger.warn(`invite ${messageId} payload not stored: ${e?.message || e}`)
+          );
+        }
+        if (invite === 'private') {
+          for (const alias of aliases) this.pendingGroupInvites.delete(`${raw}|${alias}`);
+        }
+        results.push({
+          ...base,
+          jid: participantApiJid(chatJid),
+          ok: true,
+          reason: 'invited',
+          invite,
+          messageId,
+        });
+      } catch (e: any) {
+        this.logger.warn(`Invite to ${raw} for ${chatJid} failed: ${e?.message || e}`);
+        results.push({
+          ...base,
+          jid: participantApiJid(chatJid),
+          ok: false,
+          reason: 'send_failed',
+          invite,
+          messageId: null,
+        });
+      }
+    }
+    const succeeded = results.filter(r => r.ok).length;
+    const failed = results.length - succeeded;
+    this.logger.info(
+      `Group ${raw} invites=${results.length} sent=${succeeded}${request.actor ? ` by ${request.actor}` : ''}`
+    );
+    if (!succeeded) {
+      throw new GroupActionError(
+        `No invite to ${raw} was sent (${results.length} requested)`,
+        422,
+        'invite_not_sent',
+        { details: { results, succeeded, failed } }
+      );
+    }
+    return {
+      groupId: this.normalizeJid(raw),
+      results,
+      succeeded,
+      failed,
+      partial: failed > 0,
     };
   }
 
@@ -5795,6 +6146,7 @@ export class BaileysClient extends EventEmitter {
       useUserDevicesCache?: boolean;
       quoted?: WAMessage;
       messageId?: string;
+      ephemeralExpiration?: number;
     }
   ): Promise<WAMessage | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
@@ -5807,6 +6159,7 @@ export class BaileysClient extends EventEmitter {
     }
     if (options?.quoted) sendOpts.quoted = options.quoted;
     if (options?.messageId) sendOpts.messageId = options.messageId;
+    if (options?.ephemeralExpiration) sendOpts.ephemeralExpiration = options.ephemeralExpiration;
     return this.race(
       this.sock.sendMessage(rawJid, { text: content }, sendOpts),
       timeoutMs,
