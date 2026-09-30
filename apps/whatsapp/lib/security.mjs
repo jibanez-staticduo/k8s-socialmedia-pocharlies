@@ -24,7 +24,7 @@ export function required(value, name, max = 1024) {
 export function uploadBytes(body) {
   required(body.name, 'filename', 255);
   if (/[\x00-\x1f/\\]/.test(body.name)) throw fail(400, 'Invalid filename');
-  const mediaType = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime)|audio\/(ogg|webm|mpeg|mp4|wav|x-wav))(;\s*codecs=[\w-]+)?$/;
+  const mediaType = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime)|audio\/(ogg|webm|mpeg|mp4|wav|x-wav))(;\s*codecs=(?:[\w.-]+(?:,\s*[\w.-]+)*|"[\w.-]+(?:,\s*[\w.-]+)*"))?$/;
   const documents = {
     'application/pdf': '.pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',

@@ -36,6 +36,14 @@ test('view once is offered only for photos and videos and travels with that uplo
   assert.equal('viewOnce' in uploadPayload(photo, 'AQID'), false);
 });
 
+test('Safari recordings with AAC codec parameters can be staged', () => {
+  for (const type of ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4; codecs="mp4a.40.2"', 'audio/webm;codecs=opus']) {
+    assert.equal(attachmentError({name: 'voice.m4a', type, size: 24}), '');
+  }
+  for (const type of ['audio/mp4;codecs="mp4a.40.2', 'audio/mp4;codecs=mp4a.40.2;evil=yes']) {
+    assert.notEqual(attachmentError({name: 'voice.m4a', type, size: 24}), '');
+  }
+});
 test('unsupported files cannot be staged; document MIME must match extension', () => {
   assert.equal(attachmentError({ name: 'script.js', type: 'text/javascript', size: 10 }), 'Este tipo de archivo no se puede enviar.');
   assert.equal(attachmentError({ name: 'informe.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 10 }), '');

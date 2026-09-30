@@ -1,5 +1,5 @@
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-const MEDIA_MIME = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime)|audio\/(ogg|webm|mpeg|mp4|wav|x-wav))(;\s*codecs=[\w-]+)?$/;
+const MEDIA_MIME = /^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime)|audio\/(ogg|webm|mpeg|mp4|wav|x-wav))(;\s*codecs=(?:[\w.-]+(?:,\s*[\w.-]+)*|"[\w.-]+(?:,\s*[\w.-]+)*"))?$/;
 const DOCUMENT_EXTENSIONS = {
   'application/pdf': '.pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',

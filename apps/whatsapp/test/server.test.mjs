@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { createApp } from '../server.mjs';
 import { mediaRequest } from '../lib/media.mjs';
 import { uploadBytes } from '../lib/security.mjs';
@@ -247,6 +248,38 @@ test('view-once upload rejects invalid flags and unsupported media before dispat
     assert.equal((await request('/api/upload', { ...base, ...media })).status, 400);
   }
   assert.equal(outbound.length, 0);
+});
+test('iPhone AAC voice recordings are converted to Opus before provider send', async t => {
+  const audio = execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi',
+    '-i', 'sine=frequency=440:duration=0.1', '-c:a', 'aac', '-f', 'mp4',
+    '-movflags', 'frag_keyframe+empty_moov', 'pipe:1']);
+  const outbound = [];
+  const { request } = await fixture(t, { fetchImpl: async (url, options) => {
+    assert.match(url, /\/messages\/audio$/);
+    outbound.push(JSON.parse(options.body));
+    return Response.json({ messageId: 'voice-receipt' });
+  } });
+  for (const mimeType of ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4; codecs="mp4a.40.2"']) {
+    const response = await request('/api/upload', {
+      account: 'personal', chat: 'personal-chat', name: 'nota-de-voz.m4a',
+      mimeType, data: audio.toString('base64'), voice: true,
+    });
+    assert.equal(response.status, 200, await response.text());
+    const sent = outbound.at(-1);
+    const converted = Buffer.from(sent.audioBase64, 'base64');
+    assert.equal(converted.subarray(0, 4).toString(), 'OggS');
+    assert(converted.includes(Buffer.from('OpusHead')));
+    assert.equal(sent.mimeType, 'audio/ogg; codecs=opus');
+    assert.equal(sent.sourceMimeType, mimeType);
+    assert.equal(sent.sourceDigest, createHash('sha256').update(audio).digest('hex'));
+  }
+  for (const mimeType of ['text/html;codecs=mp4a.40.2', 'audio/mp4;codecs="mp4a.40.2', 'audio/mp4;codecs=mp4a.40.2;evil=yes']) {
+    assert.equal((await request('/api/upload', {
+      account: 'personal', chat: 'personal-chat', name: 'voice.m4a',
+      mimeType, data: audio.toString('base64'), voice: true,
+    })).status, 400);
+  }
+  assert.equal(outbound.length, 2);
 });
 test('audio with text is rejected before provider send', async t => {
   let calls = 0;
