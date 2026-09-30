@@ -821,6 +821,27 @@ contracts:
       (telegram-pairing) never publishes it. The subject, the field names and
       the source values are contract: changing any is breaking — a new `.v2`
       entry beside this one.
+  - id: http.instagram-connector.health.v1
+    kind: http-route
+    value: /health
+    role: provider
+    files:
+      - connectors/instagram/src/main.ts
+      - mcp-server/src/mcp/server.ts
+    status: active
+    note: >-
+      GET /health of the instagram-connector, consumed by the MCP tool
+      social_list_accounts (handleMessagingStatus in server.ts; SC-1256).
+      Without x-user-sub, or with CREDENTIAL_STORE_ENABLED off: it answers for
+      the house registry accounts, byte-identical to what it always did (and
+      that is what the probes get). With the flag ON and x-user-sub: each
+      account goes through resolveInstagramEntry and comes back either ok
+      {status, username, followers} or {status: no_credential, error: {code,
+      message}}. The route, the three states and the no_credential code are
+      contract: changing any is breaking — a new `.v2` entry beside this one.
+      The registry account name is not the Instagram name: a sub with a row
+      appears under every registry account name (the design of the architect's
+      verdict, SC-1256 comment 15063).
   - id: http.whatsapp-connector.chats-presence.v1
     kind: http-route
     value: /chats/presence

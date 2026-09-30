@@ -32,7 +32,11 @@ import {
   pairInstagramAccount,
   signPairingState,
 } from './oauth-pairing';
-import { createInstagramCredentialStore, resolveInstagramEntry } from './credential-resolution';
+import {
+  createInstagramCredentialStore,
+  resolveHealthForActor,
+  resolveInstagramEntry,
+} from './credential-resolution';
 
 const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
@@ -265,7 +269,20 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
   );
 
   // Health check — all accounts
-  app.get('/health', async (_req, res) => {
+  // CONTRACT: http.instagram-connector.health.v1
+  app.get('/health', async (req, res) => {
+    // SC-1256: flag ON + verified sub → per-actor view (never the house accounts).
+    const perActor = await resolveHealthForActor({
+      headers: req.headers as Record<string, string | string[] | undefined>,
+      accountNames: [...accounts.keys()],
+      store: credentialStore,
+      legacyLookup: getAccount,
+      log: msg => logger.info(msg),
+    });
+    if (perActor) {
+      res.json({ status: 'ok', platform: 'instagram', accounts: perActor });
+      return;
+    }
     const results: Record<string, unknown> = {};
     for (const [name, entry] of accounts) {
       try {
