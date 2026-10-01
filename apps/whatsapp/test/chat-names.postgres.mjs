@@ -2,6 +2,10 @@
 // within this connection and the transaction always rolls back.
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createApp } from '../server.mjs';
 import { CHAT_LIST_ACTIVE_SQL, CHAT_LIST_ARCHIVED_SQL, CHAT_LIST_SQL, MESSAGE_LIST_SQL } from '../lib/chat-names.mjs';
 import { readContactDirectory } from '../lib/contact-directory.mjs';
 
@@ -32,7 +36,10 @@ try {
       ('a:old@newsletter','a:old@newsletter','a','Old channel',false,true,NULL),
       ('a:status@broadcast','a:status@broadcast','a','Updates',false,false,NULL),
       ('status@broadcast','status@broadcast','a','Archived status',false,true,NULL),
-      ('a:1234567890@broadcast','a:1234567890@broadcast','a','Family broadcast',false,false,NULL);
+      ('a:1234567890@broadcast','a:1234567890@broadcast','a','Family broadcast',false,false,NULL),
+      ('tg_direct','tg_direct','a','Telegram contact',false,false,NULL),
+      ('tg_group','tg_group','a','Telegram group',true,false,NULL),
+      ('tg_archived','tg_archived','a','Archived Telegram',true,true,NULL);
     INSERT INTO participants VALUES
       ('a:123@lid','a','Friend A','Remote A'),
       ('b:123@lid','b','Friend B','Remote B'),
@@ -44,6 +51,9 @@ try {
       ('four','wa-four','a','a:789@c.us','a:123@lid','hello','INBOUND'),
       ('five','wa-five','a','a:out@lid','a:self','sent','OUTBOUND');
   `);
+  await client.query(`INSERT INTO messages (id,wa_message_id,account,conversation_id,content,platform,direction)
+    VALUES ('tg_one','tg_one','a','tg_direct','Telegram text','telegram','INBOUND'),
+           ('tg_two','tg_two','a','tg_group','Telegram group text','telegram','INBOUND');`);
   const a = (await client.query(CHAT_LIST_SQL, ['a'])).rows;
   const b = (await client.query(CHAT_LIST_SQL, ['b'])).rows;
   assert.equal(a.length, 6);
@@ -166,7 +176,35 @@ try {
   assert.deepEqual((await client.query(MESSAGE_LIST_SQL, ['a', ['a:777@lid', 'a:34600123456@c.us', 'a:34600123456@s.whatsapp.net']])).rows.map(row => row.id), ['pn-variant', 'pn-reply', 'lid-history']);
   await client.query("INSERT INTO conversations (id,wa_chat_id,account,name,is_group) VALUES ('a:888@lid','a:34600123456@c.us','a','Ambiguous',false)");
   assert.equal((await client.query(CHAT_LIST_SQL, ['a'])).rows.some(row => row.id === 'a:34600123456@c.us'), true);
-  console.log('PostgreSQL contact-name fixtures: account isolation, groups, saved names and senders passed');
+  const dir = await mkdtemp(join(tmpdir(), 'whatsapp-channel-test-'));
+  let providerCalls = 0;
+  const app = await createApp({
+    db: client,
+    env: {DATA_DIR: dir, UI_AUTH_USERNAME: 'owner', UI_AUTH_PASSWORD: 'test', APP_PUBLIC_URL: 'https://wa.example', APP_ENABLE_SENDING: 'true', TEST_SECRET: 'test-secret'},
+    registry: [{channel: 'whatsapp', accountId: 'a', connectorUrl: 'http://connector', secretEnv: 'TEST_SECRET'}],
+    fetchImpl: async () => { providerCalls++; throw Error('No provider request expected'); },
+  });
+  try {
+    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${app.server.address().port}`;
+    const authorization = `Basic ${Buffer.from('owner:test').toString('base64')}`;
+    for (const chat of ['tg_direct', 'tg_group', 'tg_archived']) {
+      for (const path of [`/api/messages?account=a&chat=${chat}`, `/api/chats/${chat}/avatar?account=a`]) {
+        const response = await fetch(base + path, {headers: {authorization}});
+        assert.equal(response.status, 404, path);
+      }
+      const response = await fetch(base + '/api/send', {
+        method: 'POST', headers: {authorization, origin: 'https://wa.example', 'content-type': 'application/json'},
+        body: JSON.stringify({account: 'a', chat, text: 'Do not send'}),
+      });
+      assert.equal(response.status, 404);
+    }
+    assert.equal(providerCalls, 0);
+  } finally {
+    await app.close();
+    await rm(dir, {recursive: true, force: true});
+  }
+  console.log('PostgreSQL contact-name fixtures: channel/account isolation, groups, saved names and senders passed');
 } finally {
   await client.query('ROLLBACK');
   await client.end();

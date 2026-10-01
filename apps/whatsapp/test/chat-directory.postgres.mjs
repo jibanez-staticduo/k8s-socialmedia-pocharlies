@@ -6,7 +6,7 @@ const container = process.env.POSTGRES_QA_CONTAINER;
 if (!container) throw new Error('Set POSTGRES_QA_CONTAINER to a PostgreSQL test container');
 const literal = value => value == null ? 'NULL' : typeof value === 'number' || typeof value === 'boolean' ? String(value) : `'${String(value).replaceAll("'", "''")}'`;
 const fixtures = `WITH conversations AS (
-  SELECT 'chat-' || lpad(n::text, 4, '0') AS id, 'phone-' || n AS wa_chat_id,
+  SELECT 'chat-' || lpad(n::text, 4, '0') AS id, n || '@c.us' AS wa_chat_id,
     'a'::text AS account, 'Contact ' || n AS name, false AS is_group,
     0 AS unread_count, (n > 650) AS archived, NULL::text AS avatar_url,
     CASE WHEN n % 7 = 0 THEN NULL ELSE '2026-09-27 12:00:00'::timestamp + (n % 3) * interval '1 microsecond' END AS last_message_at

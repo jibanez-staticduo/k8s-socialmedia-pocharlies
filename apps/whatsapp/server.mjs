@@ -15,6 +15,7 @@ import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo } from './lib/au
 import { mediaRequest } from './lib/media.mjs';
 import { readMediaLibrary } from './lib/media-library.mjs';
 import { readChatDirectory } from './lib/chat-directory.mjs';
+import { WHATSAPP_CONVERSATION_SQL } from './lib/conversation-scope.mjs';
 import { readContactDirectory } from './lib/contact-directory.mjs';
 import { readNovedades, novedadesMediaResponse, projectNovedadesChannel } from './lib/novedades-proxy.mjs';
 import { Sessions } from './lib/sessions.mjs';
@@ -456,8 +457,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       `SELECT id, name, wa_chat_id, COALESCE(is_group, false) AS is_group,
               COALESCE(archived, false) AS archived, COALESCE(unread_count, 0) AS unread,
               avatar_url
-         FROM conversations
-        WHERE account=$1 AND id=$2`,
+         FROM conversations c
+        WHERE account=$1 AND c.id=$2 AND ${WHATSAPP_CONVERSATION_SQL}`,
       [account.accountId, id]
     );
     if (!rows.length) throw fail(404, 'Conversation not found');

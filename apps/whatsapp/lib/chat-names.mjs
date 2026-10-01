@@ -1,3 +1,5 @@
+import { WHATSAPP_CONVERSATION_SQL } from './conversation-scope.mjs';
+
 const JID_SUFFIX = /@(lid|c\.us|s\.whatsapp\.net|g\.us|broadcast|newsletter)$/;
 export const MESSAGE_VISIBLE_SQL = "m.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION') AND m.conversation_id !~ '@newsletter$' AND m.conversation_id !~ '(^|:)status@broadcast$'";
 
@@ -234,6 +236,7 @@ LEFT JOIN LATERAL (
   LIMIT 1
 ) inbound ON true
 WHERE c.account = $1
+  AND ${WHATSAPP_CONVERSATION_SQL}
   AND c.id !~ '@newsletter$'
   AND c.id !~ '(^|:)status@broadcast$'
   AND NOT (
