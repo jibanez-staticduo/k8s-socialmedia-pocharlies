@@ -32,6 +32,19 @@ jobs:
       - run: python3 scripts/render-connectors.py --check
       - run: python3 -m unittest scripts/test_render_connectors.py
 
+  telegram-sync:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: connectors/telegram-sync
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install asyncpg==0.31.0
+      - run: python -m unittest discover -s tests -v
+
   whatsapp-app:
     runs-on: ubuntu-latest
     defaults:
