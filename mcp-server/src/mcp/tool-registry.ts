@@ -1279,6 +1279,155 @@ export const SOCIAL_TOOL_REGISTRY: readonly SocialToolDefinition[] = [
     idempotent: true,
   }),
   tool({
+    name: 'social_list_statuses',
+    title: 'List statuses',
+    description:
+      "Read WhatsApp statuses (Estados) of the account's contacts and its own, newest first: " +
+      'by default the ones still visible (posted in the last 24 h); with contact, only that ' +
+      "person's (phone or user jid, its PN and LID together). Each entry has the text, type, " +
+      'author and whether it has media: fetch the media with social_get_media (target ' +
+      "'status@broadcast', the messageId). Known from when the connector indexed them " +
+      '(migration 019 backfills what it already stored); expired ones are kept 30 days.',
+    effect: 'read',
+    authScope: 'social.read',
+    capability: 'statuses.list',
+    handler: 'listStatuses',
+    inputSchema: objectSchema(
+      {
+        channel,
+        accountId,
+        contact: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 200,
+          description: 'Only this contact: phone number (E.164) or WhatsApp user jid.',
+        },
+        includeExpired: {
+          type: 'boolean',
+          default: false,
+          description: 'Also statuses past their 24 h that the connector still keeps.',
+        },
+        includeOwn: { type: 'boolean', default: true, description: "Include the account's own." },
+        limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+        cursor: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 1024,
+          description: 'nextCursor of the previous page.',
+        },
+        readSource,
+      },
+      ['channel', 'accountId']
+    ),
+    idempotent: true,
+  }),
+  tool({
+    name: 'social_list_channel_posts',
+    title: 'List channel posts',
+    description:
+      'Read posts of the WhatsApp channels (newsletters) the account follows, newest first: all ' +
+      'of them, or with target one channel (…@newsletter). Media: social_get_media with the ' +
+      'channel as target. Channel names and following: social_list_channels. Posts are the ones ' +
+      'the connector received.',
+    effect: 'read',
+    authScope: 'social.read',
+    capability: 'channels.posts',
+    handler: 'listChannelPosts',
+    inputSchema: objectSchema(
+      {
+        channel,
+        accountId,
+        target: {
+          ...target,
+          pattern: '^(?:[^:]+:)?\\d+@newsletter$',
+          description: 'Only this channel: its jid, <digits>@newsletter.',
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+        cursor: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 1024,
+          description: 'nextCursor of the previous page.',
+        },
+        readSource,
+      },
+      ['channel', 'accountId']
+    ),
+    idempotent: true,
+  }),
+  tool({
+    name: 'social_publish_status',
+    title: 'Publish status',
+    description:
+      'Publish a WhatsApp status (text or image) to an explicit list of contacts: every ' +
+      'recipient sees it for 24 h and it cannot be unsent from those who saw it, so confirm ' +
+      'must be true. Off unless the connector runs with WA_STATUS_PUBLISH_ENABLED ' +
+      '(status_publish_disabled) and sending is enabled.',
+    effect: 'destructive',
+    authScope: 'social.write',
+    capability: 'statuses.publish',
+    handler: 'publishStatus',
+    inputSchema: objectSchema(
+      {
+        channel,
+        accountId,
+        idempotencyKey: writeProperties.idempotencyKey,
+        type: { type: 'string', enum: ['text', 'image'] },
+        text: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 4096,
+          description: 'Text of a text status (required), caption of an image (≤ 1024).',
+        },
+        url: {
+          ...fetchedFileUrl('Image of an image status (JPEG or PNG, ≤ 10 MB)'),
+        },
+        recipients: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: { type: 'string', minLength: 1, maxLength: 200 },
+          description:
+            'Who sees it: phone numbers (E.164) or WhatsApp user jids. Always explicit; the ' +
+            "account's own number is dropped.",
+        },
+        backgroundColor: {
+          type: 'string',
+          pattern: '^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$',
+          description: 'Text status only: background colour, #RRGGBB or #AARRGGBB.',
+        },
+        font: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 5,
+          description: 'Text status only: WhatsApp font 1..5.',
+        },
+        confirm: {
+          const: true,
+          description: 'Must be true: every recipient sees the status at once.',
+        },
+      },
+      ['channel', 'accountId', 'type', 'recipients', 'confirm'],
+      {
+        allOf: [
+          {
+            if: { properties: { type: { const: 'text' } } },
+            then: { required: ['text'], not: { required: ['url'] } },
+          },
+          {
+            if: { properties: { type: { const: 'image' } } },
+            then: {
+              required: ['url'],
+              not: { anyOf: [{ required: ['backgroundColor'] }, { required: ['font'] }] },
+              properties: { text: { maxLength: 1024 } },
+            },
+          },
+        ],
+      }
+    ),
+    idempotent: false,
+  }),
+  tool({
     name: 'social_set_chat_state',
     title: 'Set chat state',
     description:
