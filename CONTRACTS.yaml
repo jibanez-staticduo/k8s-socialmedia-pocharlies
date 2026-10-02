@@ -2148,6 +2148,47 @@ contracts:
       Idempotency-Key (send-idempotency.v1). 200 {sent, sentAt, messageId?}.
       The path, the body fields and the 200 shape are contract: changing any
       is breaking — a new `.v2` entry beside this one.
+  - id: http.whatsapp-connector.messages-media-send-filename.v1
+    kind: http-route
+    value: /messages/media/send
+    anchor: fileName
+    role: provider
+    files:
+      - connectors/whatsapp-web/src/api/controller.ts
+    status: active
+    note: >-
+      Additive to http.whatsapp-connector.messages-media-send.v1 (QA
+      02-10-2026): optional body `fileName` (string) = the name a document
+      carries on WhatsApp; path separators and control characters dropped,
+      ≤ 200 chars. Absent → the last path segment of fileUrl WITHOUT its
+      query string (before, a presigned URL's `…/x.pdf?X-Amz-…` became the
+      name). Not a string → 400 failureClass invalid_file_name, before the
+      gate. It enters the Idempotency-Key hash only when set, so a key
+      recorded without it replays the same send. Consumers: the MCP
+      social_send_message (attachment `name`) and dgx-messages send-media
+      (the uploaded file's name). Renaming the field is breaking: a new
+      `.v2` entry beside this one.
+  - id: schema.whatsapp-connector.messages-metadata-reply.v1
+    kind: schema
+    value: reply_preview
+    role: provider
+    files:
+      - connectors/whatsapp-web/src/baileys-client.ts
+    status: active
+    note: >-
+      Keys the house WhatsApp connectors write in messages.metadata of a
+      reply (any message kind quoting another; QA 02-10-2026), what
+      dgx-messages shows above the bubble: `reply_preview` (the quoted text
+      or caption, ≤ 300 chars, else a label of its kind: "📷 Foto", "📄
+      <file>", "🎤 Nota de voz", "📊 <poll>"…), `reply_type` (the quoted
+      message type: TEXT, IMAGE, VIDEO, AUDIO, DOCUMENT, STICKER, LOCATION,
+      CONTACT, POLL, EVENT), `reply_from_id` (its author as a participant id,
+      the messages.sender_wa_id form, account-namespaced) and `reply_from`
+      (the author's display name when known at ingest: "Tú" for the
+      account itself). Each key may be absent (rows ingested before 02-10
+      have none: resolve messages.reply_to_message_id against
+      messages.wa_message_id). reply_to_message_id is now also set for media
+      replies. Renaming or retyping a key is breaking: a new `.v2` entry.
   - id: http.brain.push-ingest.conversation-window.v1
     kind: http-route
     value: /instances/{instance}/push-ingest

@@ -180,13 +180,15 @@ export function mediaRequestHash(input: {
   replyToMessageId?: string;
   viewOnce?: boolean;
   quality?: string;
+  fileName?: string;
 }): string {
-  // viewOnce / quality only enter the hash when set, so a key recorded before
-  // they existed still replays the same plain send.
-  const options =
+  // viewOnce / quality / fileName only enter the hash when set, so a key
+  // recorded before they existed still replays the same plain send.
+  const options: Record<string, unknown>[] =
     input.viewOnce || (input.quality && input.quality !== 'source')
       ? [{ viewOnce: !!input.viewOnce, quality: input.quality || 'source' }]
       : [];
+  if (input.fileName) options.push({ fileName: input.fileName });
   return createHash('sha256')
     .update(
       JSON.stringify([

@@ -60,6 +60,7 @@ import {
 } from '../contacts';
 import { parseStickerGifRequest, stickerGifHashInput } from '../sticker-gif';
 import { parseContactBlockRequest } from '../contact-block';
+import { cleanFileName } from '../ingest-extras';
 import {
   parseCommunityDescription,
   parseCommunityGroupRequest,
@@ -2205,6 +2206,7 @@ export function createRouter(
 
   // Send file/media
   // CONTRACT: http.whatsapp-connector.messages-media-send.v1 — body {conversationId, fileUrl, caption?, asSticker?, kind?, replyTo?, viewOnce?, quality? (source|standard|hd)}, 200 {sent, sentAt, messageId?}, 400 view_once_unsupported / quality_unsupported
+  // CONTRACT: http.whatsapp-connector.messages-media-send-filename.v1 — optional body fileName (a document's name; default the URL's last path segment without the query), 400 invalid_file_name
   router.post('/messages/media/send', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       let idempotent: IdempotentSend | null = null;
@@ -2227,6 +2229,16 @@ export function createRouter(
         }
         const sticker = !!asSticker || kind === 'sticker';
         const replyToMessageId = optionalString(replyTo);
+        // Additive (QA 02-10): the name a document carries. Without it the
+        // name came from the presigned URL (query string included).
+        const rawFileName = (req.body as { fileName?: unknown }).fileName;
+        if (rawFileName !== undefined && rawFileName !== null && typeof rawFileName !== 'string') {
+          res
+            .status(400)
+            .json({ error: 'fileName must be a string', failureClass: 'invalid_file_name' });
+          return;
+        }
+        const fileName = rawFileName ? cleanFileName(rawFileName) || undefined : undefined;
         // Additive (fase 3): play-once photo/video and image re-encoding; both
         // absent = the same send as before (and the same idempotency hash).
         const viewOnce = parseViewOnce(req.body?.viewOnce);
@@ -2234,6 +2246,7 @@ export function createRouter(
         const mediaOptions = {
           ...(viewOnce ? { viewOnce } : {}),
           ...(quality !== 'source' ? { quality } : {}),
+          ...(fileName ? { fileName } : {}),
         };
         const begun = await beginIdempotentSend(
           client,

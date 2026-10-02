@@ -75,7 +75,16 @@ import {
   setConversationWaChatId,
   getUnreadMessageKeysForChat,
   markMessagesRead,
+  participantDisplayName,
 } from './db-writer';
+import {
+  appendMediaEligible,
+  documentFileName,
+  isOfficialWhatsAppJid,
+  linksSenderToChat,
+  OFFICIAL_WHATSAPP_NAME,
+  quotedReply,
+} from './ingest-extras';
 import {
   DurablePayloadSource,
   getRawWAMessage,
@@ -412,6 +421,12 @@ type IngestSource = 'live' | 'baileys_history_sync';
 interface IngestOptions {
   source?: IngestSource;
   publishEvent?: boolean;
+  /**
+   * Download the media to MinIO + `attachments`. Default: only `live`. A recent
+   * `append` (our own send echoed by Baileys, or a message delivered while
+   * offline) is new too — before 02-10 its media was never stored.
+   */
+  storeMedia?: boolean;
   syncType?: string;
   isLatest?: boolean;
 }
@@ -1129,8 +1144,19 @@ async function boundedProfilePictureUrl(
 }
 
 /** 403 (private) and 404 (none) are WhatsApp's answers for "no visible picture". */
-function isUnavailableProfilePicture(error: unknown): boolean {
-  return error instanceof Boom && [403, 404].includes(error.output.statusCode);
+/**
+ * WhatsApp answers "no visible picture": none (404 item-not-found) or hidden by
+ * the contact's privacy (403, or 401 not-authorized — Baileys raises that one
+ * as a Boom 500 with `data: 401`, which used to leak as a 500 and blanked half
+ * of the professional avatars in the console, QA 02-10).
+ */
+export function isUnavailableProfilePicture(error: unknown): boolean {
+  if (!(error instanceof Boom)) return false;
+  const codes = [error.output.statusCode, Number(error.data)];
+  return (
+    codes.some(code => [401, 403, 404].includes(code)) ||
+    /^(not-authorized|item-not-found|forbidden)$/.test(error.message)
+  );
 }
 
 /**
@@ -1644,6 +1670,7 @@ export class BaileysClient extends EventEmitter {
           await this.ingestMessage(msg, {
             source: isLive ? 'live' : 'baileys_history_sync',
             publishEvent: isLive,
+            storeMedia: isLive || appendMediaEligible(msg),
           });
         } catch (e: any) {
           this.logger.error(`Error processing message ${msg.key?.id}: ${e?.message || e}`);
@@ -2067,7 +2094,9 @@ export class BaileysClient extends EventEmitter {
     const rawChatJid = msg.key.remoteJid || '';
     const isGroup = !!isJidGroup(rawChatJid);
 
-    const chatName = this.chatStore.get(waMessage.conversationId)?.name || waMessage.conversationId;
+    const chatName = isOfficialWhatsAppJid(rawChatJid)
+      ? OFFICIAL_WHATSAPP_NAME
+      : this.chatStore.get(waMessage.conversationId)?.name || waMessage.conversationId;
     let participantCount = 2;
     if (isGroup) {
       const meta = await this.fetchGroupMetadata(rawChatJid).catch(() => null);
@@ -2114,7 +2143,8 @@ export class BaileysClient extends EventEmitter {
     const senderRaw = msg.key.fromMe
       ? this.meJid || waMessage.senderWaId
       : msg.key.participant || rawChatJid;
-    const pushName = msg.pushName || undefined;
+    const pushName =
+      msg.pushName || (isOfficialWhatsAppJid(senderRaw) ? OFFICIAL_WHATSAPP_NAME : undefined);
     // Cache the display name keyed by the raw participant JID so the
     // presence.update handler can label "Manu está escribiendo…".
     if (pushName) {
@@ -2132,12 +2162,16 @@ export class BaileysClient extends EventEmitter {
     // already upserted above). A link failure must never abort the ingest and
     // drop the message — the opt-in poller reads `messages`, so losing it is the
     // actual outage. Log with full context instead of swallowing silently.
-    await linkParticipantToConversation(waMessage.conversationId, waMessage.senderWaId).catch(e =>
-      this.logger.error(
-        `participant link persist failed for conversation=${waMessage.conversationId} ` +
-          `participant=${waMessage.senderWaId}: ${e?.message || e}`
-      )
-    );
+    // A 1:1 chat links only the other side: our own participant there named
+    // the chat after the account itself in the console (QA 02-10).
+    if (linksSenderToChat({ isGroup, fromMe: !!msg.key.fromMe, chatJid: rawChatJid })) {
+      await linkParticipantToConversation(waMessage.conversationId, waMessage.senderWaId).catch(e =>
+        this.logger.error(
+          `participant link persist failed for conversation=${waMessage.conversationId} ` +
+            `participant=${waMessage.senderWaId}: ${e?.message || e}`
+        )
+      );
+    }
 
     // Lazy avatar pulls. Don't await — fire-and-forget so a slow profile
     // picture fetch never delays the message persist.
@@ -2166,6 +2200,9 @@ export class BaileysClient extends EventEmitter {
         senderPnE164: lidPn?.e164,
         // POLL / EVENT (fase 3 / PR-7): {poll} or {event}, what dgx-messages renders.
         ...waMessage.structured,
+        // The quote of a reply (QA 02-10): what dgx-messages shows above the
+        // bubble, also when the quoted message is not in the DB.
+        ...(await this.replyMetadata(msg)),
       },
     };
     const msgId = await storeMessage(data);
@@ -2237,10 +2274,15 @@ export class BaileysClient extends EventEmitter {
     this.logger.info(`Stored message ${waMessage.waMessageId} from ${waMessage.senderWaId}`);
 
     const isLiveMedia =
-      (options.source || 'live') === 'live' &&
+      (options.storeMedia ?? (options.source || 'live') === 'live') &&
       waMessage.messageType !== 'TEXT' &&
       waMessage.messageType !== 'REACTION';
-    if (isLiveMedia && waMessage.messageType === 'AUDIO' && this.emitAudioAttachments) {
+    if (
+      isLiveMedia &&
+      waMessage.messageType === 'AUDIO' &&
+      this.emitAudioAttachments &&
+      options.publishEvent !== false
+    ) {
       // F1.7 honest voice: for voice notes the media upload historically ran
       // fire-and-forget AFTER the event emit, so the NATS event never carried
       // attachments and synapse's transcription raised "no downloadable audio
@@ -2276,6 +2318,40 @@ export class BaileysClient extends EventEmitter {
       this.emit('message', waMessage);
     }
     return { inserted: true, waMessage };
+  }
+
+  /**
+   * `metadata.reply_preview` (the quoted text, or a label of its kind),
+   * `reply_type` (its message type), `reply_from_id` (its author as a
+   * participant id, like messages.sender_wa_id) and `reply_from` (the
+   * author's name when known: "Tú" for ourselves). Nothing for a message
+   * that is not a reply.
+   */
+  // CONTRACT: schema.whatsapp-connector.messages-metadata-reply.v1 — metadata reply_preview, reply_type, reply_from_id, reply_from
+  private async replyMetadata(msg: WAMessage): Promise<Record<string, string>> {
+    const quote = quotedReply(msg.message);
+    if (!quote) return {};
+    const out: Record<string, string> = {};
+    if (quote.preview) {
+      out.reply_preview = quote.preview.text;
+      out.reply_type = quote.preview.type;
+    }
+    if (quote.participant) {
+      const authorId = this.normalizeJid(quote.participant);
+      out.reply_from_id = accountKey(authorId);
+      const own = new Set(
+        [this.meJid, (this.sock?.user as { lid?: string } | undefined)?.lid]
+          .filter((jid): jid is string => !!jid)
+          .map(jid => this.normalizeJid(jidNormalizedUser(jid)))
+      );
+      const name = own.has(authorId)
+        ? 'Tú'
+        : this.contactNames.get(quote.participant) ||
+          this.contactNames.get(authorId) ||
+          (this.ingest ? await participantDisplayName(out.reply_from_id).catch(() => null) : null);
+      if (name) out.reply_from = name;
+    }
+    return out;
   }
 
   private convertMessage(msg: WAMessage): WhatsAppMessage | null {
@@ -2352,6 +2428,10 @@ export class BaileysClient extends EventEmitter {
       const k = Object.keys(content).find(k => !!(content as any)[k]);
       messageType = (k || 'UNKNOWN').toUpperCase();
     }
+
+    // A reply quoted from a photo, document, sticker… (not only a text) keeps
+    // its quoted id too.
+    if (!replyToWaId) replyToWaId = quotedReply(content)?.stanzaId || undefined;
 
     const senderRaw = msg.key.fromMe
       ? this.meJid || msg.key.remoteJid
@@ -2856,6 +2936,8 @@ export class BaileysClient extends EventEmitter {
       viewOnce?: boolean;
       /** Re-encode a still image (media-quality.ts); default source = untouched. */
       quality?: MediaQuality;
+      /** A document's name; default = the URL's last path segment, no query. */
+      fileName?: string;
     }
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
@@ -2883,7 +2965,7 @@ export class BaileysClient extends EventEmitter {
     } catch (e: any) {
       throw new Error(`Failed to fetch file from ${fileUrl}: ${e?.message || e}`);
     }
-    const fileName = fileUrl.split('/').pop() || 'attachment';
+    const fileName = documentFileName(fileUrl, options?.fileName);
     const asSticker = !!options?.asSticker || contentType === 'image/webp';
     // Refused before anything goes out: play-once only for photos/videos,
     // a quality only for still images.
