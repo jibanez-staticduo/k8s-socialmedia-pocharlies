@@ -82,6 +82,7 @@ const ALL_FILES = [
   '017_notify_message_edit_delete.sql',
   '018_whatsapp_message_stars_pins.sql',
   '019_whatsapp_statuses.sql',
+  '020_whatsapp_direct_chat_self_links.sql',
 ];
 
 describe('migrate.ts _migrations ledger', () => {
@@ -93,21 +94,24 @@ describe('migrate.ts _migrations ledger', () => {
     expect(db.ledger.every(l => !l.baseline)).toBe(true);
     expect(db.executed).toHaveLength(ALL_FILES.length);
     expect(db.executed[0]).toMatch(/CREATE TABLE conversations/); // 001, the non-idempotent one
-    expect(db.executed[db.executed.length - 7]).toMatch(
+    expect(db.executed[db.executed.length - 8]).toMatch(
       /CREATE TABLE IF NOT EXISTS whatsapp_poll_votes/
     ); // 013
-    expect(db.executed[db.executed.length - 6]).toMatch(
+    expect(db.executed[db.executed.length - 7]).toMatch(
       /ADD COLUMN IF NOT EXISTS ephemeral_expiration/
     ); // 014
-    expect(db.executed[db.executed.length - 5]).toMatch(/FUNCTION public\.merge_inbound_reaction/); // 015
-    expect(db.executed[db.executed.length - 4]).toMatch(/CREATE TABLE IF NOT EXISTS brain_windows/); // 016
-    expect(db.executed[db.executed.length - 3]).toMatch(/FUNCTION notify_message_edit_delete/); // 017
-    expect(db.executed[db.executed.length - 2]).toMatch(
+    expect(db.executed[db.executed.length - 6]).toMatch(/FUNCTION public\.merge_inbound_reaction/); // 015
+    expect(db.executed[db.executed.length - 5]).toMatch(/CREATE TABLE IF NOT EXISTS brain_windows/); // 016
+    expect(db.executed[db.executed.length - 4]).toMatch(/FUNCTION notify_message_edit_delete/); // 017
+    expect(db.executed[db.executed.length - 3]).toMatch(
       /CREATE TABLE IF NOT EXISTS whatsapp_message_stars/
     ); // 018
-    expect(db.executed[db.executed.length - 1]).toMatch(
+    expect(db.executed[db.executed.length - 2]).toMatch(
       /CREATE TABLE IF NOT EXISTS whatsapp_statuses/
-    ); // 019, the last one
+    ); // 019
+    expect(db.executed[db.executed.length - 1]).toMatch(
+      /CREATE TABLE IF NOT EXISTS conversation_participants_removed/
+    ); // 020, the last one
     expect(db.commits).toBe(ALL_FILES.length);
     expect(db.openTx).toBe(false);
   });

@@ -912,6 +912,26 @@ export async function getHistorySyncStatus(limit: number = 200): Promise<History
   }));
 }
 
+/**
+ * A participant's display name (its saved name, else its push name), for the
+ * author of a quoted message. Null when unknown or when the stored "name" is
+ * only a jid. `participantId` is already namespaced (messages.sender_wa_id form).
+ */
+export async function participantDisplayName(participantId: string): Promise<string | null> {
+  const pool = getPool();
+  const r = await pool.query(
+    `SELECT COALESCE(
+              CASE WHEN NULLIF(name, '') IS NOT NULL AND position('@' in name) = 0 THEN name END,
+              CASE WHEN NULLIF(push_name, '') IS NOT NULL AND position('@' in push_name) = 0 THEN push_name END
+            ) AS name
+       FROM participants
+      WHERE id = $1`,
+    [participantId]
+  );
+  const name = r.rows[0]?.name;
+  return typeof name === 'string' && name.trim() ? name.trim() : null;
+}
+
 export async function linkParticipantToConversation(
   conversationId: string,
   participantId: string

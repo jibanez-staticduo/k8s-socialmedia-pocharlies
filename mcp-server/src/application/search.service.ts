@@ -36,6 +36,15 @@ export interface SearchOptions {
   rawIds?: boolean;
 }
 
+export const MAX_SEARCH_LIMIT = 100;
+
+/** 1..100, default 20: an unbounded LIMIT ranks and ships every match. */
+export function searchLimit(limit: unknown): number {
+  const n = Math.floor(Number(limit));
+  if (!Number.isFinite(n) || n < 1) return 20;
+  return Math.min(n, MAX_SEARCH_LIMIT);
+}
+
 export class SearchService {
   private openai: OpenAI;
   private dbClient: Pool;
@@ -60,7 +69,8 @@ export class SearchService {
    * Performs keyword search using PostgreSQL Full Text Search
    */
   async keywordSearch(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
-    const { chatId, from, to, sender, limit = 20 } = options;
+    const { chatId, from, to, sender } = options;
+    const limit = searchLimit(options.limit);
 
     let sql = `
       SELECT 
@@ -160,7 +170,8 @@ export class SearchService {
    * Performs semantic search using vector similarity
    */
   async semanticSearch(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
-    const { chatId, from, to, sender, limit = 20 } = options;
+    const { chatId, from, to, sender } = options;
+    const limit = searchLimit(options.limit);
 
     // Generate embedding for query
     const response = await this.openai.embeddings.create({
@@ -282,6 +293,80 @@ export class SearchService {
 
     // Fallback to keyword search
     return this.keywordSearch(query, options);
+  }
+}
+
+/**
+ * The full-text index keywordSearch needs. Without it a search that is not
+ * scoped to a chat computed to_tsvector over every message (885k rows,
+ * 11.7 s measured on the replica 02-10) and hit the pool's 10 s statement
+ * timeout (QA 02-10: social_search_messages → outcome_unknown). The expression
+ * is the one in keywordSearch's WHERE, so the planner matches it.
+ */
+export const SEARCH_FTS_INDEX = 'idx_messages_content_fts';
+const SEARCH_FTS_INDEX_SQL = `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${SEARCH_FTS_INDEX}
+  ON messages USING gin (to_tsvector('english', content))`;
+
+export interface IndexClient {
+  query(sql: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+  end(): Promise<void>;
+}
+
+export type EnsureIndexOutcome = 'exists' | 'created' | 'busy' | 'disabled' | 'failed';
+
+/**
+ * Build the full-text index once, CONCURRENTLY (no write lock on a table that
+ * dozens of services write), outside any transaction — which is why it is not
+ * in a migration: migrate.ts runs every file inside one, where CONCURRENTLY is
+ * impossible (same split as 016's ensureBrainWindowsIndexes). Runs on its own
+ * connection without statement timeout, under an advisory lock so two pods
+ * never build it at once; an INVALID leftover of a failed build is dropped
+ * first (IF NOT EXISTS would keep it forever). Never throws: search still
+ * works without the index, only slower.
+ */
+export async function ensureSearchIndexes(
+  connect: () => Promise<IndexClient>,
+  log: (message: string) => void = () => {}
+): Promise<EnsureIndexOutcome> {
+  if (process.env.SOCIAL_SEARCH_ENSURE_INDEX === 'false') return 'disabled';
+  let client: IndexClient | null = null;
+  let locked = false;
+  try {
+    client = await connect();
+    const lock = await client.query(
+      `SELECT pg_try_advisory_lock(hashtext('socialmedia:${SEARCH_FTS_INDEX}')) AS locked`
+    );
+    locked = lock.rows[0]?.locked === true;
+    if (!locked) return 'busy';
+    const existing = await client.query(
+      `SELECT i.indisvalid AS valid
+         FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname = $1`,
+      [SEARCH_FTS_INDEX]
+    );
+    if (existing.rows[0]?.valid === true) return 'exists';
+    await client.query('SET statement_timeout = 0');
+    if (existing.rows.length) {
+      log(`${SEARCH_FTS_INDEX} is INVALID (an interrupted build): dropping it`);
+      await client.query(`DROP INDEX CONCURRENTLY IF EXISTS ${SEARCH_FTS_INDEX}`);
+    }
+    log(`building ${SEARCH_FTS_INDEX} CONCURRENTLY`);
+    const started = Date.now();
+    await client.query(SEARCH_FTS_INDEX_SQL);
+    log(`${SEARCH_FTS_INDEX} ready in ${Date.now() - started} ms`);
+    return 'created';
+  } catch (error) {
+    log(`${SEARCH_FTS_INDEX} not built: ${(error as Error)?.message || error}`);
+    return 'failed';
+  } finally {
+    if (client) {
+      if (locked) {
+        await client
+          .query(`SELECT pg_advisory_unlock(hashtext('socialmedia:${SEARCH_FTS_INDEX}'))`)
+          .catch(() => {});
+      }
+      await client.end().catch(() => {});
+    }
   }
 }
 

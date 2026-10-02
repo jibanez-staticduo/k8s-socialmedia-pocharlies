@@ -261,6 +261,20 @@ export function bareWhatsAppJid(chatId: string): string {
   return stripAccount(String(chatId).trim()).id;
 }
 
+/**
+ * The ways one WhatsApp chat id is written: with or without the account
+ * namespace, a phone jid as @c.us (how the index and the connector store it)
+ * or @s.whatsapp.net (how WhatsApp writes it).
+ */
+export function whatsAppChatKeys(chatId: string): string[] {
+  const bare = bareWhatsAppJid(chatId);
+  if (!bare) return [];
+  const keys = [bare];
+  if (bare.endsWith('@s.whatsapp.net')) keys.push(bare.replace(/@s\.whatsapp\.net$/, '@c.us'));
+  if (bare.endsWith('@c.us')) keys.push(bare.replace(/@c\.us$/, '@s.whatsapp.net'));
+  return keys;
+}
+
 export function normalizeDirectWhatsAppJid(chatId: unknown): string | null {
   if (typeof chatId !== 'string' && typeof chatId !== 'number') return null;
 
@@ -1287,16 +1301,25 @@ export class MCPServer {
       }
       const data = await this.providerGet(this.waUrl(accountIdValue), '/api/public/chats');
       const conversations = extractArrayPayload(data, ['chats']);
-      const conversation = conversations.find(
-        item => pickString(item, ['id', 'chatId']) === conversationTarget
+      const wanted = whatsAppChatKeys(conversationTarget);
+      const conversation = conversations.find(item =>
+        whatsAppChatKeys(pickString(item, ['id', 'chatId'])).some(key => wanted.includes(key))
       );
-      if (!conversation) {
+      if (conversation) return this.jsonResponse(conversation);
+      // The connector lists only the chats of its last history snapshot (10 in
+      // prod after a relink), so most 1:1 chats were "not_found" (QA 02-10).
+      // The index knows every chat, PN ↔ LID aliases and merges included.
+      const indexed = await this.whatsAppIndexedConversation(
+        normalizeAccount(accountIdValue),
+        wanted
+      );
+      if (!indexed) {
         throw this.canonicalError(
           'not_found',
-          `WhatsApp conversation '${conversationTarget}' was not returned by the provider`
+          `WhatsApp conversation '${conversationTarget}' was not returned by the provider nor found in the index`
         );
       }
-      return this.jsonResponse(conversation);
+      return this.jsonResponse(indexed);
     }
     if (channelName === 'telegram') {
       if (source === 'index') {
@@ -1339,6 +1362,51 @@ export class MCPServer {
       );
     }
     return this.jsonResponse(conversation);
+  }
+
+  /**
+   * A WhatsApp chat from the index in the provider's shape ({id, name, isGroup,
+   * timestamp}) plus its conversationId and `resolvedFrom: 'index'`. A 1:1
+   * chat whose stored name is only its jid is named after the other side.
+   */
+  private async whatsAppIndexedConversation(
+    account: Account,
+    refs: string[]
+  ): Promise<Record<string, unknown> | null> {
+    let row: Awaited<ReturnType<ConversationResolver['resolve']>> = null;
+    for (const ref of refs) {
+      row = await this.conversations().resolve('whatsapp', account, ref);
+      if (row && ConversationResolver.belongsTo(row, 'whatsapp', account)) break;
+      row = null;
+    }
+    if (!row) return null;
+    const externalId = String(row.external_id || bareWhatsAppJid(row.id));
+    const isGroup = row.is_group === true || externalId.endsWith('@g.us');
+    let name = typeof row.name === 'string' ? row.name : null;
+    if (!isGroup && (!name || name.includes('@'))) {
+      const other = await this.dbClient.query(
+        `SELECT COALESCE(
+                  CASE WHEN position('@' in COALESCE(p.name, '@')) = 0 THEN p.name END,
+                  CASE WHEN position('@' in COALESCE(p.push_name, '@')) = 0 THEN p.push_name END
+                ) AS name
+           FROM conversation_participants cp
+           JOIN participants p ON p.id = cp.participant_id
+          WHERE cp.conversation_id = $1
+          ORDER BY p.last_seen DESC NULLS LAST
+          LIMIT 1`,
+        [row.id]
+      );
+      name = (other.rows[0]?.name as string | null) || name;
+    }
+    const last = row.last_message_at ? new Date(row.last_message_at as string) : null;
+    return {
+      id: externalId,
+      name,
+      isGroup,
+      timestamp: last && !Number.isNaN(last.getTime()) ? Math.floor(last.getTime() / 1000) : 0,
+      conversationId: row.id,
+      resolvedFrom: 'index',
+    };
   }
 
   private async canonicalListParticipants(args: Record<string, any>): Promise<any> {
@@ -1965,6 +2033,11 @@ export class MCPServer {
                   fileUrl: location,
                   caption: pickString(attachmentValue, ['caption']) || undefined,
                   // Additive: absent unless asked, so a plain attachment sends as before.
+                  // The attachment's name is the document's name (QA 02-10: it was
+                  // taken from the URL); the connector cleans it.
+                  ...(pickString(attachmentValue, ['name'])
+                    ? { fileName: pickString(attachmentValue, ['name']) }
+                    : {}),
                   ...(attachmentValue.viewOnce === true ? { viewOnce: true } : {}),
                   ...(attachmentValue.hd === true ? { quality: 'hd' as const } : {}),
                   account: accountIdValue,
@@ -5269,6 +5342,7 @@ export class MCPServer {
       account?: string;
       viewOnce?: boolean;
       quality?: 'hd';
+      fileName?: string;
     },
     // Set only by canonicalSendMessage, never from tool arguments.
     options?: { idempotencyKey?: string }

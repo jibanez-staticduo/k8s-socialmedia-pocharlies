@@ -6,7 +6,8 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
-import { Pool } from 'pg';
+import { Client, Pool } from 'pg';
+import { ensureSearchIndexes } from '../application/search.service';
 import { syncSocialAccountsBestEffort } from '../infrastructure/database/social-accounts';
 import Redis, { RedisOptions } from 'ioredis';
 import * as fs from 'fs';
@@ -147,6 +148,19 @@ async function main() {
   await dbPool.query('SELECT 1');
   await syncSocialAccountsBestEffort(dbPool);
   console.log('[SSE] Connected to database (pool max=30, statement_timeout=10s)');
+  // Full-text index for unscoped social_search_messages (QA 02-10): built once,
+  // CONCURRENTLY, in the background on its own connection; never blocks boot.
+  void ensureSearchIndexes(
+    async () => {
+      const client = new Client({
+        connectionString: DATABASE_URL,
+        application_name: 'mcp-sse-index',
+      });
+      await client.connect();
+      return client;
+    },
+    message => console.log(`[SSE] ${message}`)
+  );
 
   let redisOptions: RedisOptions = {};
   if (REDIS_URL.startsWith('rediss://') && REDIS_TLS_CA) {
