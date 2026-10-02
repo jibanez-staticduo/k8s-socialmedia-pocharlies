@@ -14,6 +14,12 @@
 # previous SHAs are ancestors of a6a1547 (git merge-base --is-ancestor), so the
 # flip only adds code. Envs WA_RECONNECT_BACKFILL_* ride in via
 # social-accounts.json (registry, PR #101).
+#
+# SC-1394 02-10: the three house whatsapp-connector* advance v1.3.87 -> v1.3.91
+# (Release Production run 36959150256, deploy/prod@f43b1c6, which carries the
+# merge 95ae878: whatsapp-pairing no revive un cliente cerrado por el pool —
+# the reconnect loop after ~40 sockets/h without start). Digest resolved from
+# Harbor (skopeo). whatsapp-pairing moves too — see its section below.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,7 +30,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-connector
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.87@sha256:279b980463cb0e0dea21fd29e1cbb72c06149f6dc2d01a528c99898b7011ece9
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -36,7 +42,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-connector-professional
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.87@sha256:279b980463cb0e0dea21fd29e1cbb72c06149f6dc2d01a528c99898b7011ece9
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
 ---
 # SC-1144 fase 2: la cuenta leila corre la MISMA imagen que las otras dos Baileys.
 apiVersion: apps/v1
@@ -49,7 +55,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-connector-leila
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.87@sha256:279b980463cb0e0dea21fd29e1cbb72c06149f6dc2d01a528c99898b7011ece9
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -94,11 +100,16 @@ spec:
         - name: telegram-connector
           image: harbor.e-dani.com/homelab/whatsappmcp-telegram-connector:v1.3.78@sha256:fb9b2a20686afefec7c9dce274b47673c33bc89b240ee52c7eb11ac961da2c44
 ---
-# SC-1197 encendido — the pairing pools run v1.3.57 (run 36135670213,
+# SC-1197 encendido — the pairing pools ran v1.3.57 (run 36135670213,
 # deploy/prod@115c066, the tip carrying #70..#85: the pairing entrypoints
 # connectors/whatsapp-web/src/pairing/main.ts and
-# connectors/telegram/src/pairing/main.ts, plus the social-api routes). The
-# house connectors stay on the pins above.
+# connectors/telegram/src/pairing/main.ts, plus the social-api routes).
+# SC-1394 02-10: whatsapp-pairing deliberately leaves that v1.3.57 hold — the
+# bug (infinite reconnect loop after ~40 sockets/h without start) lives in the
+# pairing pool: pairing/main.ts imports BaileysClient from ../baileys-client,
+# so the fix (merge 95ae878) ships in this same image and only reaches the
+# pod once the pin moves. Release Production run 36959150256 built v1.3.91
+# from deploy/prod@f43b1c6 (carries 95ae878). telegram-pairing stays on v1.3.57.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -109,7 +120,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-pairing
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.57@sha256:4ee6153e431b264c56241b34912f44ee3e2a90c2cc06b60a3b056131bd264893
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
 ---
 apiVersion: apps/v1
 kind: Deployment
