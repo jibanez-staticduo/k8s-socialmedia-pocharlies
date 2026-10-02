@@ -93,9 +93,15 @@ images:
   # v1.3.92 (run 36962281564, deploy/prod@4a2065e): sobre v1.3.91 solo cambia #191 — el
   # incremental de brain-windows solo borra ventanas del rango que reconstruye y nunca más de
   # 50 por chat y pasada (incidente INFRA-364 del 02-10: ~26k ventanas borradas).
+  # v1.3.94 (run 37039896599, deploy/prod@4fc6081): #195, arreglos de la auditoria QA 02-10 —
+  # migracion 020 (quita los enlaces de la propia cuenta en chats 1:1, con lapida en
+  # conversation_participants_removed; el chat 0@ se llama "WhatsApp"), indice GIN
+  # idx_messages_content_fts creado CONCURRENTLY por mcp-sse al arrancar,
+  # social_get_conversation con respaldo del indice y el name del adjunto como fileName.
+  # Incluye #196 (brain-windows). 73 tools, contrato sin cambios.
   - name: harbor.e-dani.com/homelab/whatsappmcp-mcp-server
-    newTag: v1.3.92
-    digest: sha256:d865664d77ffa5d62cdc06e794efb41394cdb8cb0127dca9bee5060657576450
+    newTag: v1.3.94
+    digest: sha256:9db261adfec517295a9be66318c56f7a26377430ee9fb0bd5c8bf3fbf5ea1962
   - name: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-synapse-bridge
     newTag: socialmedia-v2-c88dce16
     digest: sha256:21d7cf9b021dce06af53b779056f9bd5c599722251726e483cdb50917b02263e

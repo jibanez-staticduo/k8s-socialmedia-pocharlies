@@ -20,6 +20,12 @@
 # merge 95ae878: whatsapp-pairing no revive un cliente cerrado por el pool —
 # the reconnect loop after ~40 sockets/h without start). Digest resolved from
 # Harbor (skopeo). whatsapp-pairing moves too — see its section below.
+#
+# QA 02-10: the three house whatsapp-connector* advance v1.3.91 -> v1.3.94
+# (Release Production run 37039896599, deploy/prod@4fc6081, merge of #195):
+# media we send is stored (upsert `append`), document fileName, reply quotes in
+# metadata, no self-link in 1:1 chats, privacy-hidden avatar = 404. Digest
+# resolved from Harbor (skopeo). whatsapp-pairing stays on v1.3.91.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,7 +36,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-connector
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.94@sha256:b21d9a52b93b5c80694c79520446c358632c7a3a67f58c709268e7b68ef2d643
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -42,7 +48,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-connector-professional
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.94@sha256:b21d9a52b93b5c80694c79520446c358632c7a3a67f58c709268e7b68ef2d643
 ---
 # SC-1144 fase 2: la cuenta leila corre la MISMA imagen que las otras dos Baileys.
 apiVersion: apps/v1
@@ -55,7 +61,7 @@ spec:
     spec:
       containers:
         - name: whatsapp-connector-leila
-          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.91@sha256:b6fe5bd409028b409d479d1dd25cf964d2c4a850ce16398980b64e9904175e29
+          image: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.94@sha256:b21d9a52b93b5c80694c79520446c358632c7a3a67f58c709268e7b68ef2d643
 ---
 apiVersion: apps/v1
 kind: Deployment
