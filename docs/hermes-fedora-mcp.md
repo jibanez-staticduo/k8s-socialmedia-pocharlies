@@ -99,3 +99,14 @@ requesting new OAuth setup. In particular, a missing profile-local
 `google_token.json` says nothing about an already authenticated `gog` connection.
 Validate the existing connection with a read-only call, and keep keyring values
 out of tool output and source control.
+
+Hermes persists assembled prompts for resumed API sessions. Restarting the gateway
+does not refresh those snapshots after changing profile instructions. Back up the
+affected prompt and use `hermes -p socialmedia sessions repair-prompts SESSION_ID
+--apply --json` for the specific session; the next turn rebuilds the prompt while
+retaining its messages. Verify that same session, rather than only a new QA session.
+
+For a file-based `gog` keyring, merely sourcing its environment file may leave the
+password unexported. The Fedora profile's `bin/gog` wrapper loads it with tracing
+disabled and `set -a`, then executes the installed CLI. Profile instructions should
+use this wrapper so unattended API turns do not attempt an interactive unlock.
