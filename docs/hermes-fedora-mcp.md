@@ -18,6 +18,8 @@ platform_toolsets:
   api_server: [all]
 agent:
   disabled_toolsets: []
+approvals:
+  mode: "off"
 mcp_servers:
   socialmedia_current_chat:
     url: https://ss.staticduo.com/mcp
@@ -84,3 +86,16 @@ Restart the existing gateway after changing profile configuration so it serves
 the new profile. Verify `/p/socialmedia/v1/toolsets` includes general tools and
 LazyMCP, and complete a real owner-authored turn. Do not start a second gateway
 process for the same profile.
+
+`api_server: [all]` selects tools but does not grant execution approval. For this
+owner-controlled panel, keep `approvals.mode` aligned with the owner's default
+profile (`"off"` above); otherwise Hermes treats API turns as unattended and can
+block `execute_code` even though that tool is enabled. This does not turn incoming
+WhatsApp history into an authorized instruction.
+
+Profiles do not automatically inherit authenticated integrations or skill script
+paths. Reuse the existing Fedora skills and user-level CLI connections before
+requesting new OAuth setup. In particular, a missing profile-local
+`google_token.json` says nothing about an already authenticated `gog` connection.
+Validate the existing connection with a read-only call, and keep keyring values
+out of tool output and source control.
