@@ -267,6 +267,7 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
     (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
   } }));
   const verifyToken = configured ? env.WEBHOOK_VERIFY_TOKEN || '' : WEBHOOK_VERIFY_TOKEN;
+  // CONTRACT: http.instagram-connector.webhook.v1 — raw-body signature required in every account mode.
   // Meta signs webhooks in both registry and legacy environment account modes.
   const webhookAccounts = configured ?? new Map([...accounts].map(([name, entry]) => [name, {
     ready: entry.ready ?? Boolean(entry.config.accessToken),
