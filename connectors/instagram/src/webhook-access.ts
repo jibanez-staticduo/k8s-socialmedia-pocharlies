@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import type { RequestHandler } from 'express';
 import { secretMatches, type ConfiguredAccount } from './account-access';
 
-export function webhookAuthorization(accounts: Map<string, ConfiguredAccount>, ids: Map<string, string>, verifyToken: string): RequestHandler {
+export function webhookAuthorization(accounts: Map<string, Pick<ConfiguredAccount, 'ready' | 'config'>>, ids: Map<string, string>, verifyToken: string): RequestHandler {
   return (req, res, next): void => {
     if (!verifyToken) { res.sendStatus(503); return; }
     if (req.method === 'GET') {

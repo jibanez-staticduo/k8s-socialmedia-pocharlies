@@ -267,7 +267,12 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
     (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
   } }));
   const verifyToken = configured ? env.WEBHOOK_VERIFY_TOKEN || '' : WEBHOOK_VERIFY_TOKEN;
-  if (configured) app.use('/webhook', webhookAuthorization(configured, bizIdToAccount, verifyToken));
+  // Meta signs webhooks in both registry and legacy environment account modes.
+  const webhookAccounts = configured ?? new Map([...accounts].map(([name, entry]) => [name, {
+    ready: entry.ready ?? Boolean(entry.config.accessToken),
+    config: entry.config,
+  }]));
+  app.use('/webhook', webhookAuthorization(webhookAccounts, bizIdToAccount, verifyToken));
 
   // Webhook routes — shared endpoint, routes by business account ID in payload
   app.use(

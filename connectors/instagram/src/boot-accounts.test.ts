@@ -25,12 +25,60 @@ import { createInstagramApp, loadAccounts } from './main';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHmac } from 'node:crypto';
 
 /** Env without a single account field — the exact state C10 leaves behind. */
 const EMPTY_ACCOUNTS_ENV = {
   INSTAGRAM_ACCOUNTS: '',
   INSTAGRAM_ACCESS_TOKEN: '',
 } as NodeJS.ProcessEnv;
+
+for (const businessAccountId of ['biz-a', '']) {
+  test(`legacy env webhook requires raw-byte signature (business ID ${businessAccountId ? 'configured' : 'discovered'})`, async () => {
+    const originalFetch = globalThis.fetch;
+    const events: unknown[] = [];
+    let server: Server | undefined;
+    const env = {
+      INSTAGRAM_ACCESS_TOKEN: 'test-access-token',
+      INSTAGRAM_BUSINESS_ACCOUNT_ID: businessAccountId,
+      FACEBOOK_APP_SECRET: 'test-app-secret',
+      WEBHOOK_VERIFY_TOKEN: 'test-verify-token',
+    };
+    try {
+      globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        if (String(url).includes('graph.instagram.com')) {
+          return new Response(JSON.stringify({ id: 'biz-a' }), { status: 200 });
+        }
+        return originalFetch(url as never, init as never);
+      }) as typeof fetch;
+      const accounts = loadAccounts({ env });
+      const app = await createInstagramApp({ env, accounts, credentialStore: null,
+        publisher: { publish(account, event) { events.push({ account, event }); } } });
+      const listening = await listen(app);
+      server = listening.server;
+      const body = '{ "object": "instagram", "entry": [{ "id": "biz-a", "messaging": [{ "sender": { "id": "sender-a" }, "recipient": { "id": "biz-a" }, "timestamp": 1700000000, "message": { "mid": "message-a", "text": "hello" } }] }] }';
+      const sign = (raw: string) => 'sha256=' + createHmac('sha256', env.FACEBOOK_APP_SECRET).update(raw).digest('hex');
+      const post = (signature?: string) => originalFetch(listening.base + '/webhook', {
+        method: 'POST', headers: { 'content-type': 'application/json',
+          ...(signature === undefined ? {} : { 'x-hub-signature-256': signature }) }, body,
+      });
+      assert.equal((await post()).status, 401);
+      assert.equal((await post('sha256=' + '0'.repeat(64))).status, 401);
+      assert.equal((await post(sign(JSON.stringify(JSON.parse(body))))).status, 401);
+      assert.equal(events.length, 0, 'unsigned or altered requests never publish events');
+      assert.equal((await post(sign(body))).status, 200);
+      assert.equal(events.length, 1);
+      assert.equal((events[0] as { account: string }).account, 'default');
+      assert.equal((await originalFetch(listening.base + '/webhook?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=challenge')).status, 200);
+      accounts.get('default')!.config.appSecret = '';
+      assert.equal((await post(sign(body))).status, 503, 'missing app secret never permits unsigned delivery');
+      assert.equal(events.length, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    }
+  });
+}
 
 test('registry app isolates account listing and keeps OAuth routes before account authorization', async () => {
   const file = join(mkdtempSync(join(tmpdir(), 'ig-registry-app-')), 'accounts.json');
