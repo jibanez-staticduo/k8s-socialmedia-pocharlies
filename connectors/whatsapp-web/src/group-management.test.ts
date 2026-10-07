@@ -17,6 +17,7 @@
 import './test-env';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import express from 'express';
@@ -36,6 +37,8 @@ import { resetChatStateForTests } from './chat-state';
 import { resetDurableStoreStateForTests } from './durable-message-store';
 import { createRouter } from './api/controller';
 import { generateHMACSignature } from './api/auth';
+
+process.env.SOCIAL_ACCOUNTS_FILE = fileURLToPath(new URL('./group-accounts.fixture.json', import.meta.url));
 
 interface QueryCall {
   sql: string;
@@ -397,7 +400,7 @@ test('group state: our row found by LID or PN, participants with phone / lid, fr
     {},
     { meta: () => groupMeta({ selfAdmin: 'admin', restrict: false, announce: true }) }
   );
-  priv(client).contactNames.set('222@lid', 'Bea');
+  priv(client).contactNames.set('222@lid', { name: 'Bea', source: 'saved' });
   const state = await client.getGroupState(`professional:${GROUP}`);
   await client.getGroupState(GROUP);
   assert.deepEqual(calls.metadata, [GROUP, GROUP], 'forced, never the cache');

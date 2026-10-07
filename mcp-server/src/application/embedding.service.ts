@@ -1,6 +1,8 @@
 import OpenAI from 'openai';
 import { Pool } from 'pg';
 import pino from 'pino';
+import { isWhatsAppUpdate } from '../domain/whatsapp-surface';
+import { embeddingConfig } from './embedding-config';
 
 export interface MessageChunk {
   messageId: string;
@@ -18,8 +20,9 @@ export class EmbeddingService {
 
   constructor(openaiApiKey: string, dbClient: Pool, _encryptionKey: string) {
     const baseURL = process.env.EMBEDDING_BASE_URL || undefined;
-    this.EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-small';
-    this.EMBEDDING_DIMENSION = parseInt(process.env.EMBEDDING_DIMENSION || '1536', 10);
+    const config = embeddingConfig();
+    this.EMBEDDING_MODEL = config.model;
+    this.EMBEDDING_DIMENSION = config.dimensions;
     this.openai = new OpenAI({
       apiKey: openaiApiKey || 'not-needed',
       baseURL,
@@ -137,9 +140,15 @@ export class EmbeddingService {
         });
 
         for (let j = 0; j < batch.length; j++) {
+          const embedding = response.data[j]?.embedding;
+          if (!embedding || embedding.length !== this.EMBEDDING_DIMENSION) {
+            throw new Error(
+              `Embedding has ${embedding?.length ?? 0} dimensions; expected ${this.EMBEDDING_DIMENSION} for ${this.EMBEDDING_MODEL}`
+            );
+          }
           results.push({
             ...batch[j],
-            embedding: response.data[j].embedding,
+            embedding,
           });
         }
 
@@ -157,7 +166,7 @@ export class EmbeddingService {
 
   /**
    * Stores embeddings in the database
-   * Note: message_embeddings table has: id(serial), message_id(bigint), embedding(vector(384)), model(text), created_at
+   * The configured vector width must match the database column.
    */
   async storeEmbeddings(chunks: MessageChunk[]): Promise<void> {
     for (const chunk of chunks) {
@@ -184,7 +193,7 @@ export class EmbeddingService {
   async processMessage(messageId: string): Promise<void> {
     try {
       const result = await this.dbClient.query(
-        `SELECT id, content, conversation_id FROM messages WHERE id = $1`,
+        `SELECT id, content, conversation_id, platform FROM messages WHERE id = $1`,
         [messageId]
       );
 
@@ -194,6 +203,7 @@ export class EmbeddingService {
       }
 
       const row = result.rows[0];
+      if (row.platform === 'whatsapp' && isWhatsAppUpdate(row.conversation_id)) return;
       const content = row.content;
 
       if (!content) {
