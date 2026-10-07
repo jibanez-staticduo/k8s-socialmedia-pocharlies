@@ -1,3 +1,4 @@
+import { describeError } from './error-text';
 import { inTransaction } from './db-transaction';
 import type { Pool } from 'pg';
 import { normalizeMessageContent, proto } from '@whiskeysockets/baileys';
@@ -893,10 +894,6 @@ export async function adoptPayloadTimestampShape(): Promise<void> {
     }
   }
   payloadShape = hasMs && hasTs ? 'both' : hasMs ? 'ms' : 'ts';
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isUndefinedTable(error: unknown): boolean {

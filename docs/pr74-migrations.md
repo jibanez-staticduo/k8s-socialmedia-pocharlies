@@ -80,6 +80,10 @@ no production mounts, and the Node 22 tooling container:
   BIGINT IDs, merge/undo with chat state and reactions/polls/events, production's
   four send states, legacy NAS send attempts, safe dimension changes, and the
   released NAS checksum ledger upgrade.
+- `DATABASE_URL=<disposable> corepack pnpm --filter @mcp-socialmedia/connector exec tsx src/statuses.postgres.mjs`:
+  10 PostgreSQL cases cover channel/account isolation, deleted and superseded
+  posts, client/server aliases, locale-independent keyset pagination, unique
+  channel counts, and legacy fallback. Fixtures run in a rolled-back transaction.
 
 No production migration or deployment is part of this validation. Real upstream
 production data was not sampled; the production fixture reproduces its released

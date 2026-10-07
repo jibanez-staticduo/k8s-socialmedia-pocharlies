@@ -21,7 +21,6 @@ import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import express from 'express';
-import pg from 'pg';
 import { BaileysClient, BaileysClientOptions } from './baileys-client';
 import {
   GroupActionError,
@@ -37,40 +36,11 @@ import { resetChatStateForTests } from './chat-state';
 import { resetDurableStoreStateForTests } from './durable-message-store';
 import { createRouter } from './api/controller';
 import { generateHMACSignature } from './api/auth';
+import { stubPool } from './test-support/pool-stub';
 
-process.env.SOCIAL_ACCOUNTS_FILE = fileURLToPath(new URL('./group-accounts.fixture.json', import.meta.url));
-
-interface QueryCall {
-  sql: string;
-  params: unknown[];
-}
-
-type Rows = Record<string, unknown>[];
-
-function stubPool(route: (sql: string, params: unknown[]) => Rows = () => []): {
-  calls: QueryCall[];
-  restore: () => void;
-} {
-  const calls: QueryCall[] = [];
-  const original = pg.Pool.prototype.query;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (pg.Pool.prototype as any).query = function (sql: string, params: unknown[] = []) {
-    calls.push({ sql, params });
-    try {
-      const rows = route(sql, params);
-      return Promise.resolve({ rows, rowCount: rows.length });
-    } catch (error) {
-      return Promise.reject(error);
-    }
-  };
-  return {
-    calls,
-    restore: () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (pg.Pool.prototype as any).query = original;
-    },
-  };
-}
+process.env.SOCIAL_ACCOUNTS_FILE = fileURLToPath(
+  new URL('./group-accounts.fixture.json', import.meta.url)
+);
 
 function useAccount(account: string): void {
   process.env.CONNECTOR_ACCOUNT = account;

@@ -606,6 +606,34 @@ function accountRestrictedFallback(
   };
 }
 
+function requiredStructuredChat(body: Record<string, unknown>, res: Response): string | null {
+  const chatId = optionalString(body.conversationId ?? body.chatId);
+  if (chatId) return chatId;
+  res.status(400).json({ error: 'Missing conversationId', failureClass: 'invalid_request' });
+  return null;
+}
+
+function validResultIds(
+  chatId: string | undefined,
+  ids: unknown[],
+  res: Response
+): ids is string[] {
+  if (
+    chatId &&
+    ids.length &&
+    ids.length <= 50 &&
+    ids.every(id => typeof id === 'string' && id.trim() && id.length <= 512)
+  )
+    return true;
+  res
+    .status(400)
+    .json({
+      error: 'conversationId and 1 to 50 message IDs are required',
+      failureClass: 'invalid_request',
+    });
+  return false;
+}
+
 function optionalString(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
   const text = String(value).trim();
@@ -1594,13 +1622,8 @@ export function createRouter(
       let attempt: IdempotentSend | null = null;
       try {
         const body = optionalObject(req.body);
-        const chatId = optionalString(body.conversationId ?? body.chatId);
-        if (!chatId) {
-          res
-            .status(400)
-            .json({ error: 'Missing conversationId', failureClass: 'invalid_request' });
-          return;
-        }
+        const chatId = requiredStructuredChat(body, res);
+        if (!chatId) return;
         const poll = validatePollInput({
           name: body.name,
           options: body.options ?? body.values,
@@ -1676,18 +1699,7 @@ export function createRouter(
         const chatId = optionalString(body.conversationId ?? body.chatId);
         if (Array.isArray(body.pollMessageIds)) {
           const ids = body.pollMessageIds;
-          if (
-            !chatId ||
-            !ids.length ||
-            ids.length > 50 ||
-            ids.some(id => typeof id !== 'string' || !id.trim() || id.length > 512)
-          ) {
-            res.status(400).json({
-              error: 'conversationId and 1 to 50 message IDs are required',
-              failureClass: 'invalid_request',
-            });
-            return;
-          }
+          if (!validResultIds(chatId, ids, res) || !chatId) return;
           const entries = await client.getPollResults(chatId, ids as string[]);
           res.json({ ok: true, polls: entries });
           return;
@@ -1713,13 +1725,8 @@ export function createRouter(
       let attempt: IdempotentSend | null = null;
       try {
         const body = optionalObject(req.body);
-        const chatId = optionalString(body.conversationId ?? body.chatId);
-        if (!chatId) {
-          res
-            .status(400)
-            .json({ error: 'Missing conversationId', failureClass: 'invalid_request' });
-          return;
-        }
+        const chatId = requiredStructuredChat(body, res);
+        if (!chatId) return;
         const event = validateEventInput({
           ...body,
           startTime: body.startTime ?? body.startDate,
@@ -1793,18 +1800,7 @@ export function createRouter(
         const chatId = optionalString(body.conversationId ?? body.chatId);
         if (Array.isArray(body.eventMessageIds)) {
           const ids = body.eventMessageIds;
-          if (
-            !chatId ||
-            !ids.length ||
-            ids.length > 50 ||
-            ids.some(id => typeof id !== 'string' || !id.trim() || id.length > 512)
-          ) {
-            res.status(400).json({
-              error: 'conversationId and 1 to 50 message IDs are required',
-              failureClass: 'invalid_request',
-            });
-            return;
-          }
+          if (!validResultIds(chatId, ids, res) || !chatId) return;
           const entries = await client.getEventResults(chatId, ids as string[]);
           res.json({ ok: true, events: entries });
           return;
@@ -2440,13 +2436,8 @@ export function createRouter(
     void (async () => {
       try {
         const body = optionalObject(req.body);
-        const chatId = optionalString(body.conversationId ?? body.chatId);
-        if (!chatId) {
-          res
-            .status(400)
-            .json({ error: 'Missing conversationId', failureClass: 'invalid_request' });
-          return;
-        }
+        const chatId = requiredStructuredChat(body, res);
+        if (!chatId) return;
         if (rejectWhenDisconnected(client, res)) return;
         res.json({ presence: await client.getPresence(chatId, body.participant) });
       } catch (e) {
@@ -2590,13 +2581,8 @@ export function createRouter(
     void (async () => {
       try {
         const body = optionalObject(req.body);
-        const chatId = optionalString(body.conversationId ?? body.chatId);
-        if (!chatId) {
-          res
-            .status(400)
-            .json({ error: 'Missing conversationId', failureClass: 'invalid_request' });
-          return;
-        }
+        const chatId = requiredStructuredChat(body, res);
+        if (!chatId) return;
         const expiration = parseDisappearingExpiration(body.expiration);
         if (rejectWhenSendingDisabled(res)) return;
         if (rejectWhenDisconnected(client, res)) return;
@@ -2770,13 +2756,8 @@ export function createRouter(
       let attempt: IdempotentSend | null = null;
       try {
         const body = optionalObject(req.body);
-        const chatId = optionalString(body.conversationId ?? body.chatId);
-        if (!chatId) {
-          res
-            .status(400)
-            .json({ error: 'Missing conversationId', failureClass: 'invalid_request' });
-          return;
-        }
+        const chatId = requiredStructuredChat(body, res);
+        if (!chatId) return;
         const cards = parseShareContactRequest(body);
         const begun = await beginStructuredSend(client, req, res, () =>
           structuredRequestHash('contact-share', chatId, cards)
@@ -3075,50 +3056,6 @@ export function createRouter(
       }
     })();
   });
-
-  for (const [path, kind] of [
-    ['/messages/sticker', 'sticker'],
-    ['/messages/gif', 'gif'],
-  ] as const) {
-    router.post(path, auth, (req: AuthenticatedRequest, res: Response): void => {
-      void (async () => {
-        try {
-          if (!sendingAllowed(res)) return;
-          const body = (req.body || {}) as {
-            conversationId?: string;
-            fileUrl?: string;
-            caption?: string;
-            fileName?: string;
-            replyTo?: string;
-            viewOnce?: boolean;
-          };
-          if (!body.conversationId || !body.fileUrl)
-            throw new CapabilityError(
-              'INVALID_CAPABILITY_INPUT',
-              'conversationId and fileUrl are required'
-            );
-          if (body.viewOnce !== undefined && typeof body.viewOnce !== 'boolean')
-            throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'viewOnce must be a boolean');
-          // These routes are sticker and GIF by definition; WhatsApp offers
-          // no play-once sticker or GIF.
-          if (body.viewOnce === true)
-            throw new CapabilityError(
-              'INVALID_CAPABILITY_INPUT',
-              'viewOnce is only supported for image and video messages'
-            );
-          const messageId = await client.sendFile(body.conversationId, body.fileUrl, body.caption, {
-            asSticker: kind === 'sticker',
-            asGif: kind === 'gif',
-            fileName: optionalString(body.fileName),
-            replyToMessageId: optionalString(body.replyTo),
-          });
-          res.json({ ok: true, messageId, sent: true, kind });
-        } catch (error) {
-          capabilityErrorResponse(res, error);
-        }
-      })();
-    });
-  }
 
   // Forward message
   // CONTRACT: http.whatsapp-connector.messages-forward.v1 — body, {forwarded, messageId}, 404 message_unavailable

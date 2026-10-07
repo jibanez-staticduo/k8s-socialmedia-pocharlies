@@ -1,3 +1,4 @@
+import { describeError } from './error-text';
 /**
  * WhatsApp message reactions (fase 3 / PR-4, ported from the NAS fork's
  * storeMessageReaction and adapted to the multiaccount model) — the DB side.
@@ -58,10 +59,6 @@ let missingTableLogged = false;
 export function resetReactionStoreStateForTests(): void {
   tableMissingUntil = 0;
   missingTableLogged = false;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /** true → skip the DB entirely (table known missing, re-probe not due yet). */

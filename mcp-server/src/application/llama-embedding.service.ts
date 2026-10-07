@@ -3,12 +3,8 @@ import { decryptString } from '@mcp-socialmedia/shared';
 import { LlamaService } from './llama.service';
 import pino from 'pino';
 
-export interface MessageChunk {
-  messageId: string;
-  chunkIndex: number;
-  content: string;
-  embedding?: number[];
-}
+import { generateEmbeddingBatches, storeEmbeddingChunks, MessageChunk } from './embedding-batches';
+export type { MessageChunk } from './embedding-batches';
 
 /**
  * Embedding service using local Llama/Ollama models
@@ -125,70 +121,40 @@ export class LlamaEmbeddingService {
    * Generates embeddings for message chunks using local Ollama
    */
   async generateEmbeddings(chunks: MessageChunk[]): Promise<MessageChunk[]> {
-    if (chunks.length === 0) {
-      return [];
-    }
-
-    try {
-      const results: MessageChunk[] = [];
-
-      // Process in smaller batches to avoid overwhelming the local server
-      const batchSize = 10;
-
-      for (let i = 0; i < chunks.length; i += batchSize) {
-        const batch = chunks.slice(i, i + batchSize);
-
+    return generateEmbeddingBatches(
+      chunks,
+      10,
+      async batch => {
+        const generated: MessageChunk[] = [];
         for (const chunk of batch) {
           try {
             const embedding = await this.llamaService.generateEmbedding(chunk.content);
-            results.push({
-              ...chunk,
-              embedding,
-            });
+            generated.push({ ...chunk, embedding });
           } catch (error) {
             this.logger.error(`Error generating embedding for chunk: ${error}`);
-            // Continue with other chunks
           }
         }
-
-        // Small delay between batches
-        if (i + batchSize < chunks.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-
-      return results;
-    } catch (error) {
-      this.logger.error(`Error generating embeddings: ${error}`);
-      throw error;
-    }
+        return generated;
+      },
+      this.logger
+    );
   }
 
   /**
    * Stores embeddings in the database
    */
   async storeEmbeddings(chunks: MessageChunk[]): Promise<void> {
-    for (const chunk of chunks) {
-      if (!chunk.embedding) {
-        continue;
-      }
-
-      try {
-        await this.dbClient.query(
+    await storeEmbeddingChunks(
+      chunks,
+      (chunk, vector) =>
+        this.dbClient.query(
           `INSERT INTO message_embeddings (id, message_id, embedding, model, chunk_index, created_at)
-           VALUES (gen_random_uuid(), $1, $2::vector, $3, $4, NOW())
-           ON CONFLICT DO NOTHING`,
-          [
-            chunk.messageId,
-            `[${chunk.embedding.join(',')}]`, // Convert array to pgvector format
-            this.EMBEDDING_MODEL,
-            chunk.chunkIndex,
-          ]
-        );
-      } catch (error) {
-        this.logger.error(`Error storing embedding for message ${chunk.messageId}: ${error}`);
-      }
-    }
+       VALUES (gen_random_uuid(), $1, $2::vector, $3, $4, NOW())
+       ON CONFLICT DO NOTHING`,
+          [chunk.messageId, vector, this.EMBEDDING_MODEL, chunk.chunkIndex]
+        ),
+      this.logger
+    );
   }
 
   /**

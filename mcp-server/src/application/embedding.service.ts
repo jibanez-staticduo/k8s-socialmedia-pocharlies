@@ -4,12 +4,8 @@ import pino from 'pino';
 import { isWhatsAppUpdate } from '../domain/whatsapp-surface';
 import { embeddingConfig } from './embedding-config';
 
-export interface MessageChunk {
-  messageId: string;
-  chunkIndex: number;
-  content: string;
-  embedding?: number[];
-}
+import { generateEmbeddingBatches, storeEmbeddingChunks, MessageChunk } from './embedding-batches';
+export type { MessageChunk } from './embedding-batches';
 
 export class EmbeddingService {
   private openai: OpenAI;
@@ -121,47 +117,27 @@ export class EmbeddingService {
    * Generates embeddings for message chunks
    */
   async generateEmbeddings(chunks: MessageChunk[]): Promise<MessageChunk[]> {
-    if (chunks.length === 0) {
-      return [];
-    }
-
-    try {
-      const batchSize = 100;
-      const results: MessageChunk[] = [];
-
-      for (let i = 0; i < chunks.length; i += batchSize) {
-        const batch = chunks.slice(i, i + batchSize);
-        const texts = batch.map(chunk => chunk.content);
-
+    return generateEmbeddingBatches(
+      chunks,
+      100,
+      async batch => {
         const response = await this.openai.embeddings.create({
           model: this.EMBEDDING_MODEL,
-          input: texts,
+          input: batch.map(chunk => chunk.content),
           encoding_format: 'float',
         });
-
-        for (let j = 0; j < batch.length; j++) {
-          const embedding = response.data[j]?.embedding;
+        return batch.map((chunk, index) => {
+          const embedding = response.data[index]?.embedding;
           if (!embedding || embedding.length !== this.EMBEDDING_DIMENSION) {
             throw new Error(
               `Embedding has ${embedding?.length ?? 0} dimensions; expected ${this.EMBEDDING_DIMENSION} for ${this.EMBEDDING_MODEL}`
             );
           }
-          results.push({
-            ...batch[j],
-            embedding,
-          });
-        }
-
-        if (i + batchSize < chunks.length) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-
-      return results;
-    } catch (error) {
-      this.logger.error(`Error generating embeddings: ${error}`);
-      throw error;
-    }
+          return { ...chunk, embedding };
+        });
+      },
+      this.logger
+    );
   }
 
   /**
@@ -169,22 +145,17 @@ export class EmbeddingService {
    * The configured vector width must match the database column.
    */
   async storeEmbeddings(chunks: MessageChunk[]): Promise<void> {
-    for (const chunk of chunks) {
-      if (!chunk.embedding) {
-        continue;
-      }
-
-      try {
-        await this.dbClient.query(
+    await storeEmbeddingChunks(
+      chunks,
+      (chunk, vector) =>
+        this.dbClient.query(
           `INSERT INTO message_embeddings (message_id, embedding, model, created_at)
-           VALUES ($1, $2::vector, $3, NOW())
-           ON CONFLICT DO NOTHING`,
-          [chunk.messageId, `[${chunk.embedding.join(',')}]`, this.EMBEDDING_MODEL]
-        );
-      } catch (error) {
-        this.logger.error(`Error storing embedding for message ${chunk.messageId}: ${error}`);
-      }
-    }
+       VALUES ($1, $2::vector, $3, NOW())
+       ON CONFLICT DO NOTHING`,
+          [chunk.messageId, vector, this.EMBEDDING_MODEL]
+        ),
+      this.logger
+    );
   }
 
   /**

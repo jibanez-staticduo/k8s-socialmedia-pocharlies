@@ -2001,21 +2001,7 @@ export class BaileysClient extends EventEmitter {
             }).catch(() => {})
           );
         }
-        // Persist real unread + archived from the history snapshot.
-        const archived = typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined;
-        void setConversationState(norm, c.unreadCount || 0, archived).catch(() => {});
-        void upsertChatState(norm, {
-          ...(archived === undefined ? {} : { archived }),
-          ...(pinned === undefined ? {} : { pinned }),
-          unreadCount: c.unreadCount || 0,
-        }).catch(() => {});
-        // Pin / mute (fase 3 / PR-5): only what the snapshot says.
-        void recordInboundChatState(norm, {
-          pinnedAt: pinFromBaileys(c),
-          mute: muteFromBaileys(c, 'snapshot'),
-        });
-        // Disappearing timer (fase 3 / PR-8): never over a newer one.
-        void recordInboundEphemeral(norm, ephemeralFromBaileys(c, 'snapshot'));
+        this.persistChatSnapshotState(norm, c, pinned);
       }
       // A history snapshot carries saved contact names independently of chat
       // titles. Persist them before messages can recreate an older title.
@@ -2141,19 +2127,7 @@ export class BaileysClient extends EventEmitter {
             authoritative: !!isJidGroup(c.id) || !!this.savedContactNameFor(c.id, norm),
           }).catch(() => {});
         }
-        // Persist real unread badge + archived flag (fire-and-forget).
-        const archived = typeof (c as any).archived === 'boolean' ? (c as any).archived : undefined;
-        void setConversationState(norm, c.unreadCount || 0, archived).catch(() => {});
-        void upsertChatState(norm, {
-          ...(archived === undefined ? {} : { archived }),
-          ...(pinned === undefined ? {} : { pinned }),
-          unreadCount: c.unreadCount || 0,
-        }).catch(() => {});
-        void recordInboundChatState(norm, {
-          pinnedAt: pinFromBaileys(c),
-          mute: muteFromBaileys(c, 'snapshot'),
-        });
-        void recordInboundEphemeral(norm, ephemeralFromBaileys(c, 'snapshot'));
+        this.persistChatSnapshotState(norm, c, pinned);
         // Subscribe to presence so we get typing updates for this chat.
         void this.presenceSubscribeSilent(c.id);
       }
@@ -2328,6 +2302,26 @@ export class BaileysClient extends EventEmitter {
         void recordInboundGroup('update', update);
       }
     });
+  }
+
+  private persistChatSnapshotState(
+    normalizedId: string,
+    chat: { unreadCount?: number | null; archived?: unknown },
+    pinned: boolean | undefined
+  ): void {
+    const archived = typeof chat.archived === 'boolean' ? chat.archived : undefined;
+    const unreadCount = chat.unreadCount || 0;
+    void setConversationState(normalizedId, unreadCount, archived).catch(() => {});
+    void upsertChatState(normalizedId, {
+      ...(archived === undefined ? {} : { archived }),
+      ...(pinned === undefined ? {} : { pinned }),
+      unreadCount,
+    }).catch(() => {});
+    void recordInboundChatState(normalizedId, {
+      pinnedAt: pinFromBaileys(chat),
+      mute: muteFromBaileys(chat, 'snapshot'),
+    });
+    void recordInboundEphemeral(normalizedId, ephemeralFromBaileys(chat, 'snapshot'));
   }
 
   private mergeContactAliases(ids: string[]): Set<string> {

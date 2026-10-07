@@ -607,14 +607,16 @@ export interface ChannelPostList {
  * The channel conversations of this account (namespaced ids), all of them or
  * one. From `conversations` (a few thousand rows), never a scan of messages.
  */
-async function channelConversationIds(channelId?: string): Promise<string[]> {
-  const result = await getPool().query(
-    `SELECT id FROM conversations
+async function channelConversations(
+  channelId?: string
+): Promise<{ id: string; external_id?: string }[]> {
+  const result = await getPool().query<{ id: string; external_id?: string }>(
+    `SELECT id, external_id FROM conversations
       WHERE account_id = $1 AND merged_into IS NULL
         AND ${channelId ? 'external_id = $2' : "external_id LIKE '%@newsletter'"}`,
     channelId ? [whatsappAccountId(), channelId] : [whatsappAccountId()]
   );
-  return result.rows.map(row => String(row.id));
+  return result.rows;
 }
 
 /**
@@ -626,7 +628,8 @@ async function legacyChannelPosts(
   query: ChannelPostsQuery,
   isolatedStore = true
 ): Promise<ChannelPostList & { channelIds: string[] }> {
-  const ids = await channelConversationIds(query.channelId);
+  const conversations = await channelConversations(query.channelId);
+  const ids = conversations.map(row => String(row.id));
   if (!ids.length) return { posts: [], nextCursor: null, channels: 0, channelIds: [] };
   const params: unknown[] = [ids];
   const filters = ['m.conversation_id = ANY($1::text[])', "m.platform = 'whatsapp'"];
@@ -634,11 +637,11 @@ async function legacyChannelPosts(
     params.push(query.cursor.at, accountKey(query.cursor.messageId));
     if (query.cursor.channelId) {
       params.push(query.cursor.channelId);
-      filters.push(`(m.wa_timestamp, m.wa_message_id, c.external_id) <
-        ($${params.length - 2}::timestamptz, $${params.length - 1}::text, $${params.length}::text)`);
+      filters.push(`(m.wa_timestamp, m.wa_message_id COLLATE "C", c.external_id COLLATE "C") <
+        ($${params.length - 2}::timestamptz, $${params.length - 1}::text COLLATE "C", $${params.length}::text COLLATE "C")`);
     } else {
-      filters.push(`(m.wa_timestamp, m.wa_message_id) <
-        ($${params.length - 1}::timestamptz, $${params.length}::text)`);
+      filters.push(`(m.wa_timestamp, m.wa_message_id COLLATE "C") <
+        ($${params.length - 1}::timestamptz, $${params.length}::text COLLATE "C")`);
     }
   }
   params.push(query.limit + 1);
@@ -659,11 +662,12 @@ async function legacyChannelPosts(
             ? `AND NOT EXISTS (
           SELECT 1 FROM whatsapp_novedades_messages n
           WHERE n.account = c.account AND n.channel_jid = c.external_id
-            AND n.message_id = regexp_replace(m.wa_message_id, '^[^:]+:', '')
+            AND regexp_replace(m.wa_message_id, '^[^:]+:', '') IN
+              (n.message_id, n.server_id, n.client_id)
         )`
             : ''
         }
-      ORDER BY m.wa_timestamp DESC, m.wa_message_id DESC, c.external_id DESC
+      ORDER BY m.wa_timestamp DESC, m.wa_message_id COLLATE "C" DESC, c.external_id COLLATE "C" DESC
       LIMIT $${params.length}`,
       params
     )
@@ -702,7 +706,7 @@ async function legacyChannelPosts(
           })
         : null,
     channels: ids.length,
-    channelIds: ids.map(stripAccountKey),
+    channelIds: conversations.map(row => row.external_id || stripAccountKey(row.id)),
   };
 }
 
@@ -737,9 +741,9 @@ export async function listChannelPosts(query: ChannelPostsQuery): Promise<Channe
        WHERE n.account = $1 AND ($2::text IS NULL OR n.channel_jid = $2)
          AND n.visibility = 'visible' AND NOT n.is_deleted AND n.superseded_by IS NULL
          AND n.message_timestamp_ms IS NOT NULL
-         AND ($3::bigint IS NULL OR (n.message_timestamp_ms, n.message_id, n.channel_jid) <
-              ($3::bigint, $4::text, $5::text))
-       ORDER BY n.message_timestamp_ms DESC, n.message_id DESC, n.channel_jid DESC LIMIT $6`,
+         AND ($3::bigint IS NULL OR (n.message_timestamp_ms, n.message_id COLLATE "C", n.channel_jid COLLATE "C") <
+              ($3::bigint, $4::text COLLATE "C", $5::text COLLATE "C"))
+       ORDER BY n.message_timestamp_ms DESC, n.message_id COLLATE "C" DESC, n.channel_jid COLLATE "C" DESC LIMIT $6`,
       [
         account,
         query.channelId ?? null,

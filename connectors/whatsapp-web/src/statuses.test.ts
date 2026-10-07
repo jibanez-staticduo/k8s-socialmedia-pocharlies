@@ -588,7 +588,7 @@ test('channel posts: channels from conversations, posts from messages, names onl
       ['professional:111@newsletter', 'professional:222@newsletter'],
       2,
     ]);
-    assert.match(posts.sql, /ORDER BY m\.wa_timestamp DESC, m\.wa_message_id DESC/);
+    assert.match(posts.sql, /ORDER BY m\.wa_timestamp DESC, m\.wa_message_id COLLATE "C" DESC/);
     assert.equal(list.channels, 2);
     assert.deepEqual(list.posts, [
       {
@@ -705,7 +705,7 @@ test('channel feed filters authoritative isolated tombstones before limiting leg
     if (/FROM messages m\s+JOIN conversations c/.test(sql)) {
       assert.match(sql, /NOT EXISTS \(\s+SELECT 1 FROM whatsapp_novedades_messages n/);
       assert.match(sql, /n\.account = c\.account AND n\.channel_jid = c\.external_id/);
-      assert.match(sql, /n\.message_id = regexp_replace\(m\.wa_message_id/);
+      assert.match(sql, /regexp_replace\(m\.wa_message_id.* IN/);
       return [
         {
           wa_message_id: 'professional:OLDER',

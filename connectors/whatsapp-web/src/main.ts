@@ -60,6 +60,12 @@ process.on('uncaughtException', error => {
   process.exit(1);
 });
 
+const logCallerIdentity: import('express').RequestHandler = (req, _res, next) => {
+  const sub = req.headers['x-user-sub'];
+  if (typeof sub === 'string' && sub) console.log(`API request carries x-user-sub=${sub}`);
+  next();
+};
+
 async function main(): Promise<void> {
   // SC-705 phase 1.5: per-user sessions are keyed by the caller's Keycloak
   // `sub` (CREDENTIAL_SESSION_KEY = `<sub>` or `<sub>:<cuenta>`). The house
@@ -80,11 +86,7 @@ async function main(): Promise<void> {
   // (`x-user-sub`, from the gateway JWT) on every connector call. Phase 1.5
   // logs it (observable proof the header traverses gateway→mcp-server→
   // connector); the phase-2 per-sub client pool will route on it.
-  app.use('/api/v1', (req, _res, next) => {
-    const sub = req.headers['x-user-sub'];
-    if (typeof sub === 'string' && sub) console.log(`API request carries x-user-sub=${sub}`);
-    next();
-  });
+  app.use('/api/v1', logCallerIdentity);
   app.use('/api/v1', createRouter(client, qrHandler, CONNECTOR_SHARED_SECRET));
 
   app.get('/', (_req, res) => {

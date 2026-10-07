@@ -513,93 +513,16 @@ export async function reserveEventCreationSend(input: {
   return reserveAdapter(input.token, hash);
 }
 
-export async function reserveMediaSend(input: {
-  quality?: MediaQuality;
-  token: string;
-  conversationId: string;
-  fileUrl: string;
-  fileName?: string;
-  caption?: string;
-  asSticker: boolean;
-  asGif: boolean;
-  replyToMessageId?: string;
-  sourceDigest?: string;
-  sourceMimeType?: string;
-  /** Replay protection for play-once media: the same bytes replayed without
-   * the flag (or vice versa) are a different message. The marker is appended
-   * only when true so every pre-existing fingerprint stays byte-identical. */
-  viewOnce?: boolean;
-}): Promise<AdapterSendReservation> {
-  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
-    throw new Error('Invalid sourceDigest');
-  if (
-    input.sourceMimeType !== undefined &&
-    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
-  )
-    throw new Error('Invalid sourceMimeType');
-  if (input.sourceDigest && !input.sourceMimeType)
-    throw new Error('sourceMimeType is required with sourceDigest');
-  const quality = parseMediaQuality(input.quality);
-  const dataHeader = input.fileUrl.match(/^data:([^,]*),/i)?.[1];
-  const outputMimeType =
-    dataHeader
-      ?.replace(/;base64$/i, '')
-      .trim()
-      .toLowerCase() || null;
-  const sourceMimeType = input.sourceMimeType?.trim().toLowerCase() || outputMimeType;
-  const requestHash = createHash('sha256')
-    .update(
-      JSON.stringify([
-        'media',
-        input.conversationId,
-        input.fileName || null,
-        input.caption || null,
-        input.asSticker,
-        input.asGif,
-        input.replyToMessageId || null,
-        outputMimeType,
-        sourceMimeType,
-        // Preserve existing source reservations across upgrades.
-        ...(quality === 'source' ? [] : [quality]),
-        ...(input.viewOnce === true ? ['viewOnce'] : []),
-      ])
-    )
-    .update('\0')
-    .update(input.sourceDigest || input.fileUrl)
-    .digest('hex');
-  return reserveAdapter(input.token, requestHash);
+export async function reserveMediaSend(
+  input: MediaSourceInput & { token: string }
+): Promise<AdapterSendReservation> {
+  return reserveAdapter(input.token, mediaSourceRequestHash(input));
 }
 
-export async function reserveVoiceSend(input: {
-  token: string;
-  conversationId: string;
-  audioBase64: string;
-  mimeType: string;
-  sourceDigest?: string;
-  sourceMimeType?: string;
-}): Promise<AdapterSendReservation> {
-  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
-    throw new Error('Invalid sourceDigest');
-  if (
-    input.sourceMimeType !== undefined &&
-    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
-  )
-    throw new Error('Invalid sourceMimeType');
-  if (input.sourceDigest && !input.sourceMimeType)
-    throw new Error('sourceMimeType is required with sourceDigest');
-  const requestHash = createHash('sha256')
-    .update(
-      JSON.stringify([
-        'voice',
-        input.conversationId,
-        input.mimeType.toLowerCase(),
-        input.sourceMimeType?.trim().toLowerCase() || input.mimeType.toLowerCase(),
-      ])
-    )
-    .update('\0')
-    .update(input.sourceDigest || input.audioBase64)
-    .digest('hex');
-  return reserveAdapter(input.token, requestHash);
+export async function reserveVoiceSend(
+  input: VoiceSourceInput & { token: string }
+): Promise<AdapterSendReservation> {
+  return reserveAdapter(input.token, voiceSourceRequestHash(input));
 }
 
 async function reserveAdapter(key: string, requestHash: string): Promise<AdapterSendReservation> {
@@ -627,7 +550,19 @@ export async function claimReservedSend(key: string, messageId: string): Promise
 
 export const confirmTextSend = confirmSend;
 
-export function mediaSourceRequestHash(input: {
+function validateSourceMetadata(input: { sourceDigest?: string; sourceMimeType?: string }): void {
+  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
+    throw new Error('Invalid sourceDigest');
+  if (
+    input.sourceMimeType !== undefined &&
+    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
+  )
+    throw new Error('Invalid sourceMimeType');
+  if (input.sourceDigest && !input.sourceMimeType)
+    throw new Error('sourceMimeType is required with sourceDigest');
+}
+
+interface MediaSourceInput {
   quality?: MediaQuality;
   conversationId: string;
   fileUrl: string;
@@ -642,16 +577,10 @@ export function mediaSourceRequestHash(input: {
    * the flag (or vice versa) are a different message. The marker is appended
    * only when true so every pre-existing fingerprint stays byte-identical. */
   viewOnce?: boolean;
-}): string {
-  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
-    throw new Error('Invalid sourceDigest');
-  if (
-    input.sourceMimeType !== undefined &&
-    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
-  )
-    throw new Error('Invalid sourceMimeType');
-  if (input.sourceDigest && !input.sourceMimeType)
-    throw new Error('sourceMimeType is required with sourceDigest');
+}
+
+export function mediaSourceRequestHash(input: MediaSourceInput): string {
+  validateSourceMetadata(input);
   const quality = parseMediaQuality(input.quality);
   const dataHeader = input.fileUrl.match(/^data:([^,]*),/i)?.[1];
   const outputMimeType =
@@ -683,22 +612,16 @@ export function mediaSourceRequestHash(input: {
   return requestHash;
 }
 
-export function voiceSourceRequestHash(input: {
+interface VoiceSourceInput {
   conversationId: string;
   audioBase64: string;
   mimeType: string;
   sourceDigest?: string;
   sourceMimeType?: string;
-}): string {
-  if (input.sourceDigest && !/^[a-f0-9]{64}$/i.test(input.sourceDigest))
-    throw new Error('Invalid sourceDigest');
-  if (
-    input.sourceMimeType !== undefined &&
-    (typeof input.sourceMimeType !== 'string' || !input.sourceMimeType.trim())
-  )
-    throw new Error('Invalid sourceMimeType');
-  if (input.sourceDigest && !input.sourceMimeType)
-    throw new Error('sourceMimeType is required with sourceDigest');
+}
+
+export function voiceSourceRequestHash(input: VoiceSourceInput): string {
+  validateSourceMetadata(input);
   const requestHash = createHash('sha256')
     .update(
       JSON.stringify([
