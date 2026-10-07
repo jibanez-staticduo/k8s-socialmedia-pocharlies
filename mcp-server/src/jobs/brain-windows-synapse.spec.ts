@@ -10,7 +10,7 @@ import {
   upsertEvents,
 } from './brain-windows-synapse';
 
-useTestAccounts({ whatsapp: { personal: 'http://wa', professional: 'http://wa-pro' } });
+useTestAccounts({ whatsapp: { personal: 'http://wa', professional: 'http://wa-pro', leila: 'http://wa-leila' } });
 
 const doc = (id: string, platform = 'telegram', content = 'hola'): BrainDoc => ({
   source_id: id,
@@ -22,6 +22,8 @@ describe('brain-windows-synapse', () => {
   it('maps accounts to Synapse tenants through their brain instance', () => {
     expect(tenantForAccount('personal')).toBe('family');
     expect(tenantForAccount('professional')).toBe('skirmshop');
+    // leila comparte la instancia personal y es de la familia, no de la tienda
+    expect(tenantForAccount('leila')).toBe('family');
   });
 
   it('rejects an account the registry does not know', () => {
