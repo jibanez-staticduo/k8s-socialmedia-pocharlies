@@ -2599,6 +2599,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         }
         return json(200, { confirmed: true, id, messageId: sent.messageId });
       }
+      // CONTRACT: http.whatsapp-app.hermes-stop.v1
       if (req.method === 'POST' && path === '/api/ai/stop') {
         const body = await bodyJSON(req); const a = accountFor(body.account);
         const conversation = await conversationFor(a, body.chat);

@@ -1774,3 +1774,19 @@ contracts:
     and the production migration 010 table; sendToken alone never deduplicates a legacy caller. Canonical
     production messageId input and voted response remain supported; app compatibility replies include
     ok, sent and messageId.'
+- id: http.whatsapp-app.hermes-stop.v1
+  kind: http-route
+  value: /api/ai/stop
+  role: provider
+  files:
+  - apps/whatsapp/server.mjs
+  status: active
+  note: 'POST from the authenticated WhatsApp app accepts account, chat, turnId and optional sessionId.
+    The account and conversation determine the session scope; a foreign sessionId returns 404 and
+    a missing turnId returns 400. It stops the existing Hermes run and returns 200 {stopped:true,
+    status, turnId} only after a confirmed result or an already settled turn. An unconfirmed submission
+    returns 502. On cancelled/interrupted, stop aborts the event stream, waits for the per-session
+    lock and rereads the latest saved history before settling cancellation, preserving the partial
+    assistant response and releasing the active run for the next turn. It never overwrites that
+    response with an older empty snapshot. The path, scoped identity, confirmation and history
+    preservation are contract.'
