@@ -920,7 +920,6 @@ contracts:
   role: provider
   files:
   - connectors/instagram/src/main.ts
-  - connectors/instagram/src/webhook-access.ts
   - connectors/instagram/src/webhook.ts
   status: active
   note: 'Meta webhook in registry and legacy environment account modes. POST requires
