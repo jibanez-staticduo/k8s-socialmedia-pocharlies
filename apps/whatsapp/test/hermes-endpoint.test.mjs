@@ -290,12 +290,19 @@ test('confirmed stop persists partial history and releases a stuck event stream 
   t.after(() => { try {controller?.close();} catch {} });
   const body = {...command, turnId: tokenOne};
   const response = await request(body);
+  let receiveDelta;
+  const deltaReceived = new Promise(resolve => {receiveDelta = resolve;});
+  const resultPending = readAgentStream(response, (event, payload) => {
+    if (event === 'delta') receiveDelta(payload.text);
+  });
   while (!controller) await new Promise(resolve => setImmediate(resolve));
   controller.enqueue(encoder.encode(runFrame('message.delta', {delta: 'Partial before cancel'})));
+  // Enqueueing upstream does not prove the app consumed the fragment before stop.
+  assert.equal(await deltaReceived, 'Partial before cancel');
   assert.equal((await request({...body, turnId: tokenTwo}, '/api/ai/stop')).status, 404);
   const stopped = await request(body, '/api/ai/stop');
   assert.deepEqual(await stopped.json(), {stopped: true, status: 'cancelled', turnId: tokenOne});
-  const result = await readAgentStream(response);
+  const result = await resultPending;
   assert.equal(result.cancelled, true);
   assert.equal(result.status, 'cancelled');
   const transcript = (await app.sessions.canonical('personal', 'contact', false)).messages;
