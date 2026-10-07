@@ -1791,3 +1791,14 @@ contracts:
     It never overwrites that
     response with an older empty snapshot. The path, scoped identity, confirmation and history
     preservation are contract.'
+- id: http.whatsapp-app.favicon.v1
+  kind: http-route
+  value: /favicon.ico
+  role: provider
+  files:
+  - apps/whatsapp/server.mjs
+  - apps/whatsapp/public/index.html
+  status: active
+  note: 'GET and HEAD are public before OIDC login and return 200 image/x-icon.
+    GET returns a multi-resolution ICO; HEAD has the same MIME and content length.
+    Query parameters may version the icon without changing the route.'

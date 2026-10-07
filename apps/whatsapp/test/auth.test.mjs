@@ -96,11 +96,14 @@ test('OIDC protects UI/API, validates signed callback claims, and creates an Htt
   const fixtureResult = await fixture(t);
   const { request } = fixtureResult;
   assert.equal((await request('/health')).status, 200);
-  for (const asset of ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']) {
+  for (const asset of ['/manifest.webmanifest', '/icon.svg', '/favicon.ico?v=dialogue-1', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']) {
     const response = await request(asset);
     assert.equal(response.status, 200, `${asset} must be readable before login for installation`);
     assert.equal((await request(asset, { method: 'HEAD' })).status, 200, `${asset} HEAD must match GET`);
   }
+  const favicon = await request('/favicon.ico?v=dialogue-1');
+  assert.equal(favicon.headers.get('content-type'), 'image/x-icon');
+  assert.equal(Buffer.from(await favicon.arrayBuffer()).subarray(0, 4).toString('hex'), '00000100');
   const manifest = await (await request('/manifest.webmanifest')).json();
   assert.equal(manifest.display, 'standalone');
   assert.equal((await request('/')).status, 302);

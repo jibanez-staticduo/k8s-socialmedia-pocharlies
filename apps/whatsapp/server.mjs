@@ -1379,9 +1379,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     try {
       const url = new URL(req.url, 'http://localhost'); const path = url.pathname;
       if (path === '/health' && req.method === 'GET') return json(200, { ok: true });
+      // CONTRACT: http.whatsapp-app.favicon.v1 - public before OIDC login.
       const installAssets = {
         '/manifest.webmanifest': 'application/manifest+json',
         '/icon.svg': 'image/svg+xml',
+        '/favicon.ico': 'image/x-icon',
         '/icon-192.png': 'image/png',
         '/icon-512.png': 'image/png',
         '/apple-touch-icon.png': 'image/png',
