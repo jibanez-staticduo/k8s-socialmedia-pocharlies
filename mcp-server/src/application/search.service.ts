@@ -405,7 +405,11 @@ export class SearchService {
       if (options.chatId) {
         scope.conversationIds = options.rawIds
           ? [options.chatId]
-          : this.indexKeys(accounts.filter(a => a.namespace === account), options.chatId, 'thread');
+          : this.indexKeys(
+              accounts.filter(a => a.namespace === account),
+              options.chatId,
+              'thread'
+            );
         if (!scope.conversationIds.length) continue;
       }
       scopes.push(scope);
