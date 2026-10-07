@@ -1,6 +1,6 @@
 # PR74 migration integration
 
-Production baseline: `upstream/deploy/prod@7957cdb4bf0cd34b2467ce529969684650af06f1`.
+Production baseline: `upstream/deploy/prod@73a12244889568fb3c1976f4c848980d99e7d719`.
 All MCP SQL files 001-020 retain the exact source bytes. A pinned SHA-256 test
 checks all twenty files, including 001's vector(1536) and IVFFlat index. Independent
 app and connector migration runners retain their own numbering.
@@ -66,7 +66,9 @@ re-embedding migration message, preserving every vector. Above 2000 dimensions
 the incompatible IVFFlat index is removed only after confirming the table is
 empty. Unconfigured installations retain their existing dimensions. Application
 fresh defaults are text-embedding-3-small/1536; deployed bge-m3/1024 configuration
-must explicitly reach the migrator as well as its writers and readers.
+must explicitly reach the migrator and its writers. Semantic message search now
+uses the external brain configured by production; these vectors remain preserved
+for the existing ingestion/history paths.
 
 ## Validation
 
