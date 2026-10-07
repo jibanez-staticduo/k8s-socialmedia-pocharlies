@@ -288,6 +288,19 @@ test('confirmed stop persists partial history and releases a stuck event stream 
     return Response.json({run_id: 'run_interrupt', session_id: 'native-session', status});
   }, {runs: true});
   t.after(() => { try {controller?.close();} catch {} });
+  const save = app.sessions.save.bind(app.sessions);
+  let partialSaved;
+  const partialSave = new Promise(resolve => {partialSaved = resolve;});
+  t.after(() => partialSaved());
+  app.sessions.save = async session => {
+    // Force a stale stop snapshot to finish after the consumer's partial save.
+    // Atomic rename alone cannot prevent an older concurrent snapshot winning.
+    const snapshot = structuredClone(session);
+    const attempt = snapshot.directSendAttempts?.find(row => row.turnId === tokenOne);
+    if (attempt?.cancelled && !attempt.partialText) await partialSave;
+    await save(snapshot);
+    if (attempt?.partialText) partialSaved();
+  };
   const body = {...command, turnId: tokenOne};
   const response = await request(body);
   let receiveDelta;
@@ -305,6 +318,7 @@ test('confirmed stop persists partial history and releases a stuck event stream 
   const result = await resultPending;
   assert.equal(result.cancelled, true);
   assert.equal(result.status, 'cancelled');
+  assert.equal(result.text, 'Partial before cancel');
   const transcript = (await app.sessions.canonical('personal', 'contact', false)).messages;
   assert.equal(transcript.length, 2);
   assert.equal(transcript[0].content, body.message);

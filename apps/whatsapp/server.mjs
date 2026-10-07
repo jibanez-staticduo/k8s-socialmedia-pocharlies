@@ -2635,8 +2635,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             if (saved.activeHermesRun?.runId === runId) delete saved.activeHermesRun;
             await sessions.save(saved);
           };
-          if (active?.session) await settle(active.session);
-          else await sessions.serial(scopeId, async () => settle(await sessions.read(session.id)));
+          // The stream consumer owns the session lock and saves its partial first.
+          // A concurrent save of active.session could rename an older empty snapshot last.
+          await sessions.serial(scopeId, async () => settle(await sessions.read(session.id)));
         }
         return json(200, {stopped: true, status: result.status, turnId});
       }
