@@ -68,51 +68,68 @@ test('authenticated presence stream forwards only its chat and releases its list
   }
 });
 
-test('disconnect during the initial presence lookup releases its listener', async () => {
-  const client = new EventEmitter() as EventEmitter & {
-    getPresence: (chat: string) => Promise<{ chatId: string; status: string }>;
-    subscribePresence: (chat: string) => Promise<{ subscribed: boolean }>;
-  };
-  let resolvePresence!: (value: { chatId: string; status: string }) => void;
-  let lookupStarted!: () => void;
-  const started = new Promise<void>(resolve => {
-    lookupStarted = resolve;
-  });
-  client.getPresence = () => {
-    lookupStarted();
-    return new Promise(resolve => {
-      resolvePresence = resolve;
+test(
+  'disconnect during the initial presence lookup releases its listener',
+  { timeout: 10_000 },
+  async () => {
+    const client = new EventEmitter() as EventEmitter & {
+      getPresence: (chat: string) => Promise<{ chatId: string; status: string }>;
+      subscribePresence: (chat: string) => Promise<{ subscribed: boolean }>;
+    };
+    let resolvePresence!: (value: { chatId: string; status: string }) => void;
+    let lookupStarted!: () => void;
+    const started = new Promise<void>(resolve => {
+      lookupStarted = resolve;
     });
-  };
-  client.subscribePresence = async () => ({ subscribed: true });
-  const app = express();
-  app.use(express.json());
-  app.use('/api/v1', createRouter(client as never, { getCurrentQR: () => null } as never, secret));
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise<void>(resolve => server.once('listening', resolve));
-  const address = server.address();
-  assert(address && typeof address !== 'string');
-  const timestamp = Math.floor(Date.now() / 1000);
-  const abort = new AbortController();
-  try {
-    const response = fetch(
-      `http://127.0.0.1:${address.port}/api/v1/chats/34600123456%40c.us/presence/stream`,
-      {
-        signal: abort.signal,
-        headers: {
-          'x-connector-timestamp': String(timestamp),
-          'x-connector-signature': generateHMACSignature({}, timestamp, secret),
-        },
-      }
+    client.getPresence = () => {
+      lookupStarted();
+      return new Promise(resolve => {
+        resolvePresence = resolve;
+      });
+    };
+    client.subscribePresence = async () => ({ subscribed: true });
+    let responseClosed!: () => void;
+    const closed = new Promise<void>(resolve => {
+      responseClosed = resolve;
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((_req, res, next) => {
+      res.once('close', responseClosed);
+      next();
+    });
+    app.use(
+      '/api/v1',
+      createRouter(client as never, { getCurrentQR: () => null } as never, secret)
     );
-    await started;
-    abort.abort();
-    await assert.rejects(response, { name: 'AbortError' });
-    resolvePresence({ chatId: '34600123456@c.us', status: 'unknown' });
-    await new Promise(resolve => setTimeout(resolve, 20));
-    assert.equal(client.listenerCount('presence-update'), 0);
-  } finally {
-    abort.abort();
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address();
+    assert(address && typeof address !== 'string');
+    const timestamp = Math.floor(Date.now() / 1000);
+    const abort = new AbortController();
+    try {
+      const response = fetch(
+        `http://127.0.0.1:${address.port}/api/v1/chats/34600123456%40c.us/presence/stream`,
+        {
+          signal: abort.signal,
+          headers: {
+            'x-connector-timestamp': String(timestamp),
+            'x-connector-signature': generateHMACSignature({}, timestamp, secret),
+          },
+        }
+      );
+      await started;
+      abort.abort();
+      await assert.rejects(response, { name: 'AbortError' });
+      // Client-side abort settles before the server observes its socket closing.
+      await closed;
+      resolvePresence({ chatId: '34600123456@c.us', status: 'unknown' });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(client.listenerCount('presence-update'), 0);
+    } finally {
+      abort.abort();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
   }
-});
+);

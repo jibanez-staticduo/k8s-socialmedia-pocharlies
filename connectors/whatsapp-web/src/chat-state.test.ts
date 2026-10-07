@@ -1,3 +1,4 @@
+import { durableMessageFixture } from './test-support/durable-fixture';
 /**
  * Chat state (fase 3 / PR-5): archive / pin / mute / read-unread through
  * POST /chats/modify, what it writes on the canonical conversation, what the
@@ -21,12 +22,7 @@ import {
   buildChatModification,
   normalizeChatModifyAction,
 } from './baileys-client';
-import {
-  MessageUnavailableError,
-  resetDurableStoreStateForTests,
-  serializeDurableValue,
-  toDurablePayload,
-} from './durable-message-store';
+import { MessageUnavailableError, resetDurableStoreStateForTests } from './durable-message-store';
 import { MessageMutationError } from './message-mutations';
 import {
   muteEndTimestamp,
@@ -294,21 +290,11 @@ test('the durable payload key wins (group message of a contact keeps its partici
       if (isStoredSelect(sql)) return [];
       if (isPayloadSelect(sql) && params[0] === 'G1')
         return [
-          {
-            message_key: JSON.parse(
-              serializeDurableValue({
-                remoteJid: '120363000@g.us',
-                id: 'G1',
-                fromMe: false,
-                participant: '4455@lid',
-              })
-            ),
-            message_payload: JSON.parse(
-              serializeDurableValue(toDurablePayload({ conversation: 'x' }))
-            ),
-            wa_timestamp: new Date(1_700_000_500_000),
-            push_name: null,
-          },
+          durableMessageFixture(
+            { remoteJid: '120363000@g.us', id: 'G1', fromMe: false, participant: '4455@lid' },
+            { conversation: 'x' },
+            new Date(1_700_000_500_000)
+          ),
         ];
       return undefined;
     })

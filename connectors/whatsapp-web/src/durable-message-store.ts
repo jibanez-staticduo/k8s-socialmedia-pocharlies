@@ -1,3 +1,4 @@
+import { MissingTableBackoff } from './missing-table-backoff';
 import { describeError } from './error-text';
 import { inTransaction } from './db-transaction';
 import type { Pool } from 'pg';
@@ -218,12 +219,12 @@ async function execPayloadInsert(
     shape === 'both' ? BOTH_SHAPE_INSERT : shape === 'ms' ? MS_SHAPE_INSERT : TS_SHAPE_INSERT;
   try {
     await pool().query(sql, params);
-    noteTablePresent();
+    tableBackoff.markPresent();
     return 'ok';
   } catch (error) {
     if (isUndefinedColumn(error)) return 'column';
     if (isUndefinedTable(error)) {
-      noteTableMissing();
+      tableBackoff.markMissing();
       return 'missing';
     }
     console.warn(`durable payload store failed for ${idKey}: ${describeError(error)}`);
@@ -242,7 +243,7 @@ export async function storeRawWAMessage(
   if (novedadesKind(message.key)) return false;
   const timestamp = unixSeconds(message.messageTimestamp);
   if (!shouldStoreDurablePayload(source, timestamp)) return false;
-  if (tableKnownMissing()) return false;
+  if (tableBackoff.isMissing()) return false;
 
   let payload: string;
   let key: string;
@@ -292,7 +293,7 @@ export async function getRawWAMessage(
   chatId?: string
 ): Promise<WAMessage | undefined> {
   const bare = messageId ? stripAccountKey(messageId) : '';
-  if (!bare || tableKnownMissing()) return undefined;
+  if (!bare || tableBackoff.isMissing()) return undefined;
   try {
     let row = await selectRawWAMessage(bare, chatId, currentPayloadShape());
     if (row === 'column') {
@@ -300,7 +301,7 @@ export async function getRawWAMessage(
       row = await selectRawWAMessage(bare, chatId, currentPayloadShape());
       if (row === 'column') return undefined;
     }
-    noteTablePresent();
+    tableBackoff.markPresent();
     if (!row?.message_key || !row.message_payload) return undefined;
     const key = deserializeDurableValue(row.message_key) as WAMessageKey;
     const tsMs = toEpochMs(
@@ -316,7 +317,7 @@ export async function getRawWAMessage(
     } as WAMessage;
   } catch (error) {
     if (isUndefinedTable(error)) {
-      noteTableMissing();
+      tableBackoff.markMissing();
       return undefined;
     }
     console.warn(`durable payload lookup failed for ${bare}: ${describeError(error)}`);
@@ -840,8 +841,12 @@ export class MessageUnavailableError extends Error {
   }
 }
 
-let tableMissingUntil = 0;
-let missingTableLogged = false;
+const tableBackoff = new MissingTableBackoff(
+  MISSING_TABLE_RECHECK_MS,
+  'whatsapp_message_payloads does not exist yet (mcp-server migration 015 not applied): ' +
+    'durable message payloads are off, quoting/forward/retry fall back to process memory',
+  'whatsapp_message_payloads is available: durable message payloads are on'
+);
 // NAS tables carry `message_timestamp_ms`; fresh migration-015 tables carry
 // only `wa_timestamp`; the EXPANDED NAS table has both. The bootstrap probe
 // picks the shape up front, the first undefined-column error is the fallback.
@@ -853,8 +858,7 @@ let scansUseWaTimestamp = false;
 
 /** Test hook: forget cached availability and timestamp-shape state between cases. */
 export function resetDurableStoreStateForTests(): void {
-  tableMissingUntil = 0;
-  missingTableLogged = false;
+  tableBackoff.reset();
   payloadShape = 'ts';
   scansUseWaTimestamp = false;
 }
@@ -887,7 +891,7 @@ export async function adoptPayloadTimestampShape(): Promise<void> {
     } catch (error) {
       if (isUndefinedColumn(error)) continue;
       if (isUndefinedTable(error)) {
-        noteTableMissing();
+        tableBackoff.markMissing();
         return;
       }
       return;
@@ -902,30 +906,6 @@ function isUndefinedTable(error: unknown): boolean {
 
 function isUndefinedColumn(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === UNDEFINED_COLUMN;
-}
-
-/** true → skip the DB entirely (table known missing, re-probe not due yet). */
-function tableKnownMissing(): boolean {
-  return tableMissingUntil > Date.now();
-}
-
-function noteTableMissing(): void {
-  tableMissingUntil = Date.now() + MISSING_TABLE_RECHECK_MS;
-  if (!missingTableLogged) {
-    missingTableLogged = true;
-    console.warn(
-      'whatsapp_message_payloads does not exist yet (mcp-server migration 015 not applied): ' +
-        'durable message payloads are off, quoting/forward/retry fall back to process memory'
-    );
-  }
-}
-
-function noteTablePresent(): void {
-  if (missingTableLogged) {
-    missingTableLogged = false;
-    console.info('whatsapp_message_payloads is available: durable message payloads are on');
-  }
-  tableMissingUntil = 0;
 }
 
 function envNumber(name: string, fallback: number): number {

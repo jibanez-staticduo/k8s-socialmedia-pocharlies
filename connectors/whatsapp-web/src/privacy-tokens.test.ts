@@ -1,4 +1,7 @@
-import { profilePictureQueryFixture } from './test-support/profile-query';
+import {
+  assertProfilePictureFailures,
+  assertTimestampedPictureQuery,
+} from './test-support/profile-query';
 /**
  * Privacy tokens and profile pictures (fase 3 / PR-10).
  *
@@ -111,24 +114,7 @@ function connected(client: Any, sock: unknown): void {
 // ---------------------------------------------------------------------------
 
 test('patched Baileys nests the timestamped tctoken inside the picture query', async () => {
-  const {
-    buildProfilePictureQueryContent,
-    buildTcTokenFromJid,
-    timestamp,
-    jid,
-    token,
-    tcTokenContent,
-  } = await profilePictureQueryFixture();
-  assert.deepEqual(buildProfilePictureQueryContent('image', tcTokenContent), [
-    {
-      tag: 'picture',
-      attrs: { type: 'image', query: 'url' },
-      content: [{ tag: 'tctoken', attrs: { t: timestamp }, content: token }],
-    },
-  ]);
-  assert.deepEqual(buildProfilePictureQueryContent('preview'), [
-    { tag: 'picture', attrs: { type: 'preview', query: 'url' } },
-  ]);
+  const { buildTcTokenFromJid, jid, token } = await assertTimestampedPictureQuery();
   // A token without a timestamp is unusable: no <tctoken> at all.
   assert.equal(
     await buildTcTokenFromJid({
@@ -426,24 +412,7 @@ test('a session without salt re-snapshots regular_high once; with salt or the ma
 // ---------------------------------------------------------------------------
 
 test('profile picture provider timeout stays distinct from private or missing photos', async () => {
-  const client = newClient();
-  const calls: number[] = [];
-  client.sock = {
-    profilePictureUrl: async (_jid: string, _type: string, timeout: number) => {
-      calls.push(timeout);
-      throw new Boom('provider timeout', { statusCode: 408 });
-    },
-  };
-  await assert.rejects(client.getProfilePictureBytes('34600@c.us'), ProfilePictureTimeoutError);
-  assert.deepEqual(calls, [8000]);
-  client.sock.profilePictureUrl = async () => {
-    throw new Boom('private', { statusCode: 403 });
-  };
-  assert.equal(await client.getProfilePictureBytes('34600@c.us'), null);
-  client.sock.profilePictureUrl = async () => {
-    throw new Boom('item-not-found', { statusCode: 404 });
-  };
-  assert.equal(await client.getProfilePictureBytes('34600@c.us'), null);
+  await assertProfilePictureFailures(newClient(), [403, 404]);
 });
 
 test('profile picture lookup that never answers is cut at the deadline', async () => {

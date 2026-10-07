@@ -1,4 +1,7 @@
-import { profilePictureQueryFixture } from './test-support/profile-query';
+import {
+  assertProfilePictureFailures,
+  assertTimestampedPictureQuery,
+} from './test-support/profile-query';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import pg from 'pg';
@@ -254,20 +257,7 @@ test('group info survives an optional photo lookup failure without claiming the 
 });
 
 test('profile picture provider timeout stays distinct from private or missing photos', async () => {
-  const client = new BaileysClient('/tmp/unused', 'key') as any;
-  const calls: number[] = [];
-  client.sock = {
-    profilePictureUrl: async (_jid: string, _type: string, timeout: number) => {
-      calls.push(timeout);
-      throw new Boom('provider timeout', { statusCode: 408 });
-    },
-  };
-  await assert.rejects(client.getProfilePictureBytes('34600@c.us'), ProfilePictureTimeoutError);
-  assert.deepEqual(calls, [8000]);
-  client.sock.profilePictureUrl = async () => {
-    throw new Boom('private', { statusCode: 403 });
-  };
-  assert.equal(await client.getProfilePictureBytes('34600@c.us'), null);
+  await assertProfilePictureFailures(new BaileysClient('/tmp/unused', 'key'), [403]);
 });
 
 test('profile picture lookup deadline also bounds token preparation before Baileys IQ', async () => {
@@ -279,21 +269,7 @@ test('profile picture lookup deadline also bounds token preparation before Baile
 });
 
 test('patched Baileys nests timestamped tc token inside the picture query', async () => {
-  const { buildProfilePictureQueryContent, timestamp, token, tcTokenContent } =
-    await profilePictureQueryFixture();
-  assert.deepEqual(buildProfilePictureQueryContent('image', tcTokenContent), [
-    {
-      tag: 'picture',
-      attrs: { type: 'image', query: 'url' },
-      content: [{ tag: 'tctoken', attrs: { t: timestamp }, content: token }],
-    },
-  ]);
-  assert.deepEqual(buildProfilePictureQueryContent('preview'), [
-    {
-      tag: 'picture',
-      attrs: { type: 'preview', query: 'url' },
-    },
-  ]);
+  await assertTimestampedPictureQuery();
 });
 
 test('profile picture stream stops above 10 MB and reports download failure', async () => {

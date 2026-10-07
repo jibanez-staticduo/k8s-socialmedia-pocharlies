@@ -625,12 +625,10 @@ function validResultIds(
     ids.every(id => typeof id === 'string' && id.trim() && id.length <= 512)
   )
     return true;
-  res
-    .status(400)
-    .json({
-      error: 'conversationId and 1 to 50 message IDs are required',
-      failureClass: 'invalid_request',
-    });
+  res.status(400).json({
+    error: 'conversationId and 1 to 50 message IDs are required',
+    failureClass: 'invalid_request',
+  });
   return false;
 }
 
@@ -1700,7 +1698,7 @@ export function createRouter(
         if (Array.isArray(body.pollMessageIds)) {
           const ids = body.pollMessageIds;
           if (!validResultIds(chatId, ids, res) || !chatId) return;
-          const entries = await client.getPollResults(chatId, ids as string[]);
+          const entries = await client.getPollResults(chatId, ids);
           res.json({ ok: true, polls: entries });
           return;
         }
@@ -1801,7 +1799,7 @@ export function createRouter(
         if (Array.isArray(body.eventMessageIds)) {
           const ids = body.eventMessageIds;
           if (!validResultIds(chatId, ids, res) || !chatId) return;
-          const entries = await client.getEventResults(chatId, ids as string[]);
+          const entries = await client.getEventResults(chatId, ids);
           res.json({ ok: true, events: entries });
           return;
         }
