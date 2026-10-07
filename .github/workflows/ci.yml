@@ -291,9 +291,9 @@ jobs:
           [ -f CONTRACTS.yaml ] || exit 0
           # Same public checker as the reusable, pinned and hash-verified; no token needed.
           curl --retry 3 --retry-all-errors -fsSL \
-            'https://raw.githubusercontent.com/pocharlies-org/k8s-gitops-pocharlies/967f00700f931229573b404fee3635443677ada0/scripts/check-contracts.py' \
+            'https://raw.githubusercontent.com/pocharlies-org/k8s-gitops-pocharlies/188b011546ae8ddeacf3cc3be2d63b8b493811a6/scripts/check-contracts.py' \
             -o "$RUNNER_TEMP/check-contracts.py"
-          echo "3a9ad3ac0e52c4fca932463ec396f71c0d8da1e5cd6656b2ba7b505e0fa81817  $RUNNER_TEMP/check-contracts.py" | sha256sum --check --strict
+          echo "608ec9d88d4a59db5c0686806251234b23bdbfbf77fbd8239d9b7ad84477a339  $RUNNER_TEMP/check-contracts.py" | sha256sum --check --strict
           if ! [[ "$PR_BASE_SHA" =~ ^[0-9a-f]{40}$ && "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo 'Pull request range does not contain full Git commit SHAs'
             exit 1
