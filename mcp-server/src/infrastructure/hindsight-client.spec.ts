@@ -71,6 +71,7 @@ test('initialization checks dedicated bank and confirms chunks mode', async () =
     : { bank_id: config.bankId }));
   await client.initializeBank();
   assert.equal(requests[0].init.method, 'PUT');
+  assert.equal(requests[0].body.name, config.bankId);
   assert.equal(requests[0].body.retain_extraction_mode, 'chunks');
   assert.equal(requests[1].init.method, 'PATCH');
   assert.deepEqual(requests[1].body, { updates: { retain_extraction_mode: 'chunks' } });

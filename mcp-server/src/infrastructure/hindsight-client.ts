@@ -222,7 +222,7 @@ export class HindsightClient {
   }
 
   async initializeBank(): Promise<void> {
-    const bank = await this.request('PUT', '', { name: 'SocialMedia', retain_extraction_mode: 'chunks' });
+    const bank = await this.request('PUT', '', { name: this.config.bankId, retain_extraction_mode: 'chunks' });
     if (!object(bank) || bank.bank_id !== this.config.bankId) fail('protocol', 'Hindsight returned an unexpected bank');
     const config = await this.request('PATCH', '/config', { updates: { retain_extraction_mode: 'chunks' } });
     if (!object(config) || config.bank_id !== this.config.bankId || !object(config.config) ||
