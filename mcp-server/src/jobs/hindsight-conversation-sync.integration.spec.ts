@@ -10,8 +10,9 @@ const integration=databaseUrl?it:it.skip;
 integration('persists UUID mapping, append, edit, rename, selection withdrawal and hard delete',async()=>{
   if(!new URL(databaseUrl!).pathname.startsWith('/hindsight_qa'))throw new Error('Disposable QA database required');
   const pool=new Pool({connectionString:databaseUrl});const db=await pool.connect();
-  const chat=`qa-conversation-${randomUUID()}`;const destination=`qa-conversation-${randomUUID()}`;
-  const sender=`qa-sender-${randomUUID()}@c.us`;const ids=[randomUUID(),randomUUID()];
+  const chat=`qa-conversation-${randomUUID()}@c.us`;const destination=`qa-conversation-${randomUUID()}`;
+  const sender=chat;const ids=[randomUUID(),randomUUID()];
+  const realName='Ari \u{1f337}';const renamedName='Ari \u{1f338}';
   const options=syncOptionsFromEnv({HINDSIGHT_SYNC_BATCH:'100',HINDSIGHT_SYNC_RETRY_MS:'1',HINDSIGHT_SYNC_CHAT_IDS:chat});
   const accounts=defaultRegistry();const documents=new Map<string,string>();const operations=new Set<string>();
   const submissions:Array<{content:string;updateMode?:string;operationId:string}>=[];
@@ -35,21 +36,23 @@ integration('persists UUID mapping, append, edit, rename, selection withdrawal a
     }throw new Error('QA did not settle');
   };
   try{
-    await db.query(`INSERT INTO conversations(id,wa_chat_id,type,account,name) VALUES($1::text,$1::text,'INDIVIDUAL','personal','Synthetic chat')`,[chat]);
-    await db.query(`INSERT INTO whatsapp_contacts(account,jid,name,push_name) VALUES('personal',$1,'Phonebook Alice','Push Alice')`,[sender]);
+    await db.query(`INSERT INTO conversations(id,wa_chat_id,type,account,name) VALUES($1::text,$1::text,'INDIVIDUAL','personal','Ariadna')`,[chat]);
+    await db.query(`INSERT INTO whatsapp_contacts(account,jid,name,push_name) VALUES('personal',$1,$2,'Push Alice')`,[sender,realName]);
     const insert=async(id:string,text:string,time:string)=>db.query(`INSERT INTO messages(id,conversation_id,wa_message_id,
       wa_timestamp,direction,sender_wa_id,content,content_hash,message_type,platform,account)
       VALUES($1::uuid,$2,$1::text,$3,'INBOUND',$4,$5,'qa','TEXT','whatsapp','personal')`,[id,chat,time,sender,text]);
     await insert(ids[0],'Original','2026-10-08T10:00:00Z');await settle();
     expect(submissions).toHaveLength(1);
     const {rows:[d]}=await db.query('SELECT * FROM hindsight_conversation_documents WHERE destination=$1',[destination]);
-    expect(d.message_ids).toEqual([ids[0]]);expect(documents.get(d.document_id)).toContain('Phonebook Alice');
+    expect(d.message_ids).toEqual([ids[0]]);expect(documents.get(d.document_id)).toContain(realName);
+    expect(JSON.parse(documents.get(d.document_id)!.split('\n')[0]).title).toBe(realName);
     await insert(ids[1],'Second','2026-10-08T11:00:00Z');await settle();
     expect(submissions.at(-1)?.updateMode).toBe('append');
     await db.query("UPDATE messages SET content='Edited' WHERE id=$1",[ids[0]]);await settle();
     expect(submissions.at(-1)?.updateMode).toBe('replace');expect(documents.get(d.document_id)).not.toContain('Original');
-    await db.query("UPDATE whatsapp_contacts SET name='Renamed Alice' WHERE jid=$1 AND account='personal'",[sender]);await settle();
-    expect(documents.get(d.document_id)).toContain('Renamed Alice');expect(submissions.at(-1)?.updateMode).toBe('replace');
+    await db.query("UPDATE whatsapp_contacts SET name=$2 WHERE jid=$1 AND account='personal'",[sender,renamedName]);await settle();
+    expect(JSON.parse(documents.get(d.document_id)!.split('\n')[0]).title).toBe(renamedName);
+    expect(submissions.at(-1)?.updateMode).toBe('replace');
     options.chatIds=['outside-selection'];await settle();expect(documents.size).toBe(0);
     options.chatIds=[chat];await settle();expect(documents.size).toBe(1);
     options.chatIds=['outside-selection'];await settle();expect(documents.size).toBe(0);

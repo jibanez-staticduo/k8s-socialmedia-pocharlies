@@ -114,7 +114,7 @@ export async function loadConversationSnapshot(db: PoolClient, scope: Conversati
     ? contactName(row.sender_wa_id || '') || usefulName(row.participant_name) || usefulName(row.participant_push_name) || usefulName(row.metadata?.sender_name)
     : usefulName(row.participant_name) || usefulName(row.participant_push_name) || usefulName(row.metadata?.sender_name)}));
   const names:ConversationNames={accountName,
-    title:usefulName(chat?.name) || contactName(scope.conversation_id) || 'Conversation',
+    title:contactName(scope.conversation_id) || usefulName(chat?.name) || 'Conversation',
     topicName:scope.topic_id ? usefulName(chat?.metadata?.topics?.[scope.topic_id]?.title) ||
       usefulName(rows.find(r=>r.metadata?.topic_name || r.metadata?.topic_title)?.metadata?.topic_name) ||
       usefulName(rows.find(r=>r.metadata?.topic_title)?.metadata?.topic_title) : undefined,
