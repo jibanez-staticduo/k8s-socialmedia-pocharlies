@@ -77,3 +77,29 @@ healthy (gateway has no healthcheck). LiteLLM embeddings return 4096 dimensions.
 
 Operational verification script: `/home/staticduo/tmp/socialmedia-verify.py`.
 It performs read-only requests and prints only outcomes/counts.
+
+## 2026-10-08: Optional Hindsight Activated
+
+The earlier sections are historical snapshots. The NAS now selects
+`SEMANTIC_PROVIDER=hindsight` with the dedicated bank ID and display name
+`socialmedia-staticduo`. The private deployment uses the existing Hindsight API
+over its internal Docker route; credentials remain outside Git.
+
+Backend services `mcp-server`, `mcp-sse`, `migrate` and the new `hindsight-sync`
+use revision `2c24b2eba2aa12586f36e74508ed4955fb710d13`. Migration 033 completed
+with exit code 0. The web, connectors and infrastructure retain their existing
+container IDs. The registered UGREEN project remains `socialmedia` at
+`/volume2/docker/social-media/docker-compose.yaml`.
+
+Both backend health endpoints returned HTTP 200. The WhatsApp public route
+returned the expected authentication redirect. Hindsight confirmed `chunks`
+extraction, 100 imported documents and zero failed operations at the first
+provider check. A subsequent read-only search through the deployed SearchService
+returned `mode=semantic`, found the expected PostgreSQL message and had no partial
+errors. These counts are snapshots: historical import continues automatically
+in batches of 100 with a 30-second interval, alongside new message changes.
+
+The three empty `socialmedia-qa-*` banks created during integration tests were
+deleted and their absence verified. Disposable PR74 tooling/PostgreSQL containers
+and identified temporary QA environments/scripts were removed. Production banks,
+runtime volumes, source checkout and rollback backups were preserved.
