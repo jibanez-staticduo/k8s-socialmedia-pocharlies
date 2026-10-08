@@ -122,3 +122,54 @@ The official pinned checker was rerun for `5df2f35..387d0bf` and reports
 `metric.brain-windows.refused-deletes.v1` is nonblocking. Future upstream adoption
 must revalidate its resulting registry with that checker rather than assume a
 contract count from this report. This agreement update changes no runtime service.
+
+## 2026-10-08: Conversation Memory Rebuild
+
+Backend and sync services now use immutable image `socialmedia-mcp:1b1c57e`.
+The conversation implementation is `52aae75`, with the phonebook-title priority
+correction in `1b1c57e`. Migration 034 completed successfully. The web and
+connectors were not rebuilt for this delivery.
+
+With Jordi's explicit approval, only `socialmedia-staticduo` and its destination
+indexing state were reset. The 6,958 previous documents and PostgreSQL backup
+remain at `/volume2/docker/social-media/backups/conversation-memory-20261008-095711`;
+the five original manifest checksums and sizes were verified. Messages, contacts
+and `user-staticduo` were preserved.
+
+Stop `hindsight-sync` before resetting its ledger: its legacy drain persists
+selected operations with an upsert and can otherwise recreate deleted rows.
+Pause the Hindsight worker while clearing this bank's outstanding operations;
+bank deletion alone does not remove those operations. The final reset verified
+zero old documents, memory units and legacy ledger entries before restarting.
+The rebuild seeded all 382 source conversation/topic scopes in one transaction;
+the normal worker continues in batches of 10 every 30 seconds. This is an ongoing
+historical rebuild, not a claim that every conversation has finished indexing.
+
+The new documents retain canonical JSONL transcripts under a stable account/chat
+identity. New turns append to the same document. Edits, deletes, late history and
+name changes replace its canonical contents. WhatsApp phonebook names take
+priority over stale conversation labels, including in document titles. Search
+hydrates results from PostgreSQL and applies local deletion and account filters.
+The implementation does not replicate upstream Brain's graph.
+
+Validation: 816 MCP tests passed (15 skipped); the final nine conversation tests
+also passed against disposable PostgreSQL. Fresh/legacy migration tests and the
+NAS schema-copy migration passed. TypeScript and the pinned contract checker
+passed (100 entries, existing nonblocking marker note). A production document
+contained 785 source messages with exactly matching original text, and a deployed
+semantic search returned PostgreSQL messages with zero failures. A real-provider
+QA run passed same-document append without duplicates, phonebook names, rename
+without a new message, canonical edit replacement, PostgreSQL-backed search and
+immediate local hiding of deleted messages. Its disposable PostgreSQL container,
+temporary scripts and both synthetic Hindsight banks were removed; provider reads
+confirmed no remaining QA banks or operations. Production backups were preserved.
+No GitHub checks were reported for the published PR74 head; this is not a CI-green
+claim.
+
+Hindsight's existing API was kept, with bounded worker/pool concurrency and one
+reserved retain slot. Slow personal-bank operations can still delay queued work;
+accepted operations are not counted as completed. After API recreation, Nginx's
+static advanced upstream retained an old Docker address; a validated Nginx reload
+restored the public Hindsight health endpoint to HTTP 200. Both SocialMedia
+backend health endpoints returned 200, the public WhatsApp route returned 302,
+and the existing UGREEN `socialmedia` registration was verified read-only.
