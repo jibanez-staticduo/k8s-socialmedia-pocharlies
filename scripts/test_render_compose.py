@@ -11,6 +11,29 @@ spec.loader.exec_module(module)
 
 
 class RenderTests(unittest.TestCase):
+    def test_semantic_provider_is_optional_and_shared_by_readers_and_worker(self):
+        doc, _, _ = self.render()
+        self.assertNotIn('hindsight-sync', doc['services'])
+        for name in ('mcp-server', 'mcp-sse'):
+            env = doc['services'][name]['environment']
+            self.assertEqual(env['SEMANTIC_PROVIDER'], '${SEMANTIC_PROVIDER:-brain}')
+            self.assertEqual(env['BRAIN_MESSAGING_SEARCH_KEY'], '${BRAIN_MESSAGING_SEARCH_KEY:-}')
+        doc, _, _ = module.render(self.accounts, '/volume2/docker/social-media', module.ROOT,
+                                  '/tmp/generated', {'SEMANTIC_PROVIDER': 'hindsight'})
+        worker = doc['services']['hindsight-sync']
+        self.assertIn('hindsight-sync.ts', ' '.join(worker['command']))
+        self.assertEqual(worker['environment']['HINDSIGHT_SYNC_LOOP'], '${HINDSIGHT_SYNC_LOOP:-true}')
+        for name in ('mcp-server', 'mcp-sse', 'hindsight-sync'):
+            env = doc['services'][name]['environment']
+            self.assertEqual(env['HINDSIGHT_BANK_ID'], '${HINDSIGHT_BANK_ID:-socialmedia-staticduo}')
+            self.assertEqual(env['HINDSIGHT_URL'], '${HINDSIGHT_URL:-}')
+        self.assertNotIn('HINDSIGHT_API_KEY', doc['services']['whatsapp-personal']['environment'])
+
+    def test_invalid_semantic_provider_fails_before_rendering(self):
+        with self.assertRaisesRegex(ValueError, 'SEMANTIC_PROVIDER'):
+            module.render(self.accounts, '/volume2/docker/social-media', module.ROOT,
+                          '/tmp/generated', {'SEMANTIC_PROVIDER': 'typo'})
+
     def setUp(self):
         self.accounts = json.loads((module.ROOT / 'deploy/accounts.json').read_text())
 

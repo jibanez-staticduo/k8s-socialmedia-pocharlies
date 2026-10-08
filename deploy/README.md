@@ -30,6 +30,10 @@ Embedding defaults match the existing deployment: `qwen3-embedding-8b`, dimensio
 
 ## Environment configuration
 
+Semantic retrieval can use the upstream brain or an existing Hindsight server.
+See [optional Hindsight retrieval](../docs/hindsight-provider.md) for the `.env`
+switch, dedicated `socialmedia-staticduo` bank and resumable indexing worker.
+
 Start from `deploy/.env.example` in a private file outside version control, retaining
 existing secret values from the current deployment. Fill the empty required secret
 fields before Compose validation. The renderer and Compose must both receive the

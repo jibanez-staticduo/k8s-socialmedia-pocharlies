@@ -4,6 +4,14 @@ import { createServiceLogger } from './service-logger';
 import { accountKey, normalizeAccount, stripAccount, type Account } from '../domain/account';
 import { getAccounts, brainInstanceForNamespace } from '../domain/account-registry';
 import { mediaTypePredicate, messageTypesFor, type MediaType } from './media-type-filter';
+import {
+  HindsightClient,
+  hindsightConfigFromEnv,
+  messageIdFromHindsightDocumentId,
+  semanticProviderFromEnv,
+  socialmediaChatTag,
+  socialmediaScopeTag,
+} from '../infrastructure/hindsight-client';
 
 export interface SearchResult {
   messageId: string;
@@ -145,18 +153,27 @@ export class SearchService {
   private logger: pino.Logger;
   private readonly brain: BrainSearchConfig | null;
   private readonly fetchImpl: FetchLike;
+  private readonly hindsight: HindsightClient | null;
 
   constructor(
     dbClient: Pool,
-    brain: BrainSearchConfig | null = brainSearchConfigFromEnv(),
-    fetchImpl: FetchLike = (url, init) => fetch(url, init)
+    brain: BrainSearchConfig | null = semanticProviderFromEnv() === 'brain'
+      ? brainSearchConfigFromEnv()
+      : null,
+    fetchImpl: FetchLike = (url, init) => fetch(url, init),
+    hindsight: HindsightClient | null = semanticProviderFromEnv() === 'hindsight'
+      ? new HindsightClient(hindsightConfigFromEnv(), (url, init) => fetchImpl(String(url), init ?? {}))
+      : null
   ) {
     this.dbClient = dbClient;
     this.brain = brain;
     this.fetchImpl = fetchImpl;
+    this.hindsight = hindsight;
     this.logger = createServiceLogger();
     this.logger.info(
-      brain
+      hindsight
+        ? 'SearchService: busqueda semantica en Hindsight (banco dedicado de SocialMedia)'
+        : brain
         ? `SearchService: búsqueda semántica en el brain ${brain.url} (corte ${brain.minScore})`
         : 'SearchService: BRAIN_SEARCH_URL o BRAIN_MESSAGING_SEARCH_KEY sin configurar, solo búsqueda de texto'
     );
@@ -205,6 +222,8 @@ export class SearchService {
   /** Appends the identical account and message filters for both search strategies. */
   private appendSearchFilters(sql: string, params: unknown[], options: SearchOptions) {
     const { chatId, from, to, sender } = options;
+    // A stale semantic index must never resurrect a message hidden locally.
+    sql += " AND m.metadata->>'deleted_for_me' IS DISTINCT FROM 'true'";
     let paramIndex = params.length + 1;
     const scopes = this.searchScopes(options);
     // Instagram accounts may share a storage namespace; the ingested provider
@@ -326,6 +345,7 @@ export class SearchService {
     query: string,
     options: SearchOptions = {}
   ): Promise<{ results: SearchResult[]; failures: SearchFailure[] }> {
+    if (this.hindsight) return this.hindsightSemanticSearch(query, options);
     if (!this.brain)
       throw new Error('BRAIN_SEARCH_URL o BRAIN_MESSAGING_SEARCH_KEY sin configurar');
     // Instagram does not go through brain-windows: there are no chunks to find.
@@ -381,6 +401,78 @@ export class SearchService {
         senderWaId: row.sender_wa_id,
         waTimestamp: row.wa_timestamp,
         similarity: rank.score,
+        platform: row.platform,
+        account: row.account,
+        messageType: row.message_type,
+      }));
+    return { results, failures };
+  }
+
+  private async hindsightSemanticSearch(
+    query: string,
+    options: SearchOptions
+  ): Promise<{ results: SearchResult[]; failures: SearchFailure[] }> {
+    const scopes = this.searchScopes(options);
+    const requests = scopes.flatMap(scope => {
+      const scopeTag = socialmediaScopeTag(scope.channel, scope.namespace, scope.accountId);
+      const chats = options.chatId
+        ? options.rawIds && scope.channel !== 'instagram'
+          ? [options.chatId]
+          : this.indexKeys([scope], options.chatId, 'thread')
+        : [undefined];
+      return chats.map(chat => ({
+        scope,
+        scopeTag,
+        tags: [scopeTag, ...(chat ? [socialmediaChatTag(chat)] : [])],
+      }));
+    });
+    const responses = await Promise.allSettled(
+      requests.map(request => (this.hindsight as HindsightClient).recall({ query, tags: request.tags }))
+    );
+    const failures: SearchFailure[] = [];
+    const ranked = new Map<string, { order: number; score?: number }>();
+    responses.forEach((response, i) => {
+      const request = requests[i];
+      if (response.status === 'rejected') {
+        failures.push({
+          accountId: request.scope.accountId,
+          message: (response.reason as Error)?.message || String(response.reason),
+        });
+        return;
+      }
+      for (const hit of response.value) {
+        // Both the provider tag boundary and the authoritative SQL scope must agree.
+        const id = messageIdFromHindsightDocumentId(hit.documentId);
+        if (!id || !request.tags.every(tag => hit.tags.includes(tag))) continue;
+        const key = `${request.scopeTag}\u0000${id}`;
+        if (!ranked.has(key)) ranked.set(key, { order: ranked.size, score: hit.score });
+      }
+    });
+    if (!ranked.size) return { results: [], failures };
+    const ids = [...new Set([...ranked.keys()].map(key => key.split('\u0000')[1]))];
+    let sql = `SELECT m.id as message_id, m.conversation_id, m.content,
+      m.sender_wa_id, m.wa_timestamp, m.platform, m.account, m.message_type,
+      m.metadata->>'instagram_account' as instagram_account
+      FROM messages m WHERE m.id = ANY($1::uuid[])
+      AND (m.is_deleted IS NULL OR m.is_deleted = false)`;
+    const params: unknown[] = [ids];
+    sql = this.appendSearchFilters(sql, params, options).sql;
+    const { rows } = await this.dbClient.query(sql, params);
+    const results = rows.flatMap(row => {
+      const scope = scopes.find(s => s.channel === row.platform && s.namespace === row.account
+        && (s.channel !== 'instagram' || s.accountId === row.instagram_account));
+      if (!scope) return [];
+      const tag = socialmediaScopeTag(scope.channel, scope.namespace, scope.accountId);
+      const rank = ranked.get(`${tag}\u0000${row.message_id}`);
+      return rank ? [{ row, rank }] : [];
+    }).sort((a, b) => a.rank.order - b.rank.order).slice(0, searchLimit(options.limit))
+      .map(({ row, rank }) => ({
+        messageId: row.message_id,
+        conversationId: row.conversation_id,
+        content: row.content || '',
+        senderWaId: row.sender_wa_id,
+        waTimestamp: row.wa_timestamp,
+        ...(rank.score !== undefined ? { similarity: rank.score } : {}),
         platform: row.platform,
         account: row.account,
         messageType: row.message_type,

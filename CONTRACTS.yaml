@@ -1679,7 +1679,10 @@ contracts:
     solo borra ventanas del rango de sesiones que reconstruye (antes comparaba con todo el chat y borró
     ~26k ventanas) y nunca más de BRAIN_WINDOWS_MAX_DELETES_PER_CHAT (50) por chat y pasada. La forma
     de los documentos no cambia. 02-10-2026: el presupuesto de la pasada es único para todas las cuentas
-    (18 min); sin cambio de forma.'
+    (18 min); sin cambio de forma. 08-10-2026: SEMANTIC_PROVIDER defaults to brain;
+    when explicitly set to hindsight, the incremental job skips and backfill/replay refuse brain
+    writes. A separate Hindsight ledger/worker is used; existing brain document shapes and cursors
+    are unchanged.'
 - id: metric.brain-windows.refused-deletes.v1
   kind: schema
   value: brain_windows_refused_deletes
@@ -1815,3 +1818,23 @@ contracts:
   note: 'GET and HEAD are public before OIDC login and return 200 image/x-icon.
     GET returns a multi-resolution ICO; HEAD has the same MIME and content length.
     Query parameters may version the icon without changing the route.'
+- id: http.hindsight.socialmedia-bank.v1
+  kind: http-route
+  value: /v1/default/banks/{bank_id}
+  anchor: /v1/default/banks/
+  role: consumer
+  files:
+  - mcp-server/src/infrastructure/hindsight-client.ts
+  status: active
+  note: 'Optional SEMANTIC_PROVIDER=hindsight consumer of the Hindsight 0.10.1 REST API;
+    default brain behavior remains available. Only dedicated socialmedia banks are accepted,
+    default socialmedia-staticduo, never user-staticduo. PUT bank and PATCH /config select
+    retain_extraction_mode=chunks. POST /memories uses async:true, a persisted UUID operation_id,
+    one item with stable document_id, update_mode=replace, string metadata, original timestamp
+    and compound provider/namespace/account/chat tags. GET /operations/{operation_id} is reconciled
+    before resubmission; completed alone confirms indexing, failed/cancelled use POST /retry.
+    DELETE /documents/{document_id} confirms success/document_id or accepts 404. Recall POST
+    /memories/recall uses all_strict tags and bounded budget/max_tokens; returned document_id
+    and tags are checked before exact account-scoped PostgreSQL hydration. Bearer credentials
+    remain server-side and redirect forwarding is refused. Source versions, accepted versus
+    completed operations and tombstones live in the separate additive Hindsight ledger.'

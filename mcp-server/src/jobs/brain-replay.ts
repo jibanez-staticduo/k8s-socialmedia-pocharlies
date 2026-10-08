@@ -5,6 +5,7 @@
  * Progress is scoped by RUN_ID/account/platform in `brain_ingest_replay_cursor`.
  */
 import { Pool } from 'pg';
+import { semanticProviderFromEnv } from '../infrastructure/hindsight-client';
 import pino from 'pino';
 import {
   ingestNamespaces,
@@ -152,6 +153,9 @@ async function replayAccount(pool: Pool, opts: ReplayOptions, account: Account):
 }
 
 export async function runReplay(opts: ReplayOptions): Promise<void> {
+  if (semanticProviderFromEnv() === 'hindsight') {
+    throw new Error('Brain replay refused: SEMANTIC_PROVIDER=hindsight');
+  }
   if (process.env.BRAIN_ENABLED === 'false' || !opts.brainUrl) {
     throw new Error('Brain replay requires BRAIN_URL and BRAIN_ENABLED must not be false');
   }

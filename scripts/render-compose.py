@@ -150,6 +150,9 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
     settings = settings or {}
     accounts = prepare_accounts(accounts, settings)
     validate(accounts)
+    semantic_provider = settings.get('SEMANTIC_PROVIDER', 'brain').strip() or 'brain'
+    if semantic_provider not in ('brain', 'hindsight'):
+        raise ValueError('SEMANTIC_PROVIDER must be brain or hindsight')
     public = url(expand(settings.get('PUBLIC_BASE_URL', 'https://localhost'), settings), 'PUBLIC_BASE_URL')
     wa_public = url(expand(settings.get('WHATSAPP_PUBLIC_BASE_URL', 'https://localhost'), settings), 'WHATSAPP_PUBLIC_BASE_URL')
     def configurable(name, default=''):
@@ -176,6 +179,19 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
     services['nats'].update(volumes=['nats_data:/data', f'{source_dir}/config/nats/nats.conf:/etc/nats/nats.conf:ro', cert('nats.crt'), cert('nats.key'), cert('ca.crt')], command=['-c', '/etc/nats/nats.conf'], healthcheck={'test': ['CMD', 'wget', '--spider', '-q', 'http://127.0.0.1:8222/healthz'], 'interval': '10s', 'timeout': '5s', 'retries': 5})
     services['minio'].update(volumes=['minio_data:/data', cert('minio.crt', 'public.crt'), cert('minio.key', 'private.key'), cert('ca.crt', 'CAs/ca.crt')], environment={'MINIO_ROOT_USER': variable('MINIO_ROOT_USER', True), 'MINIO_ROOT_PASSWORD': variable('MINIO_ROOT_PASSWORD', True)}, command=['server', '/data', '--console-address', ':9001', '--certs-dir', '/certs'], healthcheck={'test': ['CMD', 'curl', '-k', '-f', 'https://localhost:9000/minio/health/live'], 'interval': '30s', 'timeout': '20s', 'retries': 3})
     common = {'DATABASE_URL': database, 'NATS_URL': configurable('NATS_URL', 'tls://socialmedia-nats:4222'), 'NATS_CA_CERT': '${NATS_CA_CERT-/certs/ca.crt}', 'NODE_EXTRA_CA_CERTS': '${NODE_EXTRA_CA_CERTS-/certs/ca.crt}', 'SOCIAL_ACCOUNTS_FILE': '/config/accounts.json'}
+    semantic = {
+        'SEMANTIC_PROVIDER': configurable('SEMANTIC_PROVIDER', 'brain'),
+        'BRAIN_SEARCH_URL': configurable('BRAIN_SEARCH_URL'),
+        'BRAIN_MESSAGING_SEARCH_KEY': configurable('BRAIN_MESSAGING_SEARCH_KEY'),
+        'BRAIN_SEARCH_TIMEOUT_MS': configurable('BRAIN_SEARCH_TIMEOUT_MS', '10000'),
+        'SEMANTIC_MIN_SCORE': configurable('SEMANTIC_MIN_SCORE', '-5'),
+        'HINDSIGHT_URL': configurable('HINDSIGHT_URL'),
+        'HINDSIGHT_BANK_ID': configurable('HINDSIGHT_BANK_ID', 'socialmedia-staticduo'),
+        'HINDSIGHT_API_KEY': configurable('HINDSIGHT_API_KEY'),
+        'HINDSIGHT_TIMEOUT_MS': configurable('HINDSIGHT_TIMEOUT_MS', '10000'),
+        'HINDSIGHT_RECALL_MAX_TOKENS': configurable('HINDSIGHT_RECALL_MAX_TOKENS', '4096'),
+        'HINDSIGHT_RECALL_BUDGET': configurable('HINDSIGHT_RECALL_BUDGET', 'mid'),
+    }
     minio = {'MINIO_ENDPOINT': configurable('MINIO_ENDPOINT', 'socialmedia-minio:9000'), 'MINIO_ACCESS_KEY': '${MINIO_ACCESS_KEY:-${MINIO_ROOT_USER}}', 'MINIO_SECRET_KEY': '${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}', 'MINIO_USE_SSL': configurable('MINIO_USE_SSL', 'true'), 'MINIO_CA_CERT': '${MINIO_CA_CERT-/certs/ca.crt}', 'MINIO_BUCKET': configurable('MINIO_BUCKET', 'socialmedia-media')}
     for key in ('S3_ENDPOINT', 'S3_BUCKET', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'LEGACY_MINIO_ENDPOINT', 'LEGACY_MINIO_BUCKET', 'LEGACY_MINIO_ACCESS_KEY', 'LEGACY_MINIO_SECRET_KEY'):
         minio[key] = variable(key)
@@ -189,6 +205,7 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
     services['migrate'] = migration
     for name, entry, port in [('mcp-server', 'src/main.ts', 3000), ('mcp-sse', 'src/mcp/sse-server.ts', 3010)]:
         s = app('mcp-server', entry)
+        s['environment'].update(semantic)
         s['networks']['llm'] = {}
         if name == 'mcp-sse':
             s['networks']['npm'] = {'aliases': ['socialmedia-mcp-sse']}
@@ -210,6 +227,19 @@ def render(accounts, stack_dir, source_dir, output_dir, settings=None):
         s['depends_on'].update({n: {'condition': 'service_healthy'} for n in ('redis', 'minio')})
         s['healthcheck'] = health(port)
         services[name] = s
+    if semantic_provider == 'hindsight':
+        s = app('mcp-server', 'src/jobs/hindsight-sync.ts')
+        s['command'] = ['sh', '-c', 'cd mcp-server && exec tsx src/jobs/hindsight-sync.ts']
+        s['environment'].update(semantic)
+        for key, default in (
+            ('HINDSIGHT_SYNC_BATCH', '100'), ('HINDSIGHT_SYNC_INTERVAL_MS', '30000'),
+            ('HINDSIGHT_SYNC_RETRY_MS', '30000'), ('HINDSIGHT_SYNC_LOOP', 'true'),
+            ('HINDSIGHT_SYNC_SINCE', '1970-01-01T00:00:00Z'),
+            ('HINDSIGHT_SYNC_CHAT_IDS', ''),
+        ):
+            s['environment'][key] = configurable(key, default)
+        s['networks']['llm'] = {}
+        services['hindsight-sync'] = s
     wa = [a for a in accounts if a['enabled'] and a['channel'] == 'whatsapp']
     for a in wa:
         aid = a['accountId']

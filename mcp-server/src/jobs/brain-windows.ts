@@ -22,6 +22,7 @@
  * (missing env, DB unreachable, unreadable config) exit non-zero.
  */
 import { Pool } from 'pg';
+import { semanticProviderFromEnv } from '../infrastructure/hindsight-client';
 import pino from 'pino';
 import { ingestNamespaces } from './brain-ingest-lib';
 import {
@@ -445,6 +446,10 @@ async function accountPass(
 }
 
 async function main(): Promise<void> {
+  if (semanticProviderFromEnv() === 'hindsight') {
+    logger.info('brain-windows skipped: SEMANTIC_PROVIDER=hindsight');
+    return;
+  }
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl)
     throw new Error(
