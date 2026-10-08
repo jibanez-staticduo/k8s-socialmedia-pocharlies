@@ -103,3 +103,22 @@ The three empty `socialmedia-qa-*` banks created during integration tests were
 deleted and their absence verified. Disposable PR74 tooling/PostgreSQL containers
 and identified temporary QA environments/scripts were removed. Production banks,
 runtime volumes, source checkout and rollback backups were preserved.
+
+## 2026-10-08: Upstream Adoption Agreement
+
+Migration 033 is published and deployed; subsequent NAS migrations must use 034
+or a higher unused number without renumbering any published migration. Upstream
+adopts selected PR74 stages rather than merging the PR in full. Its semantic
+search stage can retain the default brain provider, provider/account/chat
+isolation and textual fallback; the Hindsight URL and bank are NAS deployment
+configuration. Upstream summaries, Synapse and CO_OCCURS remain outside this
+integration's scope. Invalid provider values must still fail before rendering.
+
+The previously requested minor fixes are already published: `6462940` requires
+Instagram webhook signatures for environment-configured accounts; `d14f350`
+registers that signed webhook contract; `5df2f35` corrects its source references.
+The official pinned checker was rerun for `5df2f35..387d0bf` and reports
+`contracts: OK (100 entries)`. Its existing missing-marker note for
+`metric.brain-windows.refused-deletes.v1` is nonblocking. Future upstream adoption
+must revalidate its resulting registry with that checker rather than assume a
+contract count from this report. This agreement update changes no runtime service.
