@@ -7,10 +7,13 @@ import { mediaTypePredicate, messageTypesFor, type MediaType } from './media-typ
 import {
   HindsightClient,
   hindsightConfigFromEnv,
+  isSocialmediaConversationDocumentId,
   messageIdFromHindsightDocumentId,
   semanticProviderFromEnv,
   socialmediaChatTag,
+  socialmediaConversationDocumentId,
   socialmediaScopeTag,
+  type HindsightRecallHit,
 } from '../infrastructure/hindsight-client';
 
 export interface SearchResult {
@@ -147,6 +150,26 @@ export interface SearchOutcome {
 }
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+
+interface ConversationDocumentMapping {
+  document_id: string;
+  platform: string;
+  namespace: string;
+  provider_account: string;
+  conversation_id: string;
+  topic_id: string;
+  message_ids: string[];
+  legacy_message_ids: string[];
+  confirmed: unknown;
+}
+
+function transcriptMessageIds(text: string): string[] {
+  // JSONL chunks can start/end inside a line; escaped content is never an ID field.
+  const pattern = /(?:^|[,{]\s*)"message_id"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/gim;
+  return [...new Set([...text.matchAll(pattern)].map(match => match[1].toLowerCase()))].slice(0, MAX_SEARCH_LIMIT);
+}
+
+const QUERY_STOP_WORDS = new Set('que para por una uno unos unas los las del con como donde cuando quien what where when which the and for from this that about'.split(' '));
 
 export class SearchService {
   private dbClient: Pool;
@@ -423,6 +446,7 @@ export class SearchService {
       return chats.map(chat => ({
         scope,
         scopeTag,
+        chat,
         tags: [scopeTag, ...(chat ? [socialmediaChatTag(chat)] : [])],
       }));
     });
@@ -430,7 +454,7 @@ export class SearchService {
       requests.map(request => (this.hindsight as HindsightClient).recall({ query, tags: request.tags }))
     );
     const failures: SearchFailure[] = [];
-    const ranked = new Map<string, { order: number; score?: number }>();
+    const accepted: Array<{ hit: HindsightRecallHit; request: typeof requests[number] }> = [];
     responses.forEach((response, i) => {
       const request = requests[i];
       if (response.status === 'rejected') {
@@ -440,19 +464,88 @@ export class SearchService {
         });
         return;
       }
-      for (const hit of response.value) {
-        // Both the provider tag boundary and the authoritative SQL scope must agree.
-        const id = messageIdFromHindsightDocumentId(hit.documentId);
-        if (!id || !request.tags.every(tag => hit.tags.includes(tag))) continue;
-        const key = `${request.scopeTag}\u0000${id}`;
-        if (!ranked.has(key)) ranked.set(key, { order: ranked.size, score: hit.score });
+      for (const hit of response.value.slice(0, BRAIN_MAX_HITS)) {
+        if ((!messageIdFromHindsightDocumentId(hit.documentId) && !isSocialmediaConversationDocumentId(hit.documentId)) ||
+            !request.tags.every(tag => hit.tags.includes(tag))) continue;
+        accepted.push({ hit, request });
       }
     });
+    if (!accepted.length) return { results: [], failures };
+    const conversationIds = [...new Set(accepted.filter(({ hit }) => isSocialmediaConversationDocumentId(hit.documentId))
+      .map(({ hit }) => hit.documentId))];
+    const legacyIds = [...new Set(accepted.flatMap(({ hit }) => {
+      const id = messageIdFromHindsightDocumentId(hit.documentId);
+      return id ? [id] : [];
+    }))];
+    const destination = (this.hindsight as HindsightClient).destination;
+    const { rows: mappingRows } = await this.dbClient.query<ConversationDocumentMapping>(`
+      SELECT document_id, platform, namespace, provider_account, conversation_id, topic_id, message_ids, confirmed,
+        legacy.legacy_message_ids
+      FROM hindsight_conversation_documents d
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(array_agg(m.id), '{}'::uuid[]) AS legacy_message_ids FROM messages m
+        WHERE m.id = ANY($3::uuid[]) AND m.platform = d.platform AND m.account = d.namespace
+          AND (CASE WHEN m.platform = 'instagram' THEN m.metadata->>'instagram_account' ELSE m.account END) = d.provider_account
+          AND m.conversation_id = d.conversation_id
+          AND (CASE WHEN m.platform = 'telegram' THEN COALESCE(NULLIF(m.metadata->>'topic_id', ''),
+            NULLIF(m.metadata->>'thread_id', ''), NULLIF(m.metadata->>'telegram_topic_id', ''), '') ELSE '' END) = d.topic_id
+      ) legacy
+      WHERE destination = $1 AND confirmed IS NOT NULL
+      AND (document_id = ANY($2::text[]) OR cardinality(legacy.legacy_message_ids) > 0)`,
+    [destination, conversationIds, legacyIds]);
+    const mappings = mappingRows.filter(mapping => mapping.confirmed != null && Array.isArray(mapping.message_ids)
+      && isSocialmediaConversationDocumentId(mapping.document_id)
+      && mapping.document_id === socialmediaConversationDocumentId(mapping));
+    const ranked = new Map<string, { order: number; score?: number; mapping?: ConversationDocumentMapping }>();
+    for (const { hit, request } of accepted) {
+      const scopedMappings = mappings.filter(mapping => mapping.platform === request.scope.channel
+        && mapping.namespace === request.scope.namespace && mapping.provider_account === request.scope.accountId
+        && (!request.chat || request.chat === mapping.conversation_id));
+      const legacyId = messageIdFromHindsightDocumentId(hit.documentId);
+      let ids: string[];
+      let mapping: ConversationDocumentMapping | undefined;
+      if (legacyId) {
+        // A confirmed conversation remains migrated after its selection becomes
+        // empty. Match current SQL scope, not only the latest selected UUIDs.
+        if (scopedMappings.some(doc => Array.isArray(doc.legacy_message_ids)
+          && doc.legacy_message_ids.includes(legacyId))) continue;
+        ids = [legacyId];
+      } else {
+        mapping = scopedMappings.find(doc => doc.document_id === hit.documentId
+          && hit.tags.includes(socialmediaChatTag(doc.conversation_id)));
+        if (!mapping) continue;
+        const remoteIds = transcriptMessageIds(hit.text);
+        ids = remoteIds.filter(id => mapping!.message_ids.includes(id));
+        if (!remoteIds.length) {
+          // No provenance field survived this chunk. Match current local text in
+          // this confirmed document, with a small cap, rather than expanding the chat.
+          const terms = [...new Set(query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || [])]
+            .filter(term => !QUERY_STOP_WORDS.has(term)).slice(0, 12);
+          if (!terms.length) continue;
+          let localSql = `SELECT m.id AS message_id FROM messages m WHERE m.id = ANY($1::uuid[])
+            AND (m.is_deleted IS NULL OR m.is_deleted = false)
+            AND m.conversation_id = $2 AND m.content ILIKE ANY($3::text[])`;
+          const localParams: unknown[] = [mapping.message_ids, mapping.conversation_id,
+            terms.map(term => `%${term}%`)];
+          localSql = this.appendSearchFilters(localSql, localParams, options).sql;
+          localSql += ` ORDER BY m.wa_timestamp DESC, m.id LIMIT $${localParams.length + 1}`;
+          localParams.push(Math.min(searchLimit(options.limit), 20));
+          const local = await this.dbClient.query(localSql, localParams);
+          ids = local.rows.map(row => String(row.message_id)).filter(id => mapping!.message_ids.includes(id));
+        }
+      }
+      for (const id of ids) {
+        const key = `${request.scopeTag}\u0000${id}`;
+        if (!ranked.has(key)) ranked.set(key, { order: ranked.size, score: hit.score, mapping });
+      }
+    }
     if (!ranked.size) return { results: [], failures };
     const ids = [...new Set([...ranked.keys()].map(key => key.split('\u0000')[1]))];
     let sql = `SELECT m.id as message_id, m.conversation_id, m.content,
       m.sender_wa_id, m.wa_timestamp, m.platform, m.account, m.message_type,
-      m.metadata->>'instagram_account' as instagram_account
+      m.metadata->>'instagram_account' as instagram_account,
+      CASE WHEN m.platform = 'telegram' THEN COALESCE(NULLIF(m.metadata->>'topic_id', ''),
+        NULLIF(m.metadata->>'thread_id', ''), NULLIF(m.metadata->>'telegram_topic_id', ''), '') ELSE '' END AS topic_id
       FROM messages m WHERE m.id = ANY($1::uuid[])
       AND (m.is_deleted IS NULL OR m.is_deleted = false)`;
     const params: unknown[] = [ids];
@@ -464,6 +557,8 @@ export class SearchService {
       if (!scope) return [];
       const tag = socialmediaScopeTag(scope.channel, scope.namespace, scope.accountId);
       const rank = ranked.get(`${tag}\u0000${row.message_id}`);
+      if (rank?.mapping && (rank.mapping.conversation_id !== row.conversation_id
+        || rank.mapping.topic_id !== row.topic_id || !rank.mapping.message_ids.includes(row.message_id))) return [];
       return rank ? [{ row, rank }] : [];
     }).sort((a, b) => a.rank.order - b.rank.order).slice(0, searchLimit(options.limit))
       .map(({ row, rank }) => ({

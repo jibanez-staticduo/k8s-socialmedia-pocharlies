@@ -2,7 +2,8 @@ import { Pool } from 'pg';
 import pino from 'pino';
 import { getAccounts } from '../domain/account-registry';
 import { HindsightClient, hindsightConfigFromEnv, semanticProviderFromEnv } from '../infrastructure/hindsight-client';
-import { destinationKey, runSyncPass, syncOptionsFromEnv } from './hindsight-sync-lib';
+import { destinationKey, syncOptionsFromEnv } from './hindsight-sync-lib';
+import { runConversationSyncPass } from './hindsight-conversation-sync';
 
 const logger = pino();
 
@@ -39,7 +40,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env, args: string[] 
     await hindsight.initializeBank();
     do {
       try {
-        const result = await runSyncPass(db,hindsight,destination,getAccounts(),options);
+        const result = await runConversationSyncPass(db,hindsight,destination,getAccounts(),options);
         logger.info(result,'hindsight sync pass');
         if (result.failed && !options.loop) throw new Error(`Hindsight sync pass has ${result.failed} failed operations; retryable ledger saved`);
       } catch (error) {

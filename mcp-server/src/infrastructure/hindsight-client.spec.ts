@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {
   HindsightClient, HindsightError, hindsightConfigFromEnv, semanticProviderFromEnv,
   socialmediaScopeTag, socialmediaChatTag, socialmediaDocumentId,
-  messageIdFromHindsightDocumentId,
+  messageIdFromHindsightDocumentId, socialmediaConversationDocumentId, isSocialmediaConversationDocumentId,
+  hindsightDestinationKey,
 } from './hindsight-client';
 
 const messageId = '550e8400-e29b-41d4-a716-446655440000';
@@ -67,14 +68,14 @@ test('scope encoding prevents account and conversation collisions', () => {
 
 test('initialization checks dedicated bank and confirms chunks mode', async () => {
   const { client, requests } = fixture(url => response(url.endsWith('/config')
-    ? { bank_id: config.bankId, config: { retain_extraction_mode: 'chunks' }, overrides: {} }
+    ? { bank_id: config.bankId, config: { retain_extraction_mode: 'chunks', store_document_text: true }, overrides: {} }
     : { bank_id: config.bankId }));
   await client.initializeBank();
   assert.equal(requests[0].init.method, 'PUT');
   assert.equal(requests[0].body.name, config.bankId);
   assert.equal(requests[0].body.retain_extraction_mode, 'chunks');
   assert.equal(requests[1].init.method, 'PATCH');
-  assert.deepEqual(requests[1].body, { updates: { retain_extraction_mode: 'chunks' } });
+  assert.deepEqual(requests[1].body, { updates: { retain_extraction_mode: 'chunks', store_document_text: true } });
   const bad = fixture(url => response(url.endsWith('/config')
     ? { bank_id: config.bankId, config: { retain_extraction_mode: 'concise' } }
     : { bank_id: config.bankId }));
@@ -92,6 +93,38 @@ test('retain retries preserve stable operation UUID and document replace semanti
   assert.equal(requests[0].body.operation_id, operationId);
   assert.deepEqual(requests[0].body.items, [{ content: document.content, document_id: documentId,
     update_mode: 'replace', metadata: document.metadata, tags: document.tags, timestamp: document.timestamp }]);
+});
+
+test('conversation IDs isolate every scope dimension and support append, recall and deletion', async () => {
+  const parts = ['whatsapp', 'personal', 'account1', 'conversation1', ''] as const;
+  const id = socialmediaConversationDocumentId(...parts);
+  assert.equal(isSocialmediaConversationDocumentId(id), true);
+  assert.equal(isSocialmediaConversationDocumentId(id + '0'), false);
+  assert.equal(messageIdFromHindsightDocumentId(id), undefined);
+  for (let i = 0; i < parts.length; i++) {
+    const changed: string[] = [...parts];
+    changed[i] += 'different';
+    assert.notEqual(socialmediaConversationDocumentId(changed[0], changed[1], changed[2], changed[3], changed[4]), id);
+  }
+  assert.equal(hindsightDestinationKey({ url: config.url + '/', bankId: config.bankId }),
+    hindsightDestinationKey(config));
+  const { client, requests } = fixture(url => response(url.endsWith('/memories') ? ack
+    : url.endsWith('/recall') ? { results: [{ id: 'chunk', text: 'transcript', document_id: id, tags: [scope, chat] }] }
+    : { success: true, document_id: id }));
+  assert.equal(client.destination, hindsightDestinationKey(config));
+  await client.retainDocument({ documentId: id, operationId, content: 'new turn', tags: [scope, chat], updateMode: 'append' });
+  assert.equal(requests[0].body.items[0].update_mode, 'append');
+  assert.equal((await client.recall({ query: 'turn', tags: [scope] }))[0].documentId, id);
+  await client.deleteDocument(id);
+});
+
+test('initialization fails closed when document text required by append is not confirmed', async () => {
+  for (const stored of [undefined, false, 'true']) {
+    const { client } = fixture(url => response(url.endsWith('/config')
+      ? { bank_id: config.bankId, config: { retain_extraction_mode: 'chunks', store_document_text: stored } }
+      : { bank_id: config.bankId }));
+    await assert.rejects(client.initializeBank(), /document text storage required for append/);
+  }
 });
 
 test('lost acknowledgement can be reconciled using the original operation ID', async () => {
@@ -120,6 +153,7 @@ test('retain requires valid document, stable UUID, account and chat scope', asyn
     { ...good, tags: ['socialmedia:scope:invalid', chat] },
     { ...good, tags: [scope, scope, chat] }, { ...good, content: '' },
     { ...good, timestamp: 'bad' }, { ...good, metadata: { invalid: 1 } } as any,
+    { ...good, updateMode: 'invalid' } as any,
   ]) await assert.rejects(client.retainDocument(input), HindsightError);
   assert.equal(requests.length, 0);
 });

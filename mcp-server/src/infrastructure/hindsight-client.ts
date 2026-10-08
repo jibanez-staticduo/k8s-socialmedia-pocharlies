@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export type SemanticProvider = 'brain' | 'hindsight';
 export type HindsightRecallBudget = 'low' | 'mid' | 'high';
 export interface HindsightConfig {
@@ -16,6 +18,7 @@ export interface HindsightRetainDocument {
   metadata?: Record<string, string>;
   tags: string[];
   timestamp?: string;
+  updateMode?: 'append' | 'replace';
 }
 
 export type HindsightOperationStatus =
@@ -135,6 +138,36 @@ export function socialmediaDocumentId(messageId: string): string {
   return `socialmedia-${messageId.toLowerCase()}`;
 }
 
+export interface SocialmediaConversationScope {
+  platform: string;
+  namespace: string;
+  provider_account: string;
+  conversation_id: string;
+  topic_id?: string;
+}
+
+export function socialmediaConversationDocumentId(scope: SocialmediaConversationScope): string;
+export function socialmediaConversationDocumentId(platform: string, namespace: string,
+  providerAccount: string, conversationId: string, topicId?: string): string;
+export function socialmediaConversationDocumentId(platformOrScope: string | SocialmediaConversationScope,
+  namespace?: string, providerAccount?: string, conversationId?: string, topicId?: string): string {
+  const scope = typeof platformOrScope === 'string'
+    ? [platformOrScope, namespace, providerAccount, conversationId, topicId || '']
+    : [platformOrScope.platform, platformOrScope.namespace, platformOrScope.provider_account,
+      platformOrScope.conversation_id, platformOrScope.topic_id || ''];
+  scope.slice(0, 4).forEach(value => nonempty(value as string));
+  if (typeof scope[4] !== 'string') fail('input', 'SocialMedia topic ID must be a string');
+  return `socialmedia-conversation-${createHash('sha256').update(JSON.stringify(scope)).digest('hex')}`;
+}
+
+export function isSocialmediaConversationDocumentId(id: string): boolean {
+  return /^socialmedia-conversation-[0-9a-f]{64}$/.test(id);
+}
+
+export function hindsightDestinationKey(config: Pick<HindsightConfig, 'url' | 'bankId'>): string {
+  return createHash('sha256').update(JSON.stringify([config.url.replace(/\/+$/, ''), config.bankId])).digest('hex');
+}
+
 export function messageIdFromHindsightDocumentId(documentId: string): string | undefined {
   const id = documentId.startsWith('socialmedia-') ? documentId.slice('socialmedia-'.length) : '';
   return UUID.test(id) ? id.toLowerCase() : undefined;
@@ -168,7 +201,9 @@ function operationUuid(id: string): void {
 }
 
 function documentId(id: string): void {
-  if (!messageIdFromHindsightDocumentId(id)) fail('input', 'Hindsight document ID must identify a SocialMedia message UUID');
+  if (!messageIdFromHindsightDocumentId(id) && !isSocialmediaConversationDocumentId(id)) {
+    fail('input', 'Hindsight document ID must identify a SocialMedia message or conversation');
+  }
 }
 
 // CONTRACT: http.hindsight.socialmedia-bank.v1
@@ -179,6 +214,10 @@ export class HindsightClient {
   constructor(config: HindsightConfig, private readonly fetchImpl: HindsightFetch = fetch) {
     this.config = validateConfig(config);
     this.baseUrl = `${this.config.url}/v1/default/banks/${encodeURIComponent(this.config.bankId)}`;
+  }
+
+  get destination(): string {
+    return hindsightDestinationKey(this.config);
   }
 
   private async request(method: string, path: string, body?: unknown, absentOk = false): Promise<unknown> {
@@ -224,10 +263,15 @@ export class HindsightClient {
   async initializeBank(): Promise<void> {
     const bank = await this.request('PUT', '', { name: this.config.bankId, retain_extraction_mode: 'chunks' });
     if (!object(bank) || bank.bank_id !== this.config.bankId) fail('protocol', 'Hindsight returned an unexpected bank');
-    const config = await this.request('PATCH', '/config', { updates: { retain_extraction_mode: 'chunks' } });
+    const config = await this.request('PATCH', '/config', {
+      updates: { retain_extraction_mode: 'chunks', store_document_text: true },
+    });
     if (!object(config) || config.bank_id !== this.config.bankId || !object(config.config) ||
         config.config.retain_extraction_mode !== 'chunks') {
       fail('protocol', 'Hindsight did not confirm chunks extraction mode');
+    }
+    if (config.config.store_document_text !== true) {
+      fail('protocol', 'Hindsight did not confirm document text storage required for append');
     }
   }
 
@@ -236,6 +280,9 @@ export class HindsightClient {
     operationUuid(input.operationId);
     validateTags(input.tags, true);
     nonempty(input.content);
+    if (input.updateMode !== undefined && !['append', 'replace'].includes(input.updateMode)) {
+      fail('input', 'Hindsight update mode must be append or replace');
+    }
     if (input.metadata && (!object(input.metadata) || Object.values(input.metadata).some(v => typeof v !== 'string'))) {
       fail('input', 'Hindsight metadata values must be strings');
     }
@@ -244,7 +291,7 @@ export class HindsightClient {
     }
     const result = await this.request('POST', '/memories', {
       async: true, operation_id: input.operationId,
-      items: [{ content: input.content, document_id: input.documentId, update_mode: 'replace',
+      items: [{ content: input.content, document_id: input.documentId, update_mode: input.updateMode || 'replace',
         metadata: input.metadata, tags: input.tags, timestamp: input.timestamp }],
     });
     if (!object(result) || result.success !== true || result.bank_id !== this.config.bankId ||
@@ -297,7 +344,8 @@ export class HindsightClient {
         fail('protocol', 'Hindsight returned an invalid recall hit');
       }
       // Observations may lack document IDs. Never hydrate them or unscoped results.
-      if (typeof raw.document_id !== 'string' || !messageIdFromHindsightDocumentId(raw.document_id) ||
+      if (typeof raw.document_id !== 'string' ||
+          (!messageIdFromHindsightDocumentId(raw.document_id) && !isSocialmediaConversationDocumentId(raw.document_id)) ||
           !Array.isArray(raw.tags) || raw.tags.some(tag => typeof tag !== 'string') ||
           !input.tags.every(tag => (raw.tags as string[]).includes(tag))) continue;
       const metadata = object(raw.metadata) && Object.values(raw.metadata).every(v => typeof v === 'string')

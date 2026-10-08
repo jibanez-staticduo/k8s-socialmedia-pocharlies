@@ -1829,12 +1829,15 @@ contracts:
   note: 'Optional SEMANTIC_PROVIDER=hindsight consumer of the Hindsight 0.10.1 REST API;
     default brain behavior remains available. Only dedicated socialmedia banks are accepted,
     default socialmedia-staticduo, never user-staticduo. PUT bank and PATCH /config select
-    retain_extraction_mode=chunks. POST /memories uses async:true, a persisted UUID operation_id,
-    one item with stable document_id, update_mode=replace, string metadata, original timestamp
+    retain_extraction_mode=chunks and store_document_text=true. POST /memories uses async:true, a persisted UUID operation_id,
+    one item with stable conversation document_id, update_mode=append for exact prefix growth
+    or replace for canonical rebuilds, string metadata, original timestamp
     and compound provider/namespace/account/chat tags. GET /operations/{operation_id} is reconciled
     before resubmission; completed alone confirms indexing, failed/cancelled use POST /retry.
     DELETE /documents/{document_id} confirms success/document_id or accepts 404. Recall POST
     /memories/recall uses all_strict tags and bounded budget/max_tokens; returned document_id
-    and tags are checked before exact account-scoped PostgreSQL hydration. Bearer credentials
+    and tags are checked against the confirmed destination-scoped conversation/message mapping
+    before exact account-scoped PostgreSQL hydration. Legacy message documents remain readable
+    only until their conversation is migrated. Bearer credentials
     remain server-side and redirect forwarding is refused. Source versions, accepted versus
     completed operations and tombstones live in the separate additive Hindsight ledger.'
