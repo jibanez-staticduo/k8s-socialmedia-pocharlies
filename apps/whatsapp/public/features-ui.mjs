@@ -144,8 +144,9 @@ export function presenceLabel(value, locale = 'es-ES', now = new Date()) {
   if (presence === 'composing') return 'Escribiendo…';
   if (presence === 'recording') return 'Grabando audio…';
   if (source.online === true || ['online', 'available', 'paused'].includes(presence)) return 'En línea';
-  const lastSeen = source.lastSeen || source.last_seen || source.lastSeenAt;
-  const date = lastSeen == null ? null : new Date(typeof lastSeen === 'number' && lastSeen < 1e12 ? lastSeen * 1000 : lastSeen);
+  const lastSeen = source.lastSeen ?? source.last_seen ?? source.lastSeenAt;
+  const date = lastSeen == null || lastSeen === '' || (typeof lastSeen === 'number' && (!Number.isFinite(lastSeen) || lastSeen <= 0))
+    ? null : new Date(typeof lastSeen === 'number' && lastSeen < 1e12 ? lastSeen * 1000 : lastSeen);
   if (date && !Number.isNaN(date.getTime())) {
     return `Última vez ${new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'short' }).format(date)}`;
   }

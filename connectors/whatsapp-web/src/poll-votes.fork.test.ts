@@ -170,12 +170,35 @@ test('aggregation keeps only the latest vote per voter and never invents options
   ];
   const result = aggregateCapturedPollVotes(DETAILS, votes);
   assert.deepEqual(result.options, [
-    { name: 'Uno', count: 1, selectedByMe: true },
-    { name: 'Dos', count: 1, selectedByMe: false },
-    { name: 'Tres', count: 0, selectedByMe: false },
+    { name: 'Uno', count: 1, selectedByMe: true, voters: [{ jid: ME, fromMe: true }] },
+    { name: 'Dos', count: 1, selectedByMe: false, voters: [{ jid: 'v1', fromMe: false }] },
+    { name: 'Tres', count: 0, selectedByMe: false, voters: [] },
   ]);
   assert.equal(result.totalVoters, 3);
   assert.equal(result.capturedVotes, 4);
+});
+
+test('voter identities move with changes, retract, and never repeat within an option', () => {
+  const first: CapturedPollVote = {
+    voterJid: 'v1@lid', fromMe: false, senderTimestampMs: 10,
+    selectedHashes: [optionHash('Uno'), optionHash('Uno')],
+  };
+  const changed = { ...first, senderTimestampMs: 20, selectedHashes: [optionHash('Dos'), optionHash('Dos')] };
+  const retracted = { ...first, senderTimestampMs: 30, selectedHashes: [] };
+  const own = { ...first, voterJid: ME, fromMe: true, selectedHashes: [optionHash('Dos')] };
+  const initial = aggregateCapturedPollVotes(DETAILS, [first]);
+  assert.equal(initial.options[0].count, 1);
+  assert.deepEqual(initial.options[0].voters, [{ jid: 'v1@lid', fromMe: false }]);
+  const updated = aggregateCapturedPollVotes(DETAILS, [changed, own, first]);
+  assert.deepEqual(updated.options[0].voters, []);
+  assert.equal(updated.options[1].count, 2);
+  assert.deepEqual(updated.options[1].voters, [
+    { jid: 'v1@lid', fromMe: false }, { jid: ME, fromMe: true },
+  ]);
+  const withdrawn = aggregateCapturedPollVotes(DETAILS, [first, changed, retracted, own]);
+  assert.deepEqual(withdrawn.options[1].voters, [{ jid: ME, fromMe: true }]);
+  assert.equal(withdrawn.options[1].count, 1);
+  assert.equal(withdrawn.totalVoters, 1);
 });
 
 test('option validation is exact, deduplicated and honours selectableCount semantics', () => {
@@ -313,7 +336,7 @@ function clientWithFakeSock(): { client: BaileysClient; relayed: unknown[] } {
   return { client, relayed };
 }
 
-test('getPollResults echoes unprefixed ids, caps to local_partial and hides identities', async () => {
+test('getPollResults echoes unprefixed ids, keeps local voters and caps to local_partial', async () => {
   const payloads = [
     {
       kind: 'creation',
@@ -356,21 +379,20 @@ test('getPollResults echoes unprefixed ids, caps to local_partial and hides iden
     assert.equal(known.totalVoters, 2);
     assert.equal(known.decryptionFailures, 0);
     assert.deepEqual(known.options, [
-      { name: 'Uno', count: 1, selectedByMe: true },
-      { name: 'Dos', count: 1, selectedByMe: false },
-      { name: 'Tres', count: 0, selectedByMe: false },
+      { name: 'Uno', count: 1, selectedByMe: true, voters: [{ jid: ME, fromMe: true }] },
+      { name: 'Dos', count: 1, selectedByMe: false, voters: [{ jid: 'voter9@lid', fromMe: false }] },
+      { name: 'Tres', count: 0, selectedByMe: false, voters: [] },
     ]);
     assert.equal(unknown.available, false);
     assert.equal(unknown.availability, 'unavailable');
     assert.equal(unknown.reason, 'NO_LOCAL_DATA');
     const serialized = JSON.stringify(polls);
     for (const forbidden of [
-      'voter9',
-      '@s.whatsapp.net',
       '@g.us',
       'participant',
-      'voters',
       'messageSecret',
+      'encPayload',
+      'encIv',
     ])
       assert.ok(!serialized.includes(forbidden), `payload must not expose ${forbidden}`);
   } finally {
@@ -434,9 +456,9 @@ test('withdrawal supersedes an earlier vote without leaving a selected option or
   });
   assert.equal(decrypted.undecryptable, 0);
   assert.deepEqual(aggregateCapturedPollVotes(DETAILS, decrypted.votes).options, [
-    { name: 'Uno', count: 0, selectedByMe: false },
-    { name: 'Dos', count: 0, selectedByMe: false },
-    { name: 'Tres', count: 0, selectedByMe: false },
+    { name: 'Uno', count: 0, selectedByMe: false, voters: [] },
+    { name: 'Dos', count: 0, selectedByMe: false, voters: [] },
+    { name: 'Tres', count: 0, selectedByMe: false, voters: [] },
   ]);
   assert.equal(aggregateCapturedPollVotes(DETAILS, decrypted.votes).totalVoters, 0);
 });

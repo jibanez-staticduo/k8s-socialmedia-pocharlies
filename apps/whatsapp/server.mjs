@@ -19,7 +19,8 @@ import { WHATSAPP_CONVERSATION_SQL } from './lib/conversation-scope.mjs';
 import { readContactDirectory } from './lib/contact-directory.mjs';
 import { readNovedades, novedadesMediaResponse, projectNovedadesChannel } from './lib/novedades-proxy.mjs';
 import { Sessions } from './lib/sessions.mjs';
-import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
+import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, MESSAGE_RETAINED_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
+import { pollVoterNames } from './lib/poll-voter-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
 import { publicMessageMetadata, publicPollResults, publicEventResults } from './lib/message-projection.mjs';
 import { pollDraft } from './public/poll-draft.mjs';
@@ -494,7 +495,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const id = required(messageId, 'messageId', 512);
     const rows = await query(
       `SELECT m.id, m.wa_message_id, m.conversation_id, m.content, m.direction,
-              m.message_type, m.reply_to_message_id, m.is_deleted, m.is_forwarded,
+              m.message_type, m.reply_to_message_id, m.is_deleted, m.is_forwarded, m.metadata,
               m.wa_timestamp
          FROM messages m
         WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp'
@@ -632,7 +633,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const rows = await query(
       `SELECT DISTINCT ON (m.conversation_id) m.conversation_id, m.message_type, m.wa_timestamp
          FROM messages m WHERE m.account=$1 AND m.conversation_id=ANY($2::text[])
-           AND m.platform='whatsapp' AND NOT m.is_deleted AND ${MESSAGE_VISIBLE_SQL}
+           AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL} AND ${MESSAGE_VISIBLE_SQL}
         ORDER BY m.conversation_id, m.wa_timestamp DESC, m.id DESC`,
       [accountId, ids]
     );
@@ -652,7 +653,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       const target = (await query(
         `SELECT m.id, m.wa_timestamp FROM messages m
           WHERE m.account=$1 AND m.conversation_id=ANY($2::text[])
-            AND m.platform='whatsapp' AND NOT m.is_deleted AND ${MESSAGE_VISIBLE_SQL}
+            AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL} AND ${MESSAGE_VISIBLE_SQL}
             AND (m.id::text=$3 OR m.wa_message_id=$3) LIMIT 1`,
         [account.accountId, readIds, required(around, 'messageId', 512)]
       ))[0];
@@ -690,12 +691,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         `SELECT m.id, m.wa_message_id AS "waMessageId", m.content AS text, m.direction = 'OUTBOUND' AS "fromMe",
                 m.wa_timestamp AS timestamp, m.message_type AS type, m.metadata,
                 m.reply_to_message_id AS "replyToMessageId", COALESCE(m.is_edited, false) AS "isEdited",
+                COALESCE(m.is_deleted, false) AS "isDeleted", m.status AS "deliveryStatus",
                 ${MESSAGE_REPLY_SELECT_SQL},
                 CASE WHEN m.direction = 'OUTBOUND' THEN NULL ELSE COALESCE(p.name, p.push_name, p.id) END AS "senderName"
            FROM messages m
            LEFT JOIN participants p ON p.id=m.sender_wa_id AND p.account=m.account
            ${MESSAGE_REPLY_JOIN_SQL}
-          WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp' AND NOT m.is_deleted
+          WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}
             AND ${MESSAGE_VISIBLE_SQL}
             AND ${cursorClause}
           ORDER BY m.wa_timestamp DESC, m.id DESC LIMIT ${limitParam}`,
@@ -724,7 +726,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       `SELECT a.id,a.message_id,a.mime_type,a.file_name,a.file_type,a.file_size,a.file_url,a.caption
          FROM attachments a JOIN messages m ON m.id=a.message_id
         WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp'
-          AND NOT m.is_deleted AND m.id=ANY($3::uuid[])`,
+          AND ${MESSAGE_RETAINED_SQL} AND m.id=ANY($3::uuid[])`,
       [account.accountId, readIds, ids]
     ) : [];
     const attachedIds = new Set(attachments.map(item => item.message_id));
@@ -733,7 +735,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       `SELECT m.id FROM messages m JOIN whatsapp_message_payloads p
          ON p.wa_message_id=m.wa_message_id AND p.account=m.account
         WHERE m.id=ANY($1::uuid[]) AND m.account=$2 AND m.conversation_id=ANY($3::text[])
-          AND m.platform='whatsapp' AND NOT m.is_deleted
+          AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}
           AND jsonb_typeof(p.message_payload->'imageMessage'->'jpegThumbnail') IN ('string','object')
           AND pg_column_size(p.message_payload->'imageMessage'->'jpegThumbnail') <= 300000`,
       [missingImages, account.accountId, readIds]
@@ -745,7 +747,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
          FROM messages m JOIN whatsapp_message_payloads p
            ON p.wa_message_id=m.wa_message_id AND p.account=m.account
         WHERE m.id=ANY($1::uuid[]) AND m.account=$2 AND m.conversation_id=ANY($3::text[])
-          AND m.platform='whatsapp' AND m.message_type='TEXT' AND NOT m.is_deleted
+          AND m.platform='whatsapp' AND m.message_type='TEXT' AND ${MESSAGE_RETAINED_SQL}
           AND pg_column_size(p.message_payload->'extendedTextMessage') <= 300000`,
       [textIds, account.accountId, readIds]
     ) : [];
@@ -758,7 +760,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const result = await featureConnector(account, '/messages/poll/results', {
           body: { conversationId: providerChatId(conversation), pollMessageIds }, timeout: 2500,
         });
-        for (const poll of Array.isArray(result.polls) ? result.polls : []) {
+        const captured = (Array.isArray(result.polls) ? result.polls : []).filter(poll => pollMessageIds.includes(poll?.pollMessageId));
+        for (const poll of await pollVoterNames(query, account.accountId, captured)) {
           if (pollMessageIds.includes(poll?.pollMessageId)) pollResults.set(poll.pollMessageId, publicPollResults(poll));
         }
       } catch { /* The chat remains readable when poll results are unavailable. */ }
@@ -784,6 +787,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       },
       text: row.text || '',
       isEdited: row.isEdited === true,
+      isDeleted: row.isDeleted === true,
+      deliveryStatus: ['pending', 'sent', 'delivered', 'read', 'played', 'failed'].includes(row.deliveryStatus) ? row.deliveryStatus : null,
       reactions: reactionRows.filter(reaction => reaction.target_wa_message_id === row.waMessageId).map(reaction => ({
         emoji: reaction.emoji, reactorId: reaction.reactor_jid,
       })),
@@ -903,9 +908,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       avatarInflight.delete(inflightKey);
     }
   }
-  async function actionMessage(account, chat, body) {
+  async function actionMessage(account, chat, body, { allowRevoked = false } = {}) {
     const { conversation, message } = await messageFor(account, chat, body.messageId || body.id);
-    if (message.is_deleted) throw fail(409, 'Message is deleted');
+    if (message.metadata?.deleted_for_me === true || (message.is_deleted && !allowRevoked)) throw fail(409, 'Message is deleted');
     return { conversation, message, providerChat: providerChatId(conversation) };
   }
   async function localChatActions(account, chat) {
@@ -1582,6 +1587,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const result = await readMessageRows(a, chat, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') });
         return json(200, { messages: result.messages, nextCursor: result.nextCursor });
       }
+      // CONTRACT: http.whatsapp-connector.history-recover.v1
+      if (req.method === 'POST' && path === '/api/messages/recover') {
+        const body = await bodyJSON(req); const a = accountParam(body.account); const chat = safeChatId(body.chat);
+        const conversation = await conversationFor(a, chat);
+        const result = await featureConnector(a, '/history/recover', { method: 'POST', body: { chatId: providerChatId(conversation) } });
+        if (!['requested', 'recovered', 'no_anchor', 'cooldown'].includes(result.status)) throw featureError(502, 'UPSTREAM_INVALID', 'Invalid history recovery response');
+        const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+        return json(200, { account: a.accountId, chat: conversation.id, status: result.status,
+          requested: count(result.requested), recovered: count(result.recovered), placeholderRequests: count(result.placeholderRequests) });
+      }
       if (req.method === 'GET' && path === '/api/messages/around') {
         const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
         const messageId = required(url.searchParams.get('messageId'), 'messageId', 512);
@@ -1598,7 +1613,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
              FROM messages m JOIN whatsapp_message_payloads p
                ON p.wa_message_id=m.wa_message_id AND p.account=m.account
             WHERE m.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[])
-              AND m.platform='whatsapp' AND m.message_type='TEXT' AND NOT m.is_deleted
+              AND m.platform='whatsapp' AND m.message_type='TEXT' AND ${MESSAGE_RETAINED_SQL}
               AND pg_column_size(p.message_payload->'extendedTextMessage') <= 300000`,
           [id, a.accountId, readIds]
         );
@@ -1622,7 +1637,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
              FROM messages m JOIN whatsapp_message_payloads p
                ON p.wa_message_id=m.wa_message_id AND p.account=m.account
             WHERE m.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[])
-              AND m.platform='whatsapp' AND m.message_type='IMAGE' AND NOT m.is_deleted
+              AND m.platform='whatsapp' AND m.message_type='IMAGE' AND ${MESSAGE_RETAINED_SQL}
               AND pg_column_size(p.message_payload->'imageMessage'->'jpegThumbnail') <= 300000`,
           [id, a.accountId, readIds]
         );
@@ -1637,7 +1652,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountFor(url.searchParams.get('account')); const chat = required(url.searchParams.get('chat'), 'chat');
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
         const id = path.slice('/api/media/'.length); if (!/^[a-f0-9-]{36}$/.test(id)) throw fail(404, 'Media not found');
-        const rows = await query("SELECT COALESCE(a.file_url,a.storage_key) AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND NOT m.is_deleted", [id, a.accountId, readIds]);
+        const rows = await query(`SELECT COALESCE(a.file_url,a.storage_key) AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}`, [id, a.accountId, readIds]);
         if (!rows.length) throw fail(404, 'Media not found');
         const media = rows[0]; const upstream = mediaRequest(media.ref, env);
         const range = req.headers.range;
@@ -2236,7 +2251,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const forwardIds = action === 'forward' && Array.isArray(body.messageIds) ? body.messageIds : null;
         const target = forwardIds?.length
           ? await actionMessage(a, chat, { ...body, messageId: forwardIds[0] })
-          : await actionMessage(a, chat, body);
+          : await actionMessage(a, chat, body, { allowRevoked: action === 'delete' && body.scope === 'me' });
         const forwardTargets = forwardIds?.length
           ? await Promise.all(forwardIds.map(messageId => actionMessage(a, chat, { ...body, messageId })))
           : [target];
@@ -2266,7 +2281,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (!['me', 'everyone'].includes(body.scope)) throw fail(400, 'Invalid delete scope');
           const suffix = body.scope === 'me' ? '/for-me' : '';
           result = await featureConnector(a, `/messages/${encodeURIComponent(target.providerChat)}/${encodeURIComponent(messageId)}${suffix}`, { method: 'DELETE', body: {}, requireSending: true });
-          await query("UPDATE messages SET is_deleted=true, status='deleted', deleted_at=now(), updated_at=now() WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id]);
+          await query("UPDATE messages SET is_deleted=true, status='deleted', deleted_at=now(), updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('deleted_for_me',$4::boolean) WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, body.scope === 'me']);
         }
         return json(200, { account: a.accountId, chat, action, confirmed: true, ...result });
       }

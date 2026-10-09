@@ -13,6 +13,7 @@ import {
 } from './db-writer';
 import { deserializeDurableValue, serializeDurableValue } from './whatsapp-capabilities';
 import { novedadesKind } from './novedades-store';
+import { hasCapturedPayloadContent } from './message-preservation';
 
 /** Re-exported for the upstream durable tests and HTTP callers that import them from here. */
 export { deserializeDurableValue, serializeDurableValue } from './whatsapp-capabilities';
@@ -476,7 +477,10 @@ export async function markMessageDeleted(messageId: string): Promise<void> {
 export async function markMessageDeletedForMe(messageId: string, chatId: string): Promise<void> {
   await pool().query(
     `UPDATE messages
-        SET is_deleted = TRUE, deleted_at = now(), updated_at = now()
+        SET is_deleted = TRUE, deleted_at = now(), updated_at = now(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+              'deleted_for_me', TRUE, 'deleted_for_me_at', now(),
+              'deleted_for_me_source', 'connector')
       WHERE wa_message_id = $1 AND account = $2 AND conversation_id = $3`,
     [
       accountKey(messageId),
@@ -982,6 +986,7 @@ export function toDurablePayload(
   message: proto.IMessage | null | undefined
 ): Record<string, unknown> | null {
   if (!message) return null;
+  if (!hasCapturedPayloadContent(message)) return null;
   const decoded = proto.Message.fromObject(message as Record<string, unknown>);
   // Also inside ephemeral / view-once wrappers.
   if (decoded.protocolMessage || normalizeMessageContent(decoded)?.protocolMessage) return null;

@@ -206,6 +206,9 @@ test('presence and photo helpers do not fabricate private data or allow external
   assert.equal(visiblePresenceLabel({ state: 'recording', online: true, available: true }), 'Grabando audio…');
   assert.equal(presenceLabel({ state: 'unavailable', available: true }), 'Desconectado');
   assert.match(presenceLabel({ lastSeen: '2026-09-23T09:00:00Z' }), /Última vez/);
+  assert.match(presenceLabel({ status: 'unavailable', lastSeen: 1786000000 }), /Última vez/);
+  assert.equal(presenceLabel({ status: 'unavailable', lastSeen: 0 }), 'Desconectado');
+  assert.equal(presenceLabel({ status: 'unknown', lastSeen: -1 }), 'Estado no disponible');
   assert.equal(visiblePresenceLabel({ state: 'online', available: false }), '');
   assert.equal(visiblePresenceLabel({ state: 'online', available: true }), 'En línea');
   assert.equal(visiblePresenceLabel({ state: 'unknown', available: true }), '');

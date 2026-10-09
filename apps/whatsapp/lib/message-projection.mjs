@@ -3,6 +3,11 @@ const number = value => typeof value === 'number' && Number.isFinite(value) ? va
 
 export function publicMessageMetadata(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return { ...typedMessageMetadata(source), ...(source.viewOnce === true ? { viewOnce: true } : {}) };
+}
+
+function typedMessageMetadata(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const kind = string(source.kind, 32);
   if (kind === 'poll') return {
     kind,
@@ -30,6 +35,9 @@ export function publicPollResults(value) {
     name: string(option?.name, 500),
     count: Math.max(0, Math.floor(number(option?.count) ?? 0)),
     selectedByMe: option?.selectedByMe === true,
+    voters: Array.isArray(option?.voters) ? option.voters.slice(0, 1000).filter(voter =>
+      voter && typeof voter === 'object' && typeof voter.id === 'string' && typeof voter.name === 'string')
+      .map(voter => ({ id: string(voter.id, 512), name: string(voter.name, 500) })).filter(voter => voter.id && voter.name) : [],
   })).filter(option => option.name) : [];
   return {
     available: value.available === true,

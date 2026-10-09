@@ -1,3 +1,4 @@
+import './test-env';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BaileysClient } from './baileys-client';
@@ -39,4 +40,32 @@ test('the capability presence alias respects the account availability gate', asy
     if (previous === undefined) delete process.env.WA_PRESENCE_ALLOW_AVAILABLE;
     else process.env.WA_PRESENCE_ALLOW_AVAILABLE = previous;
   }
+});
+
+test('capability presence resolves PN/LID aliases and selects the newest observation', async () => {
+  const client = new BaileysClient('/tmp/unused-presence-session', 'test-key');
+  const pn = '34600123456@c.us';
+  const lid = '900001@lid';
+  Object.assign(client, {
+    sock: { signalRepository: { lidMapping: {
+      getLIDForPN: async () => lid,
+      getPNForLID: async () => '34600123456@s.whatsapp.net',
+    } } },
+  });
+  const state = (client as any).presenceState as Map<string, unknown>;
+  state.set(`${lid}:${lid}`, { status: 'available', participantId: lid, observedAt: Date.now() - 1000 });
+  assert.equal((await client.getCapabilityPresence(pn)).status, 'available');
+  assert.equal(await client.matchesPresenceChat(pn, lid), true);
+  assert.equal(await client.matchesPresenceChat(pn, 'unrelated@lid'), false);
+  state.set(`${pn}:${pn}`, { status: 'unavailable', participantId: pn, observedAt: Date.now() });
+  assert.equal((await client.getCapabilityPresence(lid)).status, 'unavailable');
+  assert.equal((await client.getCapabilityPresence(lid, pn)).status, 'unavailable');
+  assert.equal((await client.getCapabilityPresence(lid)).lastSeen, undefined);
+});
+
+test('capability presence does not leak another participant into a requested group member', async () => {
+  const client = new BaileysClient('/tmp/unused-presence-session', 'test-key');
+  const state = (client as any).presenceState as Map<string, unknown>;
+  state.set('123@g.us:456@c.us', { status: 'available', participantId: '456@c.us', observedAt: Date.now() });
+  assert.equal((await client.getCapabilityPresence('123@g.us', '789@c.us')).status, 'unknown');
 });

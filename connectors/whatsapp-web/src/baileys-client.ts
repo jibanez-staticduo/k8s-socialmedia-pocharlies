@@ -1,4 +1,5 @@
 import { readContactBlocked } from './contact-block';
+import { directReceiptStatus } from './receipt-status';
 import { chatPinState } from './chat-pin-state';
 import { qrPageUrl, whatsappSocketOptions } from './url-config';
 import { CommunityService, CommunityError } from './novedades-communities';
@@ -57,6 +58,11 @@ import {
   generateWAMessageFromContent,
 } from '@whiskeysockets/baileys';
 import { normalizeMessageContent } from '@whiskeysockets/baileys/lib/Utils/messages.js';
+import {
+  hasUserMessageContent,
+  isViewOnceContent,
+  UNAVAILABLE_MESSAGE_TYPES,
+} from './message-preservation';
 import {
   isTcTokenExpired,
   resolveIssuanceJid,
@@ -511,6 +517,15 @@ interface IngestOptions {
 interface IngestResult {
   inserted: boolean;
   waMessage?: WhatsAppMessage;
+}
+
+export interface ChatHistoryRecoveryResult {
+  chatId: string;
+  status: 'requested' | 'recovered' | 'no_anchor' | 'cooldown';
+  requested: number;
+  placeholderRequests: number;
+  recovered: number;
+  retryAfterMs?: number;
 }
 
 export type WhatsAppSendFailureClass =
@@ -1681,6 +1696,9 @@ export class BaileysClient extends EventEmitter {
   private userDevicesCache: CacheStore;
   private placeholderResendCache: CacheStore;
   private historyBackfillRequestedUntil = 0;
+  private readonly historyRecoveryAnchors = new Map<string, WAMessage>();
+  private readonly historyRecoveryRequestedAt = new Map<string, number>();
+  private readonly historyRecoveryInFlight = new Map<string, Promise<ChatHistoryRecoveryResult>>();
 
   constructor(sessionPath: string, encryptionKey: string, options: BaileysClientOptions = {}) {
     super();
@@ -1954,7 +1972,12 @@ export class BaileysClient extends EventEmitter {
       if (type !== 'notify' && type !== 'append') return;
       const isLive = type === 'notify';
       for (const msg of responsesLast(messages)) {
-        if (!msg.message && !novedadesKind(msg.key)) continue;
+        if (
+          !msg.message &&
+          msg.messageStubType !== proto.WebMessageInfo.StubType.CIPHERTEXT &&
+          !novedadesKind(msg.key)
+        )
+          continue;
         try {
           await this.ingestMessage(msg, {
             source: isLive ? 'live' : 'baileys_history_sync',
@@ -1983,6 +2006,7 @@ export class BaileysClient extends EventEmitter {
         if (novedadesKind({ remoteJid: c.id })) continue;
         const isGroup = !!isJidGroup(c.id);
         const norm = this.normalizeJid(c.id);
+        this.rememberHistorySnapshotMessages((c as any).messages);
         const pinned = chatPinState(c);
         this.chatStore.set(norm, {
           id: norm,
@@ -2007,6 +2031,7 @@ export class BaileysClient extends EventEmitter {
       // titles. Persist them before messages can recreate an older title.
       await Promise.all(chatNameWrites);
       await this.applyHistoryContacts(contacts || []);
+      for (const message of messages) this.rememberHistoryRecoveryAnchor(message);
       if (!this.historySyncOnLogin && Date.now() > this.historyBackfillRequestedUntil) return;
       this.logger.info(
         `history.set received chats=${chats.length} messages=${messages.length} isLatest=${isLatest}`
@@ -2109,6 +2134,7 @@ export class BaileysClient extends EventEmitter {
         if (!c.id) continue;
         if (novedadesKind({ remoteJid: c.id })) continue;
         const norm = this.normalizeJid(c.id);
+        this.rememberHistorySnapshotMessages((c as any).messages);
         const pinned = chatPinState(c);
         this.chatStore.set(norm, {
           id: norm,
@@ -2249,11 +2275,7 @@ export class BaileysClient extends EventEmitter {
     sock.ev.on('message-receipt.update' as any, (updates: any[]) => {
       for (const u of updates || []) {
         const waMessageId = u?.key?.id;
-        const t: 'read' | 'delivered' | null = u?.receipt?.readTimestamp
-          ? 'read'
-          : u?.receipt?.receiptTimestamp
-            ? 'delivered'
-            : null;
+        const t = directReceiptStatus(u);
         if (waMessageId && t) {
           void setMessageStatus(waMessageId, t).catch(() => {});
         }
@@ -2570,6 +2592,7 @@ export class BaileysClient extends EventEmitter {
 
   private async ingestMessage(msg: WAMessage, options: IngestOptions = {}): Promise<IngestResult> {
     if (!this.ingest) return { inserted: false };
+    this.rememberHistoryRecoveryAnchor(msg);
     const novedades = novedadesKind(msg.key);
     if (novedades) {
       try {
@@ -2832,10 +2855,24 @@ export class BaileysClient extends EventEmitter {
 
     const isLiveMedia =
       !options.skipMediaDownload &&
-      (options.storeMedia ?? (options.source || 'live') === 'live') &&
-      waMessage.messageType !== 'TEXT' &&
-      waMessage.messageType !== 'REACTION';
-    if (
+      (waMessage.metadata?.viewOnce === true ||
+        Date.now() - (this.historyRecoveryRequestedAt.get(waMessage.conversationId) || 0) <
+          5 * 60 * 1000 ||
+        (options.storeMedia ?? (options.source || 'live') === 'live')) &&
+      ['IMAGE', 'VIDEO', 'AUDIO', 'PTT', 'DOCUMENT', 'STICKER'].includes(waMessage.messageType);
+    if (isLiveMedia && waMessage.metadata?.viewOnce === true) {
+      // Capture while the received payload is still available, before publishing.
+      await this.downloadAndStoreMedia(
+        msg,
+        msgId,
+        waMessage.messageType,
+        waMessage.content || undefined
+      ).catch(error =>
+        this.logger.warn(
+          `View-once media capture failed for ${waMessage.waMessageId}: ${error?.message || error}`
+        )
+      );
+    } else if (
       isLiveMedia &&
       waMessage.messageType === 'AUDIO' &&
       this.emitAudioAttachments &&
@@ -2918,7 +2955,11 @@ export class BaileysClient extends EventEmitter {
   private convertMessage(msg: WAMessage): WhatsAppMessage | null {
     if (!msg.key?.id || !msg.key.remoteJid) return null;
 
-    const content = normalizeMessageContent(msg.message);
+    const content =
+      normalizeMessageContent(msg.message) ||
+      (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT
+        ? { secretEncryptedMessage: {} }
+        : undefined);
     if (!content) return null;
 
     // Determine type + body
@@ -3060,7 +3101,10 @@ export class BaileysClient extends EventEmitter {
       messageType = 'EVENT';
       body = event.name || null;
       structured = { event };
-    } else if (content.protocolMessage) {
+    } else if ((content as any).secretEncryptedMessage && !hasUserMessageContent(content)) {
+      messageType = 'UNAVAILABLE';
+      metadata = { contentUnavailable: true, unavailableReason: 'encrypted_provider_payload' };
+    } else if (content.protocolMessage || !hasUserMessageContent(content)) {
       // ignore key updates etc.
       return null;
     } else {
@@ -3098,6 +3142,10 @@ export class BaileysClient extends EventEmitter {
     const senderRaw = msg.key.fromMe
       ? this.meJid || msg.key.remoteJid
       : msg.key.participant || msg.key.remoteJid;
+
+    if (isViewOnceContent(msg.message)) {
+      metadata = { ...metadata, viewOnce: true };
+    }
 
     return {
       waMessageId: msg.key.id,
@@ -3283,7 +3331,7 @@ export class BaileysClient extends EventEmitter {
   }
 
   private mediaMetaFromMessage(msg: WAMessage): { mimeType?: string; fileName?: string } {
-    const c = msg.message;
+    const c = normalizeMessageContent(msg.message);
     if (!c) return {};
     if (c.imageMessage)
       return { mimeType: c.imageMessage.mimetype || 'image/jpeg', fileName: undefined };
@@ -8179,6 +8227,181 @@ export class BaileysClient extends EventEmitter {
   // History endpoints (read-from-BD; live messages are written to BD anyway).
   // ---------------------------------------------------------------------------
 
+  private rememberHistoryRecoveryAnchor(message: WAMessage): void {
+    const key = message?.key;
+    const timestamp = Number(message?.messageTimestamp);
+    if (!key?.id || !key.remoteJid || !Number.isFinite(timestamp) || timestamp <= 0) return;
+    if (novedadesKind(key)) return;
+    const chat = this.normalizeJid(key.remoteJid);
+    const previous = this.historyRecoveryAnchors.get(chat);
+    if (previous && Number(previous.messageTimestamp) < timestamp) return;
+    this.historyRecoveryAnchors.set(chat, message);
+    if (this.historyRecoveryAnchors.size > 10000)
+      this.historyRecoveryAnchors.delete(this.historyRecoveryAnchors.keys().next().value!);
+  }
+
+  private rememberHistorySnapshotMessages(messages: unknown): void {
+    if (!Array.isArray(messages)) return;
+    for (const item of messages) {
+      const message = item?.message;
+      if (message?.key) this.rememberHistoryRecoveryAnchor(message as WAMessage);
+    }
+  }
+
+  /** Recover saved payloads first; phone requests require a real observed cursor. */
+  async recoverChatHistory(chatId: string): Promise<ChatHistoryRecoveryResult> {
+    const bare = stripAccountKey(chatId);
+    if (!/^\d+(?:-\d+)?@(?:lid|c\.us|s\.whatsapp\.net|g\.us)$/.test(bare))
+      throw new MessageMutationError('Invalid chatId', 400, 'invalid_request');
+    if (!this.ingest) throw new MessageMutationError('History ingest disabled', 403, 'forbidden');
+    if (!this.sock || !this.isConnected())
+      throw new MessageMutationError('WhatsApp not connected', 503, 'not_connected');
+    const chat = await canonicalConversationId(this.normalizeJid(bare));
+    const pending = this.historyRecoveryInFlight.get(chat);
+    if (pending) return pending;
+    const lastRequestedAt = this.historyRecoveryRequestedAt.get(chat) || 0;
+    if (Date.now() - lastRequestedAt < 60000) {
+      return {
+        chatId: chat,
+        status: 'cooldown',
+        requested: 0,
+        placeholderRequests: 0,
+        recovered: 0,
+        retryAfterMs: 60000 - (Date.now() - lastRequestedAt),
+      };
+    }
+    this.historyRecoveryRequestedAt.set(chat, Date.now());
+    if (this.historyRecoveryRequestedAt.size > 10000)
+      this.historyRecoveryRequestedAt.delete(this.historyRecoveryRequestedAt.keys().next().value!);
+    const run = this.performChatHistoryRecovery(chat, bare);
+    this.historyRecoveryInFlight.set(chat, run);
+    try {
+      return await run;
+    } catch (error) {
+      this.historyRecoveryRequestedAt.delete(chat);
+      throw error;
+    } finally {
+      this.historyRecoveryInFlight.delete(chat);
+    }
+  }
+
+  private async performChatHistoryRecovery(
+    chat: string,
+    requestedChat: string
+  ): Promise<ChatHistoryRecoveryResult> {
+    await ensureHistoryTables();
+    const ids = [
+      ...new Set([chat, requestedChat, this.normalizeJid(requestedChat), this.toRawJid(chat)]),
+    ].map(accountKey);
+    const pool = getPool();
+    const placeholders = (
+      await pool.query(
+        `SELECT m.wa_message_id, k.remote_jid, k.from_me, k.participant_jid, k.message_timestamp_ms
+         FROM messages m
+         LEFT JOIN whatsapp_message_keys k ON k.wa_message_id = m.wa_message_id
+        WHERE m.account = $1 AND m.platform = 'whatsapp'
+          AND m.conversation_id = ANY($2::text[])
+          AND m.message_type = ANY($3::text[])
+          AND NULLIF(m.content, '') IS NULL
+          AND NOT COALESCE(m.is_deleted, false)
+          AND (m.metadata->>'deleted_for_me') IS DISTINCT FROM 'true'
+        ORDER BY m.wa_timestamp DESC LIMIT 20`,
+        [connectorAccount(), ids, UNAVAILABLE_MESSAGE_TYPES]
+      )
+    ).rows;
+    const payloadIds = (
+      await pool.query(
+        `SELECT p.wa_message_id FROM whatsapp_message_payloads p
+         LEFT JOIN messages m ON m.wa_message_id = p.wa_message_id
+        WHERE p.account = $1 AND p.conversation_id = ANY($2::text[])
+          AND (m.wa_message_id IS NULL OR
+            (m.message_type = ANY($3::text[]) AND NULLIF(m.content, '') IS NULL))
+        ORDER BY p.created_at DESC LIMIT 50`,
+        [connectorAccount(), ids, UNAVAILABLE_MESSAGE_TYPES]
+      )
+    ).rows;
+    let recovered = 0;
+    const restored = new Set<string>();
+    for (const id of new Set(
+      [...payloadIds, ...placeholders].map(row => stripAccountKey(row.wa_message_id))
+    )) {
+      // The scoped scans selected the id; older payloads can still be filed under a PN alias.
+      const message = await getRawWAMessage(id);
+      if (!message) continue;
+      this.rememberHistoryRecoveryAnchor(message);
+      if (!hasUserMessageContent(message.message)) continue;
+      const result = await this.ingestMessage(message, {
+        source: 'baileys_history_sync',
+        publishEvent: false,
+        storeMedia: true,
+      });
+      if (result.inserted) recovered += 1;
+      restored.add(id);
+    }
+    const cached =
+      this.historyRecoveryAnchors.get(chat) ||
+      this.historyRecoveryAnchors.get(this.normalizeJid(requestedChat));
+    if (cached && !restored.has(cached.key.id || '') && hasUserMessageContent(cached.message)) {
+      const result = await this.ingestMessage(cached, {
+        source: 'baileys_history_sync',
+        publishEvent: false,
+        storeMedia: true,
+      });
+      if (result.inserted) recovered += 1;
+    }
+    const oldest = (
+      await pool.query(
+        `SELECT k.wa_message_id, k.remote_jid, k.from_me, k.participant_jid, k.message_timestamp_ms
+         FROM whatsapp_message_keys k JOIN messages m ON m.wa_message_id = k.wa_message_id
+        WHERE m.account = $1 AND m.platform = 'whatsapp'
+          AND k.conversation_id = ANY($2::text[])
+        ORDER BY k.message_timestamp_ms ASC LIMIT 1`,
+        [connectorAccount(), ids]
+      )
+    ).rows[0];
+    const result: ChatHistoryRecoveryResult = {
+      chatId: chat,
+      status: recovered ? 'recovered' : 'no_anchor',
+      requested: 0,
+      placeholderRequests: 0,
+      recovered,
+    };
+    // Requests only ask our paired phone for its available data; they send no chat message.
+    for (const row of placeholders.slice(0, 5)) {
+      if (
+        restored.has(stripAccountKey(row.wa_message_id)) ||
+        !row.remote_jid ||
+        !this.sock?.requestPlaceholderResend
+      )
+        continue;
+      await this.sock.requestPlaceholderResend({
+        id: stripAccountKey(row.wa_message_id),
+        remoteJid: row.remote_jid,
+        fromMe: !!row.from_me,
+        participant: row.participant_jid || undefined,
+      });
+      result.placeholderRequests += 1;
+    }
+    const key = oldest
+      ? {
+          id: stripAccountKey(oldest.wa_message_id),
+          remoteJid: oldest.remote_jid,
+          fromMe: !!oldest.from_me,
+          participant: oldest.participant_jid || undefined,
+        }
+      : cached?.key;
+    const timestampMs = oldest
+      ? Number(oldest.message_timestamp_ms)
+      : Number(cached?.messageTimestamp) * 1000;
+    if (key?.id && key.remoteJid && Number.isFinite(timestampMs) && timestampMs > 0) {
+      this.historyBackfillRequestedUntil = Date.now() + 5 * 60 * 1000;
+      await this.sock!.fetchMessageHistory(50, key, timestampMs);
+      result.requested = 1;
+    }
+    if (result.requested || result.placeholderRequests) result.status = 'requested';
+    return result;
+  }
+
   async fetchChatHistory(chatId: string, limit: number = 500): Promise<any[]> {
     const pool = getPool();
     // messages.conversation_id is stored namespaced (see accountKey); the caller
@@ -8407,7 +8630,7 @@ export class BaileysClient extends EventEmitter {
         await (this.sock as any).fetchMessageHistory(
           Math.min(batchSize, remaining),
           key,
-          Math.floor(Number(row.message_timestamp_ms) / 1000)
+          Number(row.message_timestamp_ms)
         );
         requested += Math.min(batchSize, remaining);
         chats += 1;
@@ -9382,7 +9605,12 @@ export class BaileysClient extends EventEmitter {
       }
       base.question = details.question || null;
       base.selectableCount = details.selectableCount;
-      base.options = details.options.map(name => ({ name, count: 0, selectedByMe: false }));
+      base.options = details.options.map(name => ({
+        name,
+        count: 0,
+        selectedByMe: false,
+        voters: [],
+      }));
       const pollEncKey = pollEncKeyFromStoredMessage(row.content);
       if (!pollEncKey) {
         entries.push({ ...base, reason: 'ENCRYPTION_KEY_UNAVAILABLE' });
@@ -9873,14 +10101,22 @@ export class BaileysClient extends EventEmitter {
     return { action: normalized, applied: true };
   }
 
+  async matchesPresenceChat(chatId: string, eventChatId: string): Promise<boolean> {
+    const eventId = this.normalizeJid(this.toRawJid(eventChatId));
+    return (await this.presenceKeys(this.toRawJid(chatId))).includes(eventId);
+  }
+
   async getCapabilityPresence(
     chatId: string,
     participantId?: string
   ): Promise<ReturnType<typeof buildPresenceSnapshot>> {
-    const normalizedChat = this.normalizeJid(this.toRawJid(chatId));
-    const normalizedParticipant = participantId
-      ? this.normalizeJid(this.toRawJid(participantId))
-      : undefined;
+    const rawChat = this.toRawJid(chatId);
+    const normalizedChat = this.normalizeJid(rawChat);
+    const chatKeys = await this.presenceKeys(rawChat);
+    const participantKeys = participantId
+      ? await this.presenceKeys(this.toRawJid(participantId))
+      : [];
+    const normalizedParticipant = participantKeys[0];
     const fresh = (key: string) => {
       const value = this.presenceState.get(key);
       const ttl = value?.status === 'composing' || value?.status === 'recording' ? 8_000 : 60_000;
@@ -9890,15 +10126,20 @@ export class BaileysClient extends EventEmitter {
       }
       return value;
     };
-    let state = fresh(`${normalizedChat}:${normalizedParticipant || normalizedChat}`);
-    if (!state && !normalizedParticipant) {
-      const prefix = `${normalizedChat}:`;
-      for (const key of this.presenceState.keys()) {
-        if (!key.startsWith(prefix)) continue;
-        state = fresh(key);
-        if (state) break;
-      }
+    const candidates = [];
+    for (const key of this.presenceState.keys()) {
+      if (!chatKeys.some(chat => key.startsWith(`${chat}:`))) continue;
+      const value = fresh(key);
+      if (
+        !value ||
+        (participantKeys.length &&
+          !participantKeys.includes(value.participantId || key.slice(key.indexOf(':') + 1)))
+      )
+        continue;
+      candidates.push(value);
     }
+    // PN and LID can both be cached; the latest observation supersedes an older state.
+    const state = candidates.sort((a, b) => b.observedAt - a.observedAt)[0];
     return buildPresenceSnapshot(
       normalizedChat,
       state

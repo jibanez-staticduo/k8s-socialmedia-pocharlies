@@ -1867,6 +1867,22 @@ export function createRouter(
   });
 
   // Request older Baileys history for chats where we have persisted message keys.
+  // CONTRACT: http.whatsapp-connector.history-recover.v1
+  router.post('/history/recover', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      try {
+        const chatId = req.body?.chatId;
+        if (typeof chatId !== 'string' || !chatId.trim()) {
+          res.status(400).json({ error: 'chatId required', failureClass: 'invalid_request' });
+          return;
+        }
+        res.json(await client.recoverChatHistory(chatId));
+      } catch (error) {
+        mutationErrorResponse(res, error, 'recover chat history');
+      }
+    })();
+  });
+
   router.post('/history/backfill', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {
@@ -3554,9 +3570,22 @@ export function createRouter(
             connection: 'keep-alive',
             'x-accel-buffering': 'no',
           });
+          let pending = Promise.resolve();
           publish = (presence: typeof initial) => {
-            if (presence.chatId === initial.chatId && !res.destroyed)
-              res.write(`event: presence\ndata: ${JSON.stringify(presence)}\n\n`);
+            pending = pending
+              .then(async () => {
+                const sameChat =
+                  presence.chatId === initial.chatId ||
+                  (await client.matchesPresenceChat(initial.chatId, presence.chatId));
+                if (sameChat && !res.destroyed) {
+                  // Initial reads are nested; live events are flat. Keep one SSE shape.
+                  const snapshot = presence.presence
+                    ? { chatId: initial.chatId, ...presence.presence }
+                    : { ...presence, chatId: initial.chatId };
+                  res.write(`event: presence\ndata: ${JSON.stringify(snapshot)}\n\n`);
+                }
+              })
+              .catch(() => {});
           };
           heartbeat = setInterval(() => {
             if (!res.destroyed) res.write(': keepalive\n\n');

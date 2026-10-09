@@ -774,6 +774,20 @@ test('delete for me uses its own provider route after scoped message lookup', as
   assert.equal(upstream[0].method, 'DELETE');
 });
 
+test('captured revoked content can be hidden locally, while other actions remain blocked', async t => {
+  const upstream = [];
+  const { request, database } = await fixture(t, { fetchImpl: async (url, options) => {
+    upstream.push({ url, method: options.method }); return Response.json({ ok: true });
+  } });
+  database.messages['personal-chat'][0].is_deleted = true;
+  const body = { account: 'personal', chat: 'personal-chat', messageId: '11111111-1111-1111-1111-111111111111' };
+  assert.equal((await request('/api/messages/react', { ...body, emoji: '👍' })).status, 409);
+  assert.equal((await request('/api/messages/delete', { ...body, scope: 'everyone' })).status, 409);
+  assert.equal(upstream.length, 0);
+  assert.equal((await request('/api/messages/delete', { ...body, scope: 'me' })).status, 200);
+  assert.deepEqual(upstream, [{ url: 'http://personal-connector/api/v1/messages/personal-chat/wa-personal-1/for-me', method: 'DELETE' }]);
+});
+
 test('presence remains unknown when provider does not expose a route', async t => {
   const { request } = await fixture(t, { fetchImpl: async () => Response.json({ error: 'not found' }, { status: 404 }) });
   const response = await request('/api/presence?account=personal&chat=personal-chat');
@@ -827,7 +841,47 @@ test('message metadata projection allows typed fields but excludes provider secr
   assert.deepEqual(publicPollResults({ available: true, availability: 'local_partial', totalVoters: 2,
     options: [{ name: 'Yes', count: 2, selectedByMe: true, voters: ['private-jid'], ...privateFields }], ...privateFields }),
     { available: true, availability: 'local_partial', totalVoters: 2,
-      options: [{ name: 'Yes', count: 2, selectedByMe: true }] });
+      options: [{ name: 'Yes', count: 2, selectedByMe: true, voters: [] }] });
+});
+
+test('history recovery binds account and canonical chat and strips provider internals', async t => {
+  const calls = [];
+  const { request } = await fixture(t, { fetchImpl: async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return Response.json({ status: 'requested', requested: 1, recovered: 0, placeholderRequests: 2, candidates: ['private-key'] });
+  } });
+  const body = { account: 'secondary', chat: 'secondary-chat' };
+  assert.equal((await request('/api/messages/recover', body, { origin: 'https://evil.invalid' })).status, 403);
+  assert.equal((await request('/api/messages/recover', { ...body, account: 'personal' })).status, 404);
+  assert.equal(calls.length, 0);
+  const response = await request('/api/messages/recover', body);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ...body, status: 'requested', requested: 1, recovered: 0, placeholderRequests: 2 });
+  assert.deepEqual(calls, [{ url: 'http://secondary-connector/api/v1/history/recover', body: { chatId: 'secondary-chat' } }]);
+});
+
+test('message projection retains captured revocations, view-once marker and real delivery state', async t => {
+  const calls = [];
+  const db = fixtureDatabase(calls); const original = db.query;
+  db.query = async (sql, args) => {
+    if (sql.includes('m.status AS "deliveryStatus"')) {
+      assert(sql.includes("(m.metadata->>'deleted_for_me') IS DISTINCT FROM 'true'"));
+      assert(!sql.includes('NOT m.is_deleted'));
+      assert.deepEqual(args.slice(0, 2), ['personal', ['personal-chat']]);
+      return { rows: [{ id: '11111111-1111-1111-1111-111111111111', waMessageId: 'captured',
+        type: 'TEXT', text: 'Captured before revoke', fromMe: true, timestamp: '2026-09-23T08:00:00.000Z',
+        isDeleted: true, deliveryStatus: 'read', metadata: { viewOnce: true, mediaKey: 'private' } }] };
+    }
+    return original(sql, args);
+  };
+  const { request } = await fixture(t, { db });
+  const response = await request('/api/messages?account=personal&chat=personal-chat');
+  assert.equal(response.status, 200);
+  const message = (await response.json()).messages[0];
+  assert.equal(message.text, 'Captured before revoke');
+  assert.equal(message.isDeleted, true);
+  assert.equal(message.deliveryStatus, 'read');
+  assert.deepEqual(message.metadata, { viewOnce: true });
 });
 
 test('poll results and votes stay within the selected account and poll', async t => {
@@ -855,7 +909,7 @@ test('poll results and votes stay within the selected account and poll', async t
   const history = await request('/api/messages?account=personal&chat=personal-chat');
   assert.equal(history.status, 200);
   const poll = (await history.json()).messages.find(message => message.type === 'POLL');
-  assert.deepEqual(poll.metadata.results.options, [{ name: '20.30h', count: 2, selectedByMe: false }]);
+  assert.deepEqual(poll.metadata.results.options, [{ name: '20.30h', count: 2, selectedByMe: false, voters: [] }]);
   assert.equal(upstream.find(call => call.url.endsWith('/messages/poll/results')).body.conversationId, 'personal-chat');
   assert.deepEqual(upstream.find(call => call.url.endsWith('/messages/poll/results')).body.pollMessageIds, ['poll-1']);
   assert.equal((await request('/api/messages/poll/vote', { account: 'secondary', chat: 'personal-chat', messageId: poll.id, options: ['20.30h'] })).status, 404);
@@ -910,7 +964,7 @@ test('messages endpoint projects reply, edit, reactions and safe content metadat
   assert.match(messageQuery.sql, /target\.conversation_id = ANY\(\$2::text\[\]\)/);
   assert.match(messageQuery.sql, /m\.account \|\| ':' \|\| m\.reply_to_message_id/);
   assert.match(messageQuery.sql, /regexp_replace\(m\.reply_to_message_id, '\^\[\^:\]\+:', ''\)/);
-  assert.match(messageQuery.sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION'\)/);
+  assert(messageQuery.sql.includes(MESSAGE_VISIBLE_SQL));
 });
 
 test('missing quoted message has an explicit unavailable preview on paginated reads', async t => {
@@ -934,7 +988,7 @@ test('missing quoted message has an explicit unavailable preview on paginated re
     { type: null, text: '', senderName: null, available: false });
   const sql = calls.find(call => /reply\.message_type AS "replyType"/.test(call.sql)).sql;
   assert.match(sql, /LEFT JOIN LATERAL/);
-  assert.match(sql, /m\.message_type NOT IN \('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION'\)/);
+  assert(sql.includes(MESSAGE_VISIBLE_SQL));
 });
 
 test('group details retain provider permissions and account-scoped saved member names', async t => {

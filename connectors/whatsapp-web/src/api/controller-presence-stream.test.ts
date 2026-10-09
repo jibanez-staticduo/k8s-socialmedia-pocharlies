@@ -9,10 +9,12 @@ const secret = 'presence-stream-test-secret';
 
 test('authenticated presence stream forwards only its chat and releases its listener', async () => {
   const client = new EventEmitter() as EventEmitter & {
-    getPresence: (chat: string) => Promise<{ chatId: string; status: string }>;
+    getPresence: (chat: string) => Promise<{ chatId: string; presence: { status: string; lastSeen: null } }>;
     subscribePresence: (chat: string) => Promise<{ subscribed: boolean }>;
+    matchesPresenceChat: (chat: string, eventChat: string) => Promise<boolean>;
   };
-  client.getPresence = async chat => ({ chatId: chat, status: 'unknown' });
+  client.getPresence = async chat => ({ chatId: chat, presence: { status: 'unknown', lastSeen: null } });
+  client.matchesPresenceChat = async (chat, eventChat) => chat === '34600123456@c.us' && eventChat === '900001@lid';
   let subscribed = '';
   client.subscribePresence = async chat => {
     subscribed = chat;
@@ -42,11 +44,13 @@ test('authenticated presence stream forwards only its chat and releases its list
     const reader = response.body!.getReader();
     const initial = new TextDecoder().decode((await reader.read()).value);
     assert.match(initial, /"status":"unknown"/);
+    assert.doesNotMatch(initial, /"presence":\{/);
     assert.equal(subscribed, '34600123456@c.us');
     client.emit('presence-update', { chatId: 'other@c.us', status: 'available' });
-    client.emit('presence-update', { chatId: '34600123456@c.us', status: 'composing' });
+    client.emit('presence-update', { chatId: '900001@lid', status: 'composing' });
     const update = new TextDecoder().decode((await reader.read()).value);
     assert.match(update, /"status":"composing"/);
+    assert.match(update, /"chatId":"34600123456@c.us"/);
     assert.doesNotMatch(update, /other@c\.us/);
     const released = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(

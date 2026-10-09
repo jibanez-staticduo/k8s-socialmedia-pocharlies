@@ -904,7 +904,30 @@ export async function storeMessage(data: MessageData): Promise<string | null> {
     const result = await pool.query(
       `INSERT INTO messages (wa_message_id, conversation_id, sender_wa_id, wa_timestamp, direction, content, message_type, is_forwarded, reply_to_message_id, platform, metadata, account)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       ON CONFLICT (wa_message_id) DO NOTHING
+       ON CONFLICT (wa_message_id) DO UPDATE SET
+         content = COALESCE(NULLIF(messages.content, ''), NULLIF(EXCLUDED.content, '')),
+         message_type = EXCLUDED.message_type,
+         metadata = EXCLUDED.metadata || COALESCE(messages.metadata, '{}'::jsonb)
+           || jsonb_build_object('contentUnavailable', false, 'recovered', true)
+           || CASE WHEN EXCLUDED.metadata->>'viewOnce' = 'true'
+             THEN '{"viewOnce":true}'::jsonb ELSE '{}'::jsonb END
+       WHERE messages.account = EXCLUDED.account
+         AND messages.platform = EXCLUDED.platform
+         AND NOT COALESCE(messages.is_edited, false)
+         AND EXCLUDED.message_type NOT IN
+           ('UNAVAILABLE', 'SECRETENCRYPTEDMESSAGE', 'MESSAGECONTEXTINFO',
+            'SENDERKEYDISTRIBUTIONMESSAGE', 'ENCREACTIONMESSAGE', 'POLLUPDATEMESSAGE')
+         AND (
+           (messages.message_type IN
+             ('UNAVAILABLE', 'SECRETENCRYPTEDMESSAGE', 'MESSAGECONTEXTINFO',
+              'SENDERKEYDISTRIBUTIONMESSAGE', 'ENCREACTIONMESSAGE', 'POLLUPDATEMESSAGE')
+             AND NULLIF(messages.content, '') IS NULL)
+           OR (messages.message_type = EXCLUDED.message_type
+             AND NULLIF(messages.content, '') IS NULL AND NULLIF(EXCLUDED.content, '') IS NOT NULL)
+           OR (messages.message_type = EXCLUDED.message_type
+             AND EXCLUDED.metadata->>'viewOnce' = 'true'
+             AND (messages.metadata->>'viewOnce') IS DISTINCT FROM 'true')
+         )
        RETURNING id`,
       [
         accountKey(data.waMessageId),

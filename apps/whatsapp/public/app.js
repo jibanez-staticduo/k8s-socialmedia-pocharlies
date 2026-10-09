@@ -1,4 +1,9 @@
 'use strict';
+let needsMessageRecovery;
+let recoveryLabel;
+const recoveryReady = import('./history-recovery.mjs').then(module => {
+  ({ needsMessageRecovery, recoveryLabel } = module);
+});
 let mergeMessages;
 let mergeRecentMessages;
 let pinnedFirst;
@@ -77,6 +82,34 @@ const liveReady = import('./live-updates.mjs').then(({createLiveUpdates}) => {
 const state = {account: '', chat: '', chats: [], messages: [], historyMode: false, historyCursor: null, historyInitialized: false, loadingOlder: false, chatFilter: 'all', chatRequestToken: 0, messageRequestToken: 0, selectedChat: null, sending: false, version: 0, busy: false, suggesting: false, signature: '', drafts: new Map(), outgoing: new Map(), pollSelections: new Map(), pollSubmitted: new Map(), pollDirty: new Set(), pollAttempts: new Map(), pollBusy: new Set(), recorder: null, stream: null, blob: null, recordingUrl: '', recordingToken: 0, recordingSendToken: null};
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
+const recoveryStates = new Map();
+const recoveryNotice = node('div', 'notice');
+recoveryNotice.hidden = true;
+$('messages').before(recoveryNotice);
+
+function updateRecoveryNotice() {
+  const status = recoveryStates.get(`${state.account}:${state.chat}`);
+  recoveryNotice.hidden = !state.chat || state.historyMode || !needsMessageRecovery(state.messages) || !status;
+  recoveryNotice.replaceChildren(node('span', '', recoveryLabel(status)));
+  if (['failed', 'no_anchor', 'cooldown'].includes(status)) {
+    const retry = node('button', 'text-button', 'Reintentar');
+    retry.onclick = () => void recoverMessages(context(), true);
+    recoveryNotice.append(retry);
+  }
+}
+
+async function recoverMessages(ctx, retry = false) {
+  const key = `${ctx.account}:${ctx.chat}`;
+  if (!current(ctx) || (!retry && recoveryStates.has(key)) || recoveryStates.get(key) === 'pending') return;
+  recoveryStates.set(key, 'pending'); updateRecoveryNotice();
+  try {
+    const result = await api('/api/messages/recover', { account: ctx.account, chat: ctx.chat });
+    recoveryStates.set(key, result.status);
+    if (current(ctx)) { updateRecoveryNotice(); if (result.recovered > 0) void loadMessages(); }
+  } catch {
+    recoveryStates.set(key, 'failed'); if (current(ctx)) updateRecoveryNotice();
+  }
+}
 historyNotice.id = 'history-notice';
 historyNotice.hidden = true;
 historyNotice.append(node('span', '', 'Mostrando mensajes antiguos. '));
@@ -104,6 +137,7 @@ function resetMessageHistory() {
   state.historyInitialized = false;
   state.loadingOlder = false;
   updateOlderControl();
+  recoveryNotice.hidden = true;
 }
 function error(message = '') { $('error').textContent = message; $('error').hidden = !message; }
 async function api(path, data, onEvent, requestSignal) {
@@ -485,6 +519,8 @@ async function loadMessages() {
     renderMessages();
     historyNotice.hidden = true;
     featureUI?.messagesChanged?.(state.messages);
+    updateRecoveryNotice();
+    if (needsMessageRecovery(state.messages)) void recoverMessages(ctx);
   } catch (err) { if (current(ctx) && requestToken === state.messageRequestToken) error(err.message); }
 }
 async function loadOlderMessages() {
@@ -947,7 +983,7 @@ const mediaLibraryReady = import('./media-library-ui.mjs').then(({installMediaLi
   }, onOpen: () => closeRailPanels(['library']) });
   return mediaLibraryUI;
 }).catch(err => { error(`No se pudo cargar el contenido multimedia: ${err.message}`); return null; });
-async function init() { try { await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await uploadQualityReady; await sidebarSearchReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await novedadesReady; await assistantReady; await liveReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; sidebarSearch?.accountChanged(); uploadQualityUI?.accountChanged(); assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); updateControls(); if (state.account) { await loadChats(); liveUpdates?.start(state.account); } else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+async function init() { try { await recoveryReady; await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await uploadQualityReady; await sidebarSearchReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await novedadesReady; await assistantReady; await liveReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; sidebarSearch?.accountChanged(); uploadQualityUI?.accountChanged(); assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); updateControls(); if (state.account) { await loadChats(); liveUpdates?.start(state.account); } else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
 window.addEventListener('pagehide', () => { liveUpdates?.stop(); cancelRecording(); cameraController?.close(); cancelAttachment(); });

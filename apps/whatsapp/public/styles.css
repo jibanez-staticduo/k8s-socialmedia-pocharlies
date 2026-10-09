@@ -919,6 +919,8 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
 .attachment-image,
 .attachment-video { max-width: 100%; }
 
+.attachment-video { display: block; width: min(420px, 100%); min-height: 160px; max-height: 480px; background: #111; border-radius: 6px; }
+
 .message-audio { width: min(312px, 100%); }
 
 .audio-element {
@@ -948,6 +950,8 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
   background: var(--accent);
   color: #07170f;
   font-size: 0;
+  padding: 0;
+  line-height: 1;
 }
 
 .audio-toggle::before {
@@ -969,7 +973,9 @@ body[data-theme="light"] .conversation-avatar { background: #d8e0e3; color: #344
 }
 
 .audio-progress {
-  min-width: 70px;
+  min-width: 0;
+  width: 70px;
+  padding: 0;
   flex: 1;
   accent-color: var(--accent);
 }
@@ -1689,6 +1695,10 @@ button.message-poll-option:hover, .message-poll-option.is-selected { border-colo
 .message-poll-submit { justify-self: end; padding: 7px 18px; border: 0; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 650; cursor: pointer; }
 .message-poll-submit:disabled, button.message-poll-option:disabled { cursor: default; opacity: .6; }
 .message-poll-note { color: var(--muted-strong); font-size: 11px; }
+.message-poll-voters { padding: 0 12px 6px; color: var(--muted-strong); font-size: 12px; }
+.message-poll-voters summary { cursor: pointer; color: var(--accent-strong); }
+.message-poll-voter-list { margin: 6px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.message-preservation-marker { color: var(--muted-strong); font-size: 11px; margin-bottom: 5px; }
 .message-reply-reference { min-width: 0; color: var(--muted); }
 .message-reply-sender { overflow: hidden; color: var(--accent-strong); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .message-kind-line { display: inline-flex; align-items: center; min-width: 0; gap: 6px; color: var(--muted-strong); }

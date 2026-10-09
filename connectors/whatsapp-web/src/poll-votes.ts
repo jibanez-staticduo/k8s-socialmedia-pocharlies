@@ -522,10 +522,17 @@ export interface StoredPollUpdate {
   content: unknown;
 }
 
+export interface PollVoterIdentity {
+  jid: string;
+  fromMe: boolean;
+}
+
 export interface PollOptionResult {
   name: string;
   count: number;
   selectedByMe: boolean;
+  /** Voters observed locally for this option; the snapshot may be partial. */
+  voters: PollVoterIdentity[];
 }
 
 export interface AggregatePollResult {
@@ -729,21 +736,22 @@ export function aggregateCapturedPollVotes(
       index,
     ])
   );
-  const counts = details.options.map(() => 0);
+  const voters = details.options.map(() => [] as PollVoterIdentity[]);
   const selectedByMe = details.options.map(() => false);
   for (const vote of latestByVoter.values()) {
-    for (const hash of vote.selectedHashes) {
+    for (const hash of new Set(vote.selectedHashes)) {
       const index = hashToIndex.get(hash);
       if (index === undefined) continue;
-      counts[index] += 1;
+      voters[index].push({ jid: vote.voterJid, fromMe: vote.fromMe });
       if (vote.fromMe) selectedByMe[index] = true;
     }
   }
   return {
     options: details.options.map((name, index) => ({
       name,
-      count: counts[index],
+      count: voters[index].length,
       selectedByMe: selectedByMe[index],
+      voters: voters[index],
     })),
     totalVoters: [...latestByVoter.values()].filter(vote => vote.selectedHashes.length > 0).length,
     capturedVotes: votes.length,

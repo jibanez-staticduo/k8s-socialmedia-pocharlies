@@ -1,7 +1,9 @@
 import { WHATSAPP_CONVERSATION_SQL } from './conversation-scope.mjs';
 
 const JID_SUFFIX = /@(lid|c\.us|s\.whatsapp\.net|g\.us|broadcast|newsletter)$/;
-export const MESSAGE_VISIBLE_SQL = "m.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION') AND m.conversation_id !~ '@newsletter$' AND m.conversation_id !~ '(^|:)status@broadcast$'";
+export const MESSAGE_VISIBLE_SQL = "m.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'POLLUPDATEMESSAGE', 'ENCEVENTRESPONSEMESSAGE', 'ENCREACTIONMESSAGE', 'REACTION', 'MESSAGEHISTORYNOTICE', 'MESSAGEHISTORYBUNDLE', 'KEEPINCHATMESSAGE', 'ALBUMMESSAGE', 'PROTOCOLMESSAGE') AND m.conversation_id !~ '@newsletter$' AND m.conversation_id !~ '(^|:)status@broadcast$'";
+// Remote revocation keeps captured content; only an explicit local deletion hides it.
+export const MESSAGE_RETAINED_SQL = "(m.metadata->>'deleted_for_me') IS DISTINCT FROM 'true'";
 
 export const MESSAGE_REPLY_SELECT_SQL = `
        reply.message_type AS "replyType",
@@ -27,8 +29,8 @@ LEFT JOIN LATERAL (
   WHERE target.account = m.account
     AND target.conversation_id = ANY($2::text[])
     AND target.platform = 'whatsapp'
-    AND NOT target.is_deleted
-    AND target.message_type NOT IN ('SENDERKEYDISTRIBUTIONMESSAGE', 'MESSAGECONTEXTINFO', 'POLL_VOTE', 'POLL_RESULT', 'ENCEVENTRESPONSEMESSAGE', 'REACTION')
+    AND ${MESSAGE_RETAINED_SQL.replaceAll('m.', 'target.')}
+    AND ${MESSAGE_VISIBLE_SQL.replaceAll('m.', 'target.')}
     AND target.wa_message_id IN (
       m.reply_to_message_id,
       m.account || ':' || m.reply_to_message_id,
@@ -209,7 +211,7 @@ LEFT JOIN LATERAL (
   WHERE m.conversation_id = ANY(array_prepend(c.id, COALESCE(pn_alias.ids, ARRAY[]::text[])))
     AND m.account = $1
     AND m.platform = 'whatsapp'
-    AND NOT m.is_deleted
+    AND ${MESSAGE_RETAINED_SQL}
     AND ${MESSAGE_VISIBLE_SQL}
   ORDER BY m.wa_timestamp DESC, m.id DESC
   LIMIT 1
@@ -223,7 +225,7 @@ LEFT JOIN LATERAL (
   WHERE m.conversation_id = ANY(array_prepend(c.id, COALESCE(pn_alias.ids, ARRAY[]::text[])))
     AND m.account = $1
     AND m.platform = 'whatsapp'
-    AND NOT m.is_deleted
+    AND ${MESSAGE_RETAINED_SQL}
     AND ${MESSAGE_VISIBLE_SQL}
     AND m.direction = 'INBOUND'
   ORDER BY (
@@ -268,6 +270,8 @@ SELECT m.id,
        m.metadata,
        m.reply_to_message_id AS "replyToMessageId",
        COALESCE(m.is_edited, false) AS "isEdited",
+       COALESCE(m.is_deleted, false) AS "isDeleted",
+       m.status AS "deliveryStatus",
        m.direction = 'OUTBOUND' AS "fromMe",
        m.wa_timestamp AS timestamp,
        ${MESSAGE_REPLY_SELECT_SQL},
@@ -297,7 +301,7 @@ ${MESSAGE_REPLY_JOIN_SQL}
 WHERE m.account = $1
   AND m.conversation_id = ANY($2::text[])
   AND m.platform = 'whatsapp'
-  AND NOT m.is_deleted
+  AND ${MESSAGE_RETAINED_SQL}
   AND ${MESSAGE_VISIBLE_SQL}`;
 export const MESSAGE_LIST_SQL = `${MESSAGE_LIST_BASE_SQL}
 ORDER BY m.wa_timestamp DESC, m.id DESC

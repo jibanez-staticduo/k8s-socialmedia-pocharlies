@@ -143,17 +143,18 @@ try {
     }));
     check('defaults load photos through a bounded blob', (await count('img-default', 'defaults')) === 1 && state.imgSrc.startsWith('blob:'), JSON.stringify(state));
     check('defaults load audio through a bounded blob', (await count('aud-default', 'defaults')) === 1 && state.audioSrc.startsWith('blob:'));
-    check('defaults request zero video bytes', (await count('vid-default', 'defaults')) === 0 && !state.video && String(state.videoPending).includes('Descargar video'));
+    check('defaults request zero video bytes', (await count('vid-default', 'defaults')) === 0 && state.video && state.videoPending === null);
     check('defaults request zero document bytes', (await count('doc-default', 'defaults')) === 0 && String(state.docLink).includes('/api/media/doc-default'), JSON.stringify(state));
     check('gated media keep the caption text', state.caption === 'playa', String(state.caption));
     check('defaults page has no script errors', pageErrors.length === 0, pageErrors.join('; '));
-    // 2. The explicit tap is what requests the gated video, exactly once.
-    await page.evaluate(() => document.querySelector('.attachment-pending[data-media-kind="video"] .attachment-load').click());
-    await page.waitForFunction(() => document.querySelector('.attachment-video')?.src.startsWith('blob:'));
-    await page.evaluate(() => document.querySelector('.attachment-load')?.click());
+    // Native playback starts fetching only after the user asks to play.
+    await page.evaluate(() => document.querySelector('.attachment-video').play().catch(() => {}));
     await page.waitForTimeout(250);
-    check('tap loads the video once via memory blob', (await count('vid-default', 'defaults')) === 1);
-    check('caption survives the explicit load', await page.evaluate(() => document.querySelector('.attachment-caption')?.textContent) === 'playa');
+    check('native play requests the original media URL', (await count('vid-default', 'defaults')) >= 1);
+    check('native controls expose an inline video player', await page.evaluate(() => {
+      const video = document.querySelector('.attachment-video');
+      return video.controls && video.playsInline && video.preload === 'none' && !video.src.startsWith('blob:');
+    }));
     await context.close();
   }
 
@@ -164,9 +165,9 @@ try {
     const page = await context.newPage();
     await page.goto(`${baseUrl}/`);
     await openScene(page, [attachment('vid-on', 'video/webm', 'playa.webm')], 'video-on');
-    await page.waitForFunction(() => document.querySelector('.attachment-video')?.src.startsWith('blob:'));
+    await page.waitForFunction(() => document.querySelector('.attachment-video')?.preload === 'metadata');
     await page.waitForTimeout(200);
-    check('enabled videos mount a bounded blob without a click', (await count('vid-on', 'video-on')) === 1);
+    check('enabled videos use browser metadata preload', (await count('vid-on', 'video-on')) >= 1);
     await context.close();
   }
 

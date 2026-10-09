@@ -479,30 +479,39 @@ function stubPolicy(overrides = {}) {
 
 const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
 
-test('gated video and image attachments request no bytes and expose an explicit action with the caption', () => {
+test('native videos stream without a full blob or automatic request when disabled', () => {
   const policy = stubPolicy();
-  const video = createAttachmentElement({ url: 'http://nas/api/media/v1?account=personal&chat=c', mimeType: 'video/mp4', name: 'playa.mp4', size: 4_000_000 }, { document: fakeDocument, mediaPolicy: policy });
-  assert.equal(video.querySelector('.attachment-video'), null);
-  assert.equal(video.querySelector('.attachment-image'), null);
-  assert.equal(video.querySelector('.media-image-button'), null);
-  const wrap = video.querySelector('.attachment-pending');
-  assert.ok(wrap);
-  assert.equal(video.dataset.mediaKind, 'video');
-  assert.equal(video.dataset.mediaAccount, 'personal');
-  assert.equal(wrap.dataset.mediaState, 'manual');
-  const button = wrap.querySelector('.attachment-load');
-  assert.equal(button.textContent, 'Descargar video');
-  assert.equal(wrap.querySelector('.document-size').textContent, '3.8 MB');
-  const image = createAttachmentElement({ url: 'http://nas/api/media/i1?account=personal&chat=c', mimeType: 'image/jpeg', caption: 'en la playa' }, { document: fakeDocument, mediaPolicy: policy });
+  const container = createAttachmentElement({ url: 'http://nas/api/media/v1?account=personal&chat=c', mimeType: 'video/mp4', name: 'playa.mp4', size: 64 * 1024 * 1024, caption: 'playa' }, { document: fakeDocument, mediaPolicy: policy });
+  const video = container.querySelector('.attachment-video');
+  assert.equal(video.src, 'http://nas/api/media/v1?account=personal&chat=c');
+  assert.equal(video.preload, 'none');
+  assert.equal(video.controls, true);
+  assert.equal(video.playsInline, true);
+  assert.equal(container.dataset.mediaState, 'streaming');
+  assert.equal(treeText(container.querySelector('.attachment-caption')), 'playa');
+  assert.deepEqual(policy.calls.loadBytes, []);
+  assert.ok(container.querySelector('.attachment-download'));
+});
+
+test('enabled videos request only native metadata and do not buffer a complete blob', () => {
+  const policy = stubPolicy({ enabled: () => true });
+  const container = createAttachmentElement({ url: '/api/media/v2', mimeType: 'video/webm' }, { document: fakeDocument, mediaPolicy: policy });
+  assert.equal(container.querySelector('.attachment-video').preload, 'metadata');
+  assert.deepEqual(policy.calls.loadBytes, []);
+});
+
+test('gated images preserve captions and request nothing before an explicit action', () => {
+  const policy = stubPolicy();
+  const image = createAttachmentElement({url:'/api/media/i1',mimeType:'image/jpeg',caption:'en la playa'}, {document:fakeDocument, mediaPolicy:policy});
   assert.equal(image.querySelector('.attachment-image'), null);
-  assert.ok(image.querySelector('.attachment-pending'));
+  assert.ok(image.querySelector('.attachment-load'));
   assert.equal(treeText(image.querySelector('.attachment-caption')), 'en la playa');
   assert.deepEqual(policy.calls.loadBytes, []);
 });
 
-test('tapping the gated video fetches once with the explicit cap and mounts the blob-backed player', async () => {
+test('tapping the gated image fetches once with the explicit cap and mounts the blob-backed player', async () => {
   const policy = stubPolicy();
-  const container = createAttachmentElement({ url: 'http://nas/api/media/v2?account=personal&chat=c', mimeType: 'video/mp4', name: 'playa.mp4' }, { document: fakeDocument, mediaPolicy: policy });
+  const container = createAttachmentElement({ url: 'http://nas/api/media/v2?account=personal&chat=c', mimeType: 'image/jpeg', name: 'playa.jpg' }, { document: fakeDocument, mediaPolicy: policy });
   const button = container.querySelector('.attachment-load');
   button.onclick();
   assert.equal(button.disabled, true);
@@ -510,34 +519,34 @@ test('tapping the gated video fetches once with the explicit cap and mounts the 
   await flush();
   assert.equal(policy.calls.loadBytes.length, 1);
   assert.equal(policy.calls.loadBytes[0].maxBytes, 16 * 1024 * 1024);
-  assert.equal(container.querySelector('.attachment-video').src, 'blob:cargado');
+  assert.equal(container.querySelector('.attachment-image').src, 'blob:cargado');
   assert.equal(container.dataset.mediaState, 'loaded');
 });
 
 test('explicit media too large for any cap falls back to a browser download without mounting', async () => {
   const policy = stubPolicy({ reject: Object.assign(new Error('grande'), { code: 'MEDIA_TOO_LARGE' }) });
-  const container = createAttachmentElement({ url: 'http://nas/api/media/v3?account=personal&chat=c', mimeType: 'video/mp4', name: 'grandecito.mp4' }, { document: fakeDocument, mediaPolicy: policy });
+  const container = createAttachmentElement({ url: 'http://nas/api/media/v3?account=personal&chat=c', mimeType: 'image/jpeg', name: 'grandecito.jpg' }, { document: fakeDocument, mediaPolicy: policy });
   const wrap = container.querySelector('.attachment-pending');
   wrap.querySelector('.attachment-load').onclick();
   await flush();
-  assert.equal(container.querySelector('.attachment-video'), null);
+  assert.equal(container.querySelector('.attachment-image'), null);
   assert.equal(wrap.dataset.mediaState, 'manual');
   assert.equal(wrap.dataset.mediaReason, 'too-large');
 });
 
-test('enabled video loads bounded bytes while a declared oversized file waits for the explicit tap', async () => {
+test('enabled image loads bounded bytes while a declared oversized file waits for the explicit tap', async () => {
   const policy = stubPolicy({ enabled: () => true });
-  const small = createAttachmentElement({ url: 'http://nas/api/media/v4?account=personal&chat=c', mimeType: 'video/mp4' }, { document: fakeDocument, mediaPolicy: policy });
-  assert.equal(small.querySelector('.attachment-video'), null);
+  const small = createAttachmentElement({ url: 'http://nas/api/media/v4?account=personal&chat=c', mimeType: 'image/jpeg' }, { document: fakeDocument, mediaPolicy: policy });
+  assert.equal(small.querySelector('.attachment-image'), null);
   await flush();
-  assert.equal(small.querySelector('.attachment-video').src, 'blob:cargado');
+  assert.equal(small.querySelector('.attachment-image').src, 'blob:cargado');
   assert.equal(policy.calls.loadBytes[0].maxBytes, policy.autoMaxBytes);
-  const big = createAttachmentElement({ url: 'http://nas/api/media/v5?account=personal&chat=c', mimeType: 'video/mp4', size: 64 * 1024 * 1024 }, { document: fakeDocument, mediaPolicy: policy });
-  assert.equal(big.querySelector('.attachment-video'), null);
+  const big = createAttachmentElement({ url: 'http://nas/api/media/v5?account=personal&chat=c', mimeType: 'image/jpeg', size: 64 * 1024 * 1024 }, { document: fakeDocument, mediaPolicy: policy });
+  assert.equal(big.querySelector('.attachment-image'), null);
   assert.equal(big.dataset.mediaReason, 'size-limit');
   big.querySelector('.attachment-load').onclick();
   await flush();
-  assert.equal(big.querySelector('.attachment-video').src, 'blob:cargado');
+  assert.equal(big.querySelector('.attachment-image').src, 'blob:cargado');
 });
 
 test('a cached copy is remounted without a second fetch, within the auto cap and registered to the mount', () => {
@@ -583,34 +592,20 @@ test('a declared document above the auto cap keeps the manual card without fetch
   assert.deepEqual(policy.calls.loadBytes, []);
 });
 
-test('enabling videos in settings auto-loads only the placeholders of the toggled account', async () => {
-  const originalFetch = globalThis.fetch;
+test('video preference updates only the selected account native preload', () => {
   const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   const values = new Map();
-  let fetchCalls = 0;
-  const bytes = new Uint8Array([1, 2, 3]);
   globalThis.localStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)) };
-  globalThis.fetch = async url => {
-    fetchCalls += 1;
-    return { ok: true, status: 200, headers: { get: name => name === 'content-type' ? 'video/webm' : name === 'content-length' ? String(bytes.byteLength) : null }, body: null, arrayBuffer: async () => bytes.buffer.slice(0) };
-  };
   try {
-    const one = createAttachmentElement({ url: 'http://nas/api/media/va?account=uno', mimeType: 'video/webm', name: 'uno.mp4' }, { document: fakeDocument });
-    const two = createAttachmentElement({ url: 'http://nas/api/media/vb?account=dos', mimeType: 'video/webm', name: 'dos.mp4' }, { document: fakeDocument });
-    assert.ok(one.querySelector('.attachment-pending') && two.querySelector('.attachment-pending'));
-    assert.equal(fetchCalls, 0);
-    writeMediaSettings(undefined, 'uno', { video: true });
-    const host = fakeDocument.createElement('main');
-    host.append(one, two);
-    assert.equal(reevaluatePendingMedia(host, { mediaType: 'video', enabled: true, account: 'uno' }), 1);
-    await flush();
-    assert.equal(fetchCalls, 1);
-    assert.ok(one.querySelector('.attachment-video').src.startsWith('blob:'));
-    assert.equal(two.querySelector('.attachment-video'), null);
-    assert.ok(two.querySelector('.attachment-pending'));
+    const one = createAttachmentElement({url:'http://nas/api/media/va?account=uno',mimeType:'video/webm'}, {document:fakeDocument});
+    const two = createAttachmentElement({url:'http://nas/api/media/vb?account=dos',mimeType:'video/webm'}, {document:fakeDocument});
+    const host = fakeDocument.createElement('main'); host.append(one,two);
+    writeMediaSettings(undefined,'uno',{video:true});
+    reevaluatePendingMedia(host,{mediaType:'video',enabled:true,account:'uno'});
+    assert.equal(one.querySelector('.attachment-video').preload,'metadata');
+    assert.equal(two.querySelector('.attachment-video').preload,'none');
   } finally {
-    globalThis.fetch = originalFetch;
-    if (originalLocalStorage) Object.defineProperty(globalThis, 'localStorage', originalLocalStorage);
+    if (originalLocalStorage) Object.defineProperty(globalThis,'localStorage',originalLocalStorage);
     else delete globalThis.localStorage;
   }
 });
@@ -646,4 +641,21 @@ test('stickers mount natively regardless of the Fotos switch and never touch the
   );
   assert.ok(photo.querySelector('.attachment-pending'));
   assert.equal(photo.querySelector('.media-image-button'), null);
+});
+
+test('poll options expose resolved voter names and never turn them into markup', () => {
+  const bubble = renderMessage({id:'poll',type:'POLL',text:'Cena',metadata:{kind:'poll',options:['Si','No'],results:{available:true,totalVoters:1,options:[{name:'Si',count:1,voters:[{id:'lid-1',name:'<Ana>'}]},{name:'No',count:0,voters:[]}]}}}, {document:fakeDocument});
+  const details = bubble.querySelectorAll('.message-poll-voters');
+  assert.equal(details.length,2);
+  assert.match(treeText(details[0]), /Ver votos<Ana>/);
+  assert.match(treeText(details[1]), /Sin votos registrados/);
+  assert.equal(bubble.querySelectorAll('.message-poll-option').length,2);
+});
+
+test('preserved message content keeps deleted and view-once provenance visible', () => {
+  const message={id:'preserved',text:'contenido conservado',isDeleted:true,metadata:{viewOnce:true}};
+  const bubble=renderMessage(message,{document:fakeDocument});
+  assert.ok(bubble.querySelector('.message-deleted'));
+  assert.ok(bubble.querySelector('.message-view-once'));
+  assert.equal(treeText(bubble.querySelector('.message-text')),'contenido conservado');
 });

@@ -24,7 +24,7 @@ try {
       sender_wa_id text, content text, platform text DEFAULT 'whatsapp',
       is_deleted boolean DEFAULT false, direction text, wa_timestamp timestamptz DEFAULT now(),
       message_type text DEFAULT 'TEXT', metadata jsonb DEFAULT '{}'::jsonb,
-      reply_to_message_id text, is_edited boolean DEFAULT false);
+      reply_to_message_id text, is_edited boolean DEFAULT false, status text);
     INSERT INTO conversations (id,wa_chat_id,account,name,is_group,archived,avatar_url) VALUES
       ('a:123@lid','a:123@lid','a','123@lid',false,false,NULL),
       ('b:123@lid','b:123@lid','b','123@lid',false,false,NULL),

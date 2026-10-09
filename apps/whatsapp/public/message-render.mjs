@@ -719,6 +719,15 @@ export function reevaluatePendingMedia(scope, detail = {}) {
   const type = textValue(detail?.mediaType);
   if (detail?.enabled !== true && detail?.enabled !== false) return 0;
   let started = 0;
+  if (type === 'video') {
+    for (const attachment of scope?.querySelectorAll?.('.attachment') || []) {
+      if (attachment.dataset?.mediaState !== 'streaming') continue;
+      const account = textValue(attachment.dataset?.mediaAccount);
+      if (detail?.account && detail.account !== '*' && detail.account !== account) continue;
+      const video = attachment.querySelector('.attachment-video');
+      if (video) video.preload = defaultMediaPolicy.enabled(type, account) ? 'metadata' : 'none';
+    }
+  }
   for (const wrap of scope?.querySelectorAll?.('.attachment-pending') || []) {
     if (wrap?.dataset?.mediaKind !== type) continue;
     const account = textValue(wrap.dataset?.mediaAccount);
@@ -739,8 +748,8 @@ export function reevaluatePendingMedia(scope, detail = {}) {
 /**
  * Build a safe attachment honoring the per-account auto-download setting:
  * enabled types load automatically, disabled types request nothing until the
- * user taps an explicit download action. Declared sizes are advisory only;
- * actual bytes pass through the bounded policy before media is mounted.
+ * user taps an explicit action. Videos use native streaming; other media
+ * pass actual bytes through the bounded policy before mounting a full copy.
  */
 export function createAttachmentElement(attachment, { document: documentRef = globalThis.document, baseUrl = browserBaseUrl(), onImageOpen, mediaPolicy } = {}) {
   const container = makeElement(documentRef, 'div', 'attachment message-attachment');
@@ -770,6 +779,18 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
     container.dataset.mediaState = managed ? 'loaded' : 'auto';
     mountedMediaStates.set(container, { objectUrl: managed ? src : null });
   };
+
+  // Native streaming keeps large videos playable without buffering a full blob.
+  // With automatic downloading disabled the browser waits for the user's play.
+  if (kind === 'video') {
+    ensureMediaPolicyListener(documentRef, policy);
+    mountMedia(url);
+    const video = container.querySelector('.attachment-video');
+    video.preload = policy.enabled(kind, account) ? 'metadata' : 'none';
+    video.setAttribute('aria-label', `Video ${name}`);
+    container.dataset.mediaState = 'streaming';
+    return container;
+  }
 
   if (kind === 'document') {
     const { card, details, link } = buildDocumentCard(attachment, url, name, documentRef);
@@ -1004,6 +1025,7 @@ function messageRenderSignature(message) {
     replyToMessageId: message?.replyToMessageId ?? null,
     replyPreview: message?.replyPreview ?? null,
     isEdited: message?.isEdited === true,
+    isDeleted: message?.isDeleted === true,
     reactions: message?.reactions ?? [],
     attachments: Array.isArray(message?.attachments) ? message.attachments : [],
     linkPreview: message?.linkPreview ?? null,
@@ -1028,6 +1050,8 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
   if (!fromMe && showSenderNames && message?.senderName && message?.isFirstInGroup !== false) bubble.append(makeElement(documentRef, 'strong', 'message-sender', message.senderName));
   if (message?.replyToMessageId) bubble.append(replyReference(message, documentRef));
   const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+  if (metadata.viewOnce === true) bubble.append(makeElement(documentRef, 'div', 'message-preservation-marker message-view-once', 'Visualizacion unica'));
+  if (message?.isDeleted === true) bubble.append(makeElement(documentRef, 'div', 'message-preservation-marker message-deleted', 'Mensaje eliminado'));
   if (metadata.kind === 'contact' && Array.isArray(metadata.contacts)) {
     const card = makeElement(documentRef, 'div', 'message-structured-card');
     card.append(makeElement(documentRef, 'strong', '', 'Contacto compartido'));
@@ -1051,6 +1075,18 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
       const count = (Array.isArray(results?.options) ? results.options : []).find(item => item.name === answer)?.count;
       if (Number.isFinite(count)) option.append(makeElement(documentRef, 'span', 'message-poll-count', String(count)));
       card.append(option);
+      const result = (Array.isArray(results?.options) ? results.options : []).find(item => item.name === answer);
+      if (Array.isArray(result?.voters)) {
+        const votes = makeElement(documentRef, 'details', 'message-poll-voters');
+        votes.append(makeElement(documentRef, 'summary', '', 'Ver votos'));
+        const list = makeElement(documentRef, 'ul', 'message-poll-voter-list');
+        for (const voter of result.voters) {
+          const name = textValue(voter?.name || voter?.id).trim();
+          if (name) list.append(makeElement(documentRef, 'li', '', name));
+        }
+        votes.append(list.children.length ? list : makeElement(documentRef, 'span', 'message-poll-note', 'Sin votos registrados para esta opcion'));
+        card.append(votes);
+      }
     }
     if (results) {
       const submit = makeElement(documentRef, 'button', 'message-poll-submit', 'Votar');

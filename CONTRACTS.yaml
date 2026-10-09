@@ -3,6 +3,24 @@ canonical_checkout: /home/dibanez/k8s/k8s-socialmedia-pocharlies
 registry_files:
 - CONTRACTS.yaml
 contracts:
+- id: http.whatsapp-connector.history-recover.v1
+  kind: http-route
+  value: /history/recover
+  role: provider
+  files:
+  - connectors/whatsapp-web/src/api/controller.ts
+  - apps/whatsapp/server.mjs
+  status: active
+  note: 'POST /api/v1/history/recover, consumed by the authenticated app /api/messages/recover.
+    HMAC-signed body {chatId}, bound to this connector account and a valid observed WhatsApp JID.
+    Restores captured durable content, requests at most five placeholder resends and one history
+    page of 50 using a real observed cursor in milliseconds. Never sends a chat message or creates
+    a fabricated cursor. Response {chatId,status:requested|recovered|no_anchor|cooldown,requested,
+    placeholderRequests,recovered,retryAfterMs?}; counters report performed work, not provider delivery.
+    Concurrent calls coalesce; per-chat requests are limited to once per minute. The app exposes
+    only account, chat, status and counters, maintains account/chat isolation and offers retry.
+    Existing captured content is retained after remote revoke with isDeleted; local deleted_for_me
+    remains hidden. View-once wrappers add metadata.viewOnce without erasing captured text/media.'
 - id: http.whatsapp-pairing.internal-sessions.v1
   kind: http-route
   value: /internal/whatsapp/sessions
@@ -379,7 +397,10 @@ contracts:
     not_a_poll. Votes received while the connector was down are not there (a lower bound, not WhatsApp''s
     full tally). The path, the body fields and the 200 shape are contract: changing any is breaking —
     a new `.v2` entry beside this one. Also consumed by the MCP tool social_get_poll_results (mcp-server/src/mcp/server.ts
-    canonicalGetPollResults; added later, surface unchanged).'
+    canonicalGetPollResults; added later, surface unchanged). Web-app adapter (2026-10-09, additive):
+    body {conversationId, pollMessageIds} returns {polls:[{pollMessageId, available, availability,
+    options:[{name,count,selectedByMe,voters:[{jid,fromMe}]}],totalVoters}]}; availability stays local_partial.
+    The authenticated app resolves captured voter names only inside the selected account.'
 - id: http.whatsapp-connector.messages-event.v1
   kind: http-route
   value: /messages/event
