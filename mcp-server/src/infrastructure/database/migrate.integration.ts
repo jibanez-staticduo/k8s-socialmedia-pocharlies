@@ -733,6 +733,147 @@ async function stageProduction(client: Client, bigintIds = false): Promise<void>
   await client.query('DROP TABLE schema_migrations');
 }
 
+for (const bigintIds of [false, true]) {
+  test(`WhatsApp poll/event targets preserve ${bigintIds ? 'BIGINT' : 'UUID'} IDs and isolate notifications`, async () => {
+    const { client, url } = await database(bigintIds ? 'response_bigint' : 'response_uuid');
+    const listener = new Client({ connectionString: url });
+    await listener.connect();
+    try {
+      await stageProduction(client, bigintIds);
+      const beforeFix = mkdtempSync(join(tmpdir(), 'social-response-before-'));
+      for (const file of migrationFiles().filter(file => Number(file.slice(0, 3)) < 35))
+        writeFileSync(join(beforeFix, file), readFileSync(join(dir, file)));
+      await runMigrations(client, beforeFix);
+      await client.query(`INSERT INTO conversations(id,account,name) VALUES
+        ('personal:target','personal','Target'), ('personal:other','personal','Other'),
+        ('secondary:other','secondary','Other')`);
+      const target = (
+        await client.query(`INSERT INTO messages
+        (conversation_id,wa_message_id,account,platform,wa_timestamp,direction,sender_wa_id,message_type)
+        VALUES ('personal:target','response-target','personal','whatsapp',now(),'INBOUND','peer','POLL')
+        RETURNING id`)
+      ).rows[0].id;
+      const vote = `INSERT INTO whatsapp_poll_votes
+        (account,poll_wa_message_id,voter_jid,conversation_id)
+        VALUES ('personal','response-target','voter','personal:other')`;
+      const event = `INSERT INTO whatsapp_event_responses
+        (account,event_wa_message_id,responder_jid,conversation_id,response)
+        VALUES ('personal','response-target','responder','personal:other','going')`;
+      if (!bigintIds) {
+        for (const sql of [vote, event])
+          await assert.rejects(client.query(sql), (error: { code: string; where: string }) => {
+            assert.equal(error.code, '22P02');
+            assert.match(error.where, /social_notify_whatsapp_response/);
+            return true;
+          });
+        assert.equal(
+          (await client.query('SELECT count(*) FROM whatsapp_poll_votes')).rows[0].count,
+          '0'
+        );
+      }
+      await runMigrations(client);
+      await runMigrations(client);
+      const hints: Record<string, unknown>[] = [];
+      listener.on('notification', message => {
+        if (message.payload) hints.push(JSON.parse(message.payload));
+      });
+      await listener.query('LISTEN message_updated');
+      const settle = () => new Promise(resolve => setTimeout(resolve, 30));
+      const expected = (kind: string) => ({
+        id: bigintIds ? Number(target) : target,
+        conversation_id: 'personal:target',
+        kind,
+      });
+      await client.query('BEGIN');
+      await client.query(vote);
+      await settle();
+      assert.equal(hints.length, 0, 'notification waits for commit');
+      await client.query('COMMIT');
+      await settle();
+      assert.deepEqual(hints, [expected('poll')]);
+      await client.query(event);
+      await settle();
+      assert.deepEqual(hints, [expected('poll'), expected('event')]);
+      for (const table of ['whatsapp_poll_votes', 'whatsapp_event_responses'])
+        assert.equal(
+          (await client.query(`SELECT conversation_id FROM ${table}`)).rows[0].conversation_id,
+          'personal:target',
+          'same-account response follows the target chat'
+        );
+
+      // Wrong legacy account, canonical account, provider, and missing target
+      // must neither redirect a response into another chat nor refresh it.
+      await client.query(`INSERT INTO social_accounts(id,channel,account_key,label,legacy_namespace)
+        VALUES ('whatsapp:wrong','whatsapp','wrong','Wrong','wrong')`);
+      await client.query(`INSERT INTO messages
+        (conversation_id,wa_message_id,account,platform,wa_timestamp,direction,sender_wa_id,message_type)
+        VALUES ('personal:target','telegram-target','personal','telegram',now(),'INBOUND','peer','TEXT')`);
+      for (const [account, accountId, targetId, chat] of [
+        ['secondary', null, 'response-target', 'secondary:other'],
+        ['personal', 'whatsapp:wrong', 'response-target', 'personal:other'],
+        ['personal', null, 'telegram-target', 'personal:other'],
+        ['personal', null, 'missing-target', 'personal:other'],
+      ]) {
+        await client.query(
+          `INSERT INTO whatsapp_poll_votes
+          (account,account_id,poll_wa_message_id,voter_jid,conversation_id)
+          VALUES ($1,$2,$3,$4,$5)`,
+          [account, accountId, targetId, `voter-${targetId}-${accountId}`, chat]
+        );
+        await client.query(
+          `INSERT INTO whatsapp_event_responses
+          (account,account_id,event_wa_message_id,responder_jid,conversation_id,response)
+          VALUES ($1,$2,$3,$4,$5,'going')`,
+          [account, accountId, targetId, `responder-${targetId}-${accountId}`, chat]
+        );
+        for (const table of ['whatsapp_poll_votes', 'whatsapp_event_responses']) {
+          const key =
+            table === 'whatsapp_poll_votes' ? 'poll_wa_message_id' : 'event_wa_message_id';
+          const person = table === 'whatsapp_poll_votes' ? 'voter_jid' : 'responder_jid';
+          const prefix = table === 'whatsapp_poll_votes' ? 'voter' : 'responder';
+          assert.equal(
+            (
+              await client.query(
+                `SELECT conversation_id FROM ${table}
+            WHERE account=$1 AND ${key}=$2 AND ${person}=$3`,
+                [account, targetId, `${prefix}-${targetId}-${accountId}`]
+              )
+            ).rows[0].conversation_id,
+            chat
+          );
+        }
+      }
+      await client.query(`UPDATE whatsapp_poll_votes SET conversation_id='personal:other'
+        WHERE voter_jid='voter'`);
+      await client.query(`UPDATE whatsapp_event_responses SET conversation_id='personal:other'
+        WHERE responder_jid='responder'`);
+      await settle();
+      assert.equal(hints.length, 2, 'wrong chat and unmatched identities stay silent');
+      await client.query(`UPDATE whatsapp_poll_votes SET conversation_id='personal:target',retracted=true
+        WHERE voter_jid='voter'`);
+      await client.query(`UPDATE whatsapp_event_responses SET conversation_id='personal:target',response='unknown'
+        WHERE responder_jid='responder'`);
+      await settle();
+      assert.deepEqual(
+        hints.slice(2),
+        [expected('poll'), expected('event')],
+        'withdrawals refresh target'
+      );
+      await client.query('BEGIN');
+      await client.query(`UPDATE whatsapp_poll_votes SET retracted=false WHERE voter_jid='voter'`);
+      await client.query(
+        `UPDATE whatsapp_event_responses SET response='going' WHERE responder_jid='responder'`
+      );
+      await client.query('ROLLBACK');
+      await settle();
+      assert.equal(hints.length, 4, 'rollback never publishes notifications');
+    } finally {
+      await listener.end();
+      await client.end();
+    }
+  });
+}
+
 test('upgrade imports prod 001-020 ledger, retains bigint rows, and preserves all four send states', async () => {
   const { client } = await database('prod_upgrade');
   try {

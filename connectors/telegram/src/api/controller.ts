@@ -4,6 +4,7 @@ import {
   TelegramMessageEdit,
   isTelegramDownloadTimeout,
   telegramRetryAfter,
+  telegramDownloadRetryAfter,
 } from '../telegram-client';
 import { MessageMutationError, classifyEditError, sendingDisabledReason } from '../message-edit';
 import { generateHMACSignature } from '@mcp-socialmedia/shared';
@@ -44,6 +45,12 @@ function downloadRoute(
         });
       } catch (error) {
         if (respondRateLimit(res, error)) return;
+        const retryAfter = telegramDownloadRetryAfter(error);
+        if (retryAfter !== null) {
+          res.set('Retry-After', String(retryAfter));
+          res.status(503).json({ error: 'Telegram media temporarily unavailable', retryAfter });
+          return;
+        }
         res.status(isTelegramDownloadTimeout(error) ? 504 : 502).json({ error: String(error) });
       }
     })();

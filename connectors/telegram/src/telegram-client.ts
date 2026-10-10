@@ -12,6 +12,7 @@ import {
   Chat,
   MtArgumentError,
   MtUnsupportedError,
+  MtTimeoutError,
   tl,
 } from '@mtcute/node';
 import type { ITelegramStorageProvider } from '@mtcute/node';
@@ -42,6 +43,12 @@ export function telegramRetryAfter(error: unknown): number | null {
   return null;
 }
 
+export function telegramDownloadRetryAfter(error: unknown): number | null {
+  if (error instanceof MtTimeoutError || (tl.RpcError.is(error) && Math.abs(error.code) >= 500))
+    return 60;
+  return null;
+}
+
 export class TelegramDownloadTimeoutError extends Error {
   constructor(deadlineMs: number) {
     super(`Telegram download exceeded its ${deadlineMs / 1000} second deadline`);
@@ -53,7 +60,10 @@ export function isTelegramDownloadTimeout(error: unknown): boolean {
   return error instanceof Error && error.name === 'TelegramDownloadTimeoutError';
 }
 
-async function withDownloadDeadline<T>(operation: (signal: AbortSignal) => Promise<T>, deadlineMs = AVATAR_DEADLINE_MS): Promise<T> {
+async function withDownloadDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  deadlineMs = AVATAR_DEADLINE_MS
+): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -78,15 +88,21 @@ export function telegramReadClient<T extends object>(client: T, signal: AbortSig
     const proxy = new Proxy(target, {
       get(object, property, receiver) {
         if (property === 'call') {
-          // mtcute downloads request infinite flood sleep themselves. Force the
-          // wait to propagate so the durable recovery queue can schedule it.
-          return (request: unknown, options: object = {}) => object.call(request, {
-            ...options, abortSignal: signal, floodSleepThreshold: 0,
-          });
+          // Download workers override client defaults with infinite retries.
+          // Let the durable queue schedule server outages instead of spinning.
+          return (request: unknown, options: object = {}) =>
+            object.call(request, {
+              ...options,
+              abortSignal: signal,
+              floodSleepThreshold: 0,
+              maxRetryCount: 2,
+              throw503: true,
+            });
         }
         const value = Reflect.get(object, property, receiver);
         return value && typeof value === 'object' && 'storage' in value && 'call' in value
-          ? wrap(value) : value;
+          ? wrap(value)
+          : value;
       },
     });
     wrapped.set(target, proxy);
@@ -684,9 +700,14 @@ export class TelegramClientWrapper extends EventEmitter {
     const params: { limit: number; offset?: { id: number; date: number } } = { limit };
     if (offsetId) params.offset = { id: offsetId, date: 0 };
 
-    const messages = await withDownloadDeadline(signal =>
-      telegramReadClient(this.client.withParams({ abortSignal: signal }), signal)
-        .getHistory(toMtcutePeer(chatId), params), mediaDeadlineMs());
+    const messages = await withDownloadDeadline(
+      signal =>
+        telegramReadClient(this.client.withParams({ abortSignal: signal }), signal).getHistory(
+          toMtcutePeer(chatId),
+          params
+        ),
+      mediaDeadlineMs()
+    );
     const out: TelegramMessage[] = [];
     for (const m of messages) {
       const p = await this.parseMessage(m);

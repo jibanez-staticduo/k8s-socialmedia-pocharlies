@@ -729,7 +729,8 @@ contracts:
   status: active
   note: 'HMAC-signed route of the house Telegram connectors (telegram-connector, telegram-connector-professional).
     GET /api/v1/messages/media/:chatId/:msgId (read, ungated), consumed by dgx-messages (media proxy)
-    and the MCP tool social_get_media. 200 {data: base64, size}; 404 no media. Registered with the sending
+    and the MCP tool social_get_media. 200 {data: base64, size}; 404 no media; transient upstream
+    failures return 503 with Retry-After, while operation deadlines return 504. Registered with the sending
     gate (the route predates the registry). The path, the body fields and the 200 shape are contract:
     changing any is breaking — a new `.v2` entry beside this one.'
 - id: http.telegram-connector.messages-forward.v1
@@ -932,7 +933,8 @@ contracts:
   status: active
   note: 'HMAC-signed route of the house Telegram connectors (telegram-connector, telegram-connector-professional).
     GET /api/v1/peers/:id/photo (read, ungated), consumed by dgx-messages (avatars). 200 {data: base64,
-    size, contentType: image/jpeg}; 404 no photo; 503 not connected. Registered with the sending gate
+    size, contentType: image/jpeg}; 404 no photo; 503 not connected or transient upstream failure
+    (Retry-After); operation deadlines return 504. Registered with the sending gate
     (the route predates the registry). The path, the body fields and the 200 shape are contract: changing
     any is breaking — a new `.v2` entry beside this one.'
 - id: http.instagram-connector.webhook.v1
