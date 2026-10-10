@@ -45,3 +45,36 @@ enabled. Observe PostgreSQL and Telegram logs for 10-15 minutes, probe actual
 media retrieval and confirm continued synchronization before claiming a
 production result. A continuing Telegram provider outage must be reported
 separately from successful local retry handling.
+
+## Production result
+
+Observed 2026-10-10 09:23:54-09:34:04 UTC (610 seconds) after deployment:
+
+- Connector, sync and PostgreSQL remained running/healthy. Zero recurring
+  `upload.getFile -503`, UUID/BIGINT or media-attempt errors in this window.
+- Sync stored 29 attachments, including four recovered pending attachments.
+  The backlog decreased from the earlier 18 to 13; those remaining had no
+  currently eligible retry. This does not assert that every Telegram file is
+  now downloadable.
+- A real Telegram file downloaded successfully: 35,270 bytes in 3.01 seconds.
+  Signed identity/dialog reads succeeded (67 dialogs). Message history
+  ingestion continued, increasing the stored message count during the probe.
+- Migration 035 was the only applied migration. Its recorded SHA-256 is
+  `8db1df53c5729c5e6c41eac8926bd85a908bcc31794532fe6f7881567e361dbb`.
+- Compose changed only `telegram-connector.image` and `migrate.image`.
+  Backend and sync configuration/image remained unchanged.
+
+Published source `b0d5841`:
+
+- Telegram: `docker.staticduo.com/socialmedia-telegram@sha256:1ab0898a1018abd68df95454f6f759d7ddf2815a6e6db12e4cc193d0b5897d72`.
+- Migrator: `docker.staticduo.com/socialmedia-mcp@sha256:f3d1f0f176e5887d7902fbad1d215325df85efe2fa127afe4cae59d9f876ee34`.
+
+WhatsApp follow-up verification: 103 targeted application tests passed.
+Playwright in official `v1.57.0-noble` with matching package passed playback,
+audio geometry, voter details, preservation markers and history recovery.
+Host Chromium exited with SIGTRAP before launch; Docker was the successful
+environment retry. Deployed files match source for the web and both WhatsApp
+connectors. A real video served `206 video/mp4` with 1,024 requested bytes.
+Two real poll API results exposed 29 and 19 captured voters. No messages or
+votes were sent for these checks. No GitHub checks were reported for the fork
+head; local test results are not a claim that remote CI ran.
