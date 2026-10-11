@@ -3315,6 +3315,22 @@ export class BaileysClient extends EventEmitter {
         ]
       );
       await db.query('COMMIT');
+      // The message hint can precede the upload. Refresh only after its
+      // attachment is committed, using the same account-scoped read path.
+      try {
+        await db.query(
+          `SELECT pg_notify('socialmedia_changes', jsonb_build_object(
+             'kind', 'message', 'account', account,
+             'conversation_id', left(conversation_id::text, 512),
+             'message_id', id::text, 'wa_message_id', left(wa_message_id::text, 512),
+             'reason', 'attachment'
+           )::text)
+           FROM messages WHERE id=$1 AND account=$2 AND platform='whatsapp'`,
+          [messageId, connectorAccount()]
+        );
+      } catch (error: any) {
+        this.logger.warn(`Attachment refresh hint failed: ${error?.code || 'unknown'}`);
+      }
       return { ...stored, mimeType, fileName };
     } catch (error) {
       await db.query('ROLLBACK');
