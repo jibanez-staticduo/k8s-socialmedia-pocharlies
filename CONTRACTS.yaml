@@ -3,6 +3,33 @@ canonical_checkout: /home/dibanez/k8s/k8s-socialmedia-pocharlies
 registry_files:
 - CONTRACTS.yaml
 contracts:
+- id: http.whatsapp-connector.messages-info.v1
+  kind: http-route
+  value: /messages/info
+  role: provider
+  files:
+  - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: 'POST /api/v1/messages/info is a read with signed body {chatId,messageId}.
+    Resolves the sent WhatsApp message within the connector account/chat. Returns
+    account,chatId,messageId,fromMe,status,recipientCount (null when unknown),
+    completeRecipients,observedAt and receipts [{participantId,name,deliveredAt,
+    readAt,playedAt}]. Receipt times are ISO instants or null; names and times are
+    captured provider data. Never attributes current membership to old sends or
+    marks an entire group read from one participant receipt. Consumed by the
+    authenticated web GET /api/messages/info after local account/chat/message
+    resolution. No sending gate or WhatsApp send is required.'
+- id: db.whatsapp-message-receipts.v1
+  kind: schema
+  value: whatsapp_message_receipts
+  role: provider
+  files:
+  - mcp-server/src/infrastructure/database/migrations/038_whatsapp_message_receipts.sql
+  status: active
+  note: 'Durable per-recipient delivery/read receipts isolated by provider account,
+    conversation and message, with send-time recipient snapshots for safe group
+    aggregation. No receipt payload is added to messages.metadata or Hindsight
+    scopes. Published migrations 033-037 remain unchanged.'
 - id: db.hindsight-name-change.v1
   kind: schema
   value: hindsight_conversation_name_change

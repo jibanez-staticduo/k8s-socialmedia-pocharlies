@@ -1,6 +1,6 @@
 /** A participant receipt cannot establish delivery or reading by an entire group. */
 export function directReceiptStatus(update: {
-  key?: { remoteJid?: string; fromMe?: boolean };
+  key?: { remoteJid?: string | null; fromMe?: boolean | null };
   receipt?: { readTimestamp?: unknown; playedTimestamp?: unknown; receiptTimestamp?: unknown };
 }): 'read' | 'delivered' | null {
   const jid = update?.key?.remoteJid;

@@ -790,6 +790,8 @@ export async function setMessageStatus(waMessageId: string, status: string): Pro
     await pool.query(
       `UPDATE messages SET status = $2, status_at = now()
        WHERE wa_message_id = $1
+         AND NOT COALESCE(is_deleted,FALSE) AND status IS DISTINCT FROM 'deleted'
+         AND status IS DISTINCT FROM 'failed'
          AND $3::int > CASE status
               WHEN 'pending' THEN 1
               WHEN 'sent' THEN 2
@@ -799,11 +801,13 @@ export async function setMessageStatus(waMessageId: string, status: string): Pro
       [wamId, status, rank[status]]
     );
   } else {
-    // failed/deleted: overwrite regardless.
+    // A failure cannot erase delivery/read evidence or a deletion.
     await pool.query(
       status === 'deleted'
-        ? `UPDATE messages SET status = $2, is_deleted = TRUE, deleted_at = now(), status_at = now() WHERE wa_message_id = $1`
-        : `UPDATE messages SET status = $2, status_at = now() WHERE wa_message_id = $1`,
+        ? `UPDATE messages SET status = $2, is_deleted = TRUE, deleted_at = COALESCE(deleted_at, now()), status_at = now() WHERE wa_message_id = $1`
+        : `UPDATE messages SET status = $2, status_at = now() WHERE wa_message_id = $1
+             AND NOT COALESCE(is_deleted,FALSE)
+             AND (status IS NULL OR status NOT IN ('deleted','delivered','read'))`,
       [wamId, status]
     );
   }

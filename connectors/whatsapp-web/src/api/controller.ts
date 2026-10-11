@@ -21,6 +21,7 @@ import {
   type NovedadesStatusPublishInput,
 } from '../baileys-client';
 import { MuteState } from '../chat-state';
+import { MessageInfoError } from '../message-receipts';
 import { QRHandler } from '../qr-handler';
 import { createHMACAuth, AuthenticatedRequest } from './auth';
 import { contactBlockJid, ContactBlockError } from '../contact-block';
@@ -3103,6 +3104,26 @@ export function createRouter(
 
   // Edit one of our own text messages (fase 3 / PR-3).
   // CONTRACT: http.whatsapp-connector.messages-edit.v1 — body {chatId, messageId, content}, 200 {edited, messageId, editId, editedAt}
+  // CONTRACT: http.whatsapp-connector.messages-info.v1
+  router.post('/messages/info', auth, (req: AuthenticatedRequest, res: Response): void => {
+    void (async () => {
+      const body = optionalObject(req.body);
+      const chatId = optionalString(body.chatId);
+      const messageId = optionalString(body.messageId);
+      if (!chatId || !messageId) {
+        res.status(400).json({ error: 'Missing chatId or messageId' });
+        return;
+      }
+      try {
+        res.json(await client.getMessageInfo(chatId, messageId));
+      } catch (error) {
+        res
+          .status(error instanceof MessageInfoError ? error.status : 500)
+          .json({ error: String(error instanceof Error ? error.message : error) });
+      }
+    })();
+  });
+
   router.post('/messages/edit', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {

@@ -468,7 +468,7 @@ export async function markMessageEdited(
 export async function markMessageDeleted(messageId: string): Promise<void> {
   await pool().query(
     `UPDATE messages
-        SET is_deleted = TRUE, deleted_at = now(), status = 'deleted', status_at = now(), updated_at = now()
+        SET is_deleted = TRUE, deleted_at = COALESCE(deleted_at, now()), status = 'deleted', status_at = now(), updated_at = now()
       WHERE wa_message_id = $1 AND account = $2`,
     [accountKey(messageId), connectorAccount()]
   );
@@ -477,7 +477,7 @@ export async function markMessageDeleted(messageId: string): Promise<void> {
 export async function markMessageDeletedForMe(messageId: string, chatId: string): Promise<void> {
   await pool().query(
     `UPDATE messages
-        SET is_deleted = TRUE, deleted_at = now(), updated_at = now(),
+        SET is_deleted = TRUE, deleted_at = COALESCE(deleted_at, now()), updated_at = now(),
             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
               'deleted_for_me', TRUE, 'deleted_for_me_at', now(),
               'deleted_for_me_source', 'connector')

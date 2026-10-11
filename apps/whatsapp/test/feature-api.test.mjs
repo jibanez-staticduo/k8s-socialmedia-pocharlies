@@ -175,6 +175,40 @@ test('event results use the selected account and stored message identity through
   assert.equal((await request(`/api/messages/event/results?account=secondary${suffix}`)).status, 502);
 });
 
+test('message info is read-only, scoped and uses the stored WhatsApp message identity', async t => {
+  const upstream = [];
+  const result = { account: 'secondary', chatId: 'secondary-chat', messageId: 'wa-secondary-1', fromMe: true,
+    status: 'sent', recipientCount: null, completeRecipients: false, observedAt: null,
+    receipts: [{participantId: 'person@lid', name: '<Ana>', deliveredAt: null, readAt: '2026-10-11T09:20:00Z', playedAt: null}] };
+  const {request, database} = await fixture(t, {env: {APP_ENABLE_SENDING: 'false'}, fetchImpl: async (url, options) => {
+    upstream.push({url, body: JSON.parse(options.body)}); return Response.json(result);
+  }});
+  const endpoint = '/api/messages/info?account=secondary&chat=secondary-chat&messageId=22222222-2222-2222-2222-222222222222';
+  assert.equal((await request(endpoint)).status, 400);
+  assert.equal(upstream.length, 0);
+  database.messages['secondary-chat'][0].direction = 'OUTBOUND';
+  assert.equal((await request(endpoint.replace('account=secondary', 'account=personal'))).status, 404);
+  assert.equal(upstream.length, 0);
+  const response = await request(endpoint);
+  assert.equal(response.status, 200);
+  const info = await response.json();
+  assert.equal(info.messageId, '22222222-2222-2222-2222-222222222222');
+  assert.equal(info.receipts[0].readAt, '2026-10-11T09:20:00.000Z');
+  assert.equal(info.receipts[0].deliveredAt, null);
+  assert.deepEqual(upstream, [{url: 'http://secondary-connector/api/v1/messages/info', body: {chatId: 'secondary-chat', messageId: 'wa-secondary-1'}}]);
+  result.account = 'personal';
+  assert.equal((await request(endpoint)).status, 502);
+  result.account = 'secondary'; result.messageId = 'unrelated';
+  assert.equal((await request(endpoint)).status, 502);
+  result.messageId = 'wa-secondary-1'; result.chatId = 'other-chat';
+  assert.equal((await request(endpoint)).status, 502);
+  result.chatId = 'secondary-chat'; result.receipts[0].readAt = 'bad date';
+  assert.equal((await request(endpoint)).status, 502);
+  result.receipts[0].readAt = '2026-10-11T09:20:00Z';
+  database.messages['secondary-chat'][0].is_deleted = true;
+  assert.equal((await request(endpoint)).status, 200);
+});
+
 test('event response resolves its stored target, requires a stable token and preserves account isolation', async t => {
   const upstream = [];
   const {request, database} = await fixture(t, {fetchImpl: async (url, options) => {

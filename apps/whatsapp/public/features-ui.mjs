@@ -32,6 +32,7 @@ export const FEATURE_CONTRACT = Object.freeze({
   messageForward: { method: 'POST', path: '/api/messages/forward', body: 'account, chat, messageId, targetChat (one request per selected message)' },
   messageEdit: { method: 'POST', path: '/api/messages/edit', body: 'account, chat, messageId, text' },
   messageDelete: { method: 'POST', path: '/api/messages/delete', body: 'account, chat, messageId, scope' },
+  messageInfo: { method: 'GET', path: '/api/messages/info', response: 'account, chatId, messageId, recipientCount, completeRecipients, receipts[]' },
   messageStar: { method: 'POST', path: '/api/chat-actions', body: 'account, chat, action=starred|unstarred, messageId' },
   chatStart: { method: 'POST', path: '/api/chats/new', body: 'account, phone', response: 'chat{id,name,phone}, confirmed' },
   contactCreate: { method: 'POST', path: '/api/contacts', body: 'account, phone, displayName' },
@@ -375,6 +376,77 @@ function button(documentRef, label, className = 'feature-button') {
   const element = makeElement(documentRef, 'button', className, label);
   element.type = 'button';
   return element;
+}
+
+export function canShowMessageInfo(message) {
+  return message?.fromMe === true && Boolean(text(message.id)) && message.pending !== true
+    && message.optimistic !== true && !/^(local|tmp|optimistic|pending)[-:]/i.test(text(message.id));
+}
+
+/** Receipt times are evidence: missing or invalid dates never become inferred events. */
+export function messageInfoSections(info = {}) {
+  const date = value => typeof value === 'string' && value.trim() && Number.isFinite(Date.parse(value)) ? value : null;
+  const receipts = array(info.receipts).filter(item => item && text(item.participantId)).map(item => ({
+    participantId: text(item.participantId), name: text(item.name).trim() || text(item.participantId),
+    deliveredAt: date(item.deliveredAt), readAt: date(item.readAt), playedAt: date(item.playedAt),
+  }));
+  return [['readAt', 'Leído por'], ['deliveredAt', 'Entregado a'], ['playedAt', 'Reproducido por']]
+    .filter(([key]) => key !== 'playedAt' || receipts.some(item => item.playedAt))
+    .map(([key, title]) => ({ key, title, receipts: receipts.filter(item => item[key]).sort((a, b) => Date.parse(b[key]) - Date.parse(a[key])) }));
+}
+
+export function createMessageInfoPanel({ documentRef, container, message, context, requestInfo, isCurrent }) {
+  const node = (tag, className, value) => makeElement(documentRef, tag, className, value);
+  const summary = node('div', 'feature-message-info-summary');
+  summary.append(node('p', 'feature-message-info-preview', messageText(message)));
+  const notice = node('p', 'feature-muted');
+  notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite');
+  const retry = button(documentRef, 'Reintentar', 'feature-button subtle');
+  const content = node('div', 'feature-message-info-content');
+  container.append(summary, notice, retry, content);
+  let version = 0;
+  const load = async () => {
+    if (!isCurrent()) return;
+    const attempt = ++version;
+    const current = () => attempt === version && isCurrent();
+    notice.textContent = 'Cargando información del mensaje…';
+    container.setAttribute('aria-busy', 'true');
+    retry.disabled = true; retry.hidden = true;
+    try {
+      const info = await requestInfo();
+      if (!current()) return;
+      if (!info || info.account !== context.account || info.chatId !== context.chat || text(info.messageId) !== text(message.id) || info.fromMe !== true) {
+        throw new Error('La información recibida no corresponde a este mensaje.');
+      }
+      content.replaceChildren();
+      const total = Number.isInteger(info.recipientCount) && info.recipientCount >= 0 ? info.recipientCount : null;
+      for (const section of messageInfoSections(info)) {
+        const block = node('section', `feature-message-info-section feature-message-info-${section.key}`);
+        block.append(node('h3', 'feature-section-title', `${section.title} · ${section.receipts.length}${total === null ? ' / total desconocido' : ` / ${total}`}`));
+        if (!section.receipts.length) block.append(node('p', 'feature-muted', section.key === 'readAt' ? 'Sin confirmaciones de lectura disponibles.' : 'Sin confirmaciones de entrega disponibles.'));
+        for (const receipt of section.receipts) {
+          const row = node('div', 'feature-message-info-receipt');
+          const identity = node('div', 'feature-message-info-identity');
+          identity.append(node('strong', '', receipt.name));
+          if (receipt.name !== receipt.participantId) identity.append(node('small', 'feature-muted', receipt.participantId));
+          const time = node('time', '', new Date(receipt[section.key]).toLocaleString());
+          time.setAttribute('datetime', receipt[section.key]);
+          row.append(identity, time); block.append(row);
+        }
+        content.append(block);
+      }
+      notice.textContent = info.completeRecipients === true ? 'Confirmaciones disponibles para este mensaje.' : 'Información parcial: puede haber destinatarios sin confirmaciones disponibles.';
+      retry.textContent = 'Actualizar'; retry.hidden = false;
+    } catch (error) {
+      if (!current()) return;
+      notice.textContent = error?.message || 'No se pudo cargar la información del mensaje.';
+      retry.textContent = 'Reintentar'; retry.hidden = false;
+    } finally {
+      if (current()) { retry.disabled = false; container.setAttribute('aria-busy', 'false'); }
+    }
+  };
+  retry.onclick = load;
+  return { load };
 }
 
 function field(documentRef, label, type = 'text', name = '', value = '') {
@@ -1221,6 +1293,20 @@ export function installFeatureUI({
     modal.body.append(confirm);
   }
 
+  function openMessageInfo(message) {
+    if (!runtime.account || !runtime.chat || !canShowMessageInfo(message)) return;
+    const context = { account: runtime.account, chat: runtime.chat, generation: runtime.generation };
+    const modal = openModal('Información del mensaje', { opener: documentRef.activeElement, variant: 'panel' });
+    modal.dialog.classList.add('feature-message-info');
+    const panel = createMessageInfoPanel({ documentRef, container: modal.body, message, context,
+      isCurrent: () => runtime.modal?.body === modal.body && runtime.account === context.account
+        && runtime.chat === context.chat && runtime.generation === context.generation,
+      requestInfo: () => request('/api/messages/info', undefined, { account: context.account, chat: context.chat, messageId: message.id }),
+    });
+    void panel.load();
+    modal.close.focus();
+  }
+
   function openMessageActions(message) {
     const modal = openModal('Acciones del mensaje', { opener: documentRef.activeElement, variant: 'menu' });
     const actions = node('div', 'feature-action-grid');
@@ -1240,6 +1326,17 @@ export function installFeatureUI({
     add('Seleccionar', item => { closeModal(); toggleMessageSelected(item.id, true); });
     add(isMessagePinned(message.id) ? 'Desfijar mensaje' : 'Fijar mensaje', item => {closeModal(); openPinMessage(item);});
     add(prefs().starredMessages.includes(text(message.id)) ? 'Quitar destacado' : 'Destacar', item => starMessage(item, !prefs().starredMessages.includes(text(item.id))));
+    if (canShowMessageInfo(message)) {
+      add('Información del mensaje', item => openMessageInfo(item));
+      const info = actions.lastElementChild;
+      info.classList.add('feature-message-info-action');
+      const icon = documentRef.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('aria-hidden', 'true');
+      for (const value of ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20', 'M12 11v6', 'M12 7v1']) {
+        const path = documentRef.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', value); icon.append(path);
+      }
+      info.prepend(icon);
+    }
     if (message.fromMe === true) {
       add('Editar', item => { closeModal(); openEdit(item); });
       add('Eliminar', item => { closeModal(); openDelete(item); }, 'feature-button danger');

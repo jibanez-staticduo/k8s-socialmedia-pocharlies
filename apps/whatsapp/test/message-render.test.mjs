@@ -658,4 +658,20 @@ test('preserved message content keeps deleted and view-once provenance visible',
   assert.ok(bubble.querySelector('.message-deleted'));
   assert.ok(bubble.querySelector('.message-view-once'));
   assert.equal(treeText(bubble.querySelector('.message-text')),'contenido conservado');
+  assert.match(treeText(bubble.querySelector('.message-deleted')), /Fecha no disponible/);
+});
+
+test('deleted messages show the recorded instant in browser time and update when it arrives', () => {
+  const message = {id:'deleted', text:'contenido conservado', isDeleted:true};
+  const earlier = renderMessage(message,{document:fakeDocument});
+  const deletedAt = '2026-10-11T09:20:00Z';
+  const later = renderMessage({...message, deletedAt},{document:fakeDocument});
+  const when = later.querySelector('.message-deleted-time');
+  assert.equal(when.dateTime,'2026-10-11T09:20:00.000Z');
+  assert.equal(when.textContent,new Intl.DateTimeFormat('es-ES',{dateStyle:'short',timeStyle:'short'}).format(new Date(deletedAt)));
+  assert.equal(treeText(later.querySelector('.message-text')),'contenido conservado');
+  assert.notEqual(earlier.dataset.renderSignature,later.dataset.renderSignature);
+  const invalid = renderMessage({...message, deletedAt:'<img onerror=bad>'},{document:fakeDocument});
+  assert.equal(invalid.querySelector('.message-deleted-time'),null);
+  assert.match(treeText(invalid.querySelector('.message-deleted')),/Fecha no disponible/);
 });

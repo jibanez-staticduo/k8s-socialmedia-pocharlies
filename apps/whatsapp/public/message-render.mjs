@@ -1026,6 +1026,7 @@ function messageRenderSignature(message) {
     replyPreview: message?.replyPreview ?? null,
     isEdited: message?.isEdited === true,
     isDeleted: message?.isDeleted === true,
+    deletedAt: message?.deletedAt ?? null,
     reactions: message?.reactions ?? [],
     attachments: Array.isArray(message?.attachments) ? message.attachments : [],
     linkPreview: message?.linkPreview ?? null,
@@ -1051,7 +1052,18 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
   if (message?.replyToMessageId) bubble.append(replyReference(message, documentRef));
   const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {};
   if (metadata.viewOnce === true) bubble.append(makeElement(documentRef, 'div', 'message-preservation-marker message-view-once', 'Visualizacion unica'));
-  if (message?.isDeleted === true) bubble.append(makeElement(documentRef, 'div', 'message-preservation-marker message-deleted', 'Mensaje eliminado'));
+  if (message?.isDeleted === true) {
+    const marker = makeElement(documentRef, 'div', 'message-preservation-marker message-deleted', 'Mensaje eliminado');
+    const deletedAt = parseTimestamp(message?.deletedAt);
+    if (deletedAt) {
+      marker.append(makeElement(documentRef, 'span', '', ' · '));
+      const when = makeElement(documentRef, 'time', 'message-deleted-time', new Intl.DateTimeFormat('es-ES', { dateStyle: 'short', timeStyle: 'short' }).format(deletedAt));
+      when.dateTime = deletedAt.toISOString();
+      when.title = 'Fecha en que SocialMedia registró el borrado';
+      marker.append(when);
+    } else marker.append(makeElement(documentRef, 'span', '', ' · Fecha no disponible'));
+    bubble.append(marker);
+  }
   if (metadata.kind === 'contact' && Array.isArray(metadata.contacts)) {
     const card = makeElement(documentRef, 'div', 'message-structured-card');
     card.append(makeElement(documentRef, 'strong', '', 'Contacto compartido'));

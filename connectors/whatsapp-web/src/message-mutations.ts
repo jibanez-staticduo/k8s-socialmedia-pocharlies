@@ -175,6 +175,7 @@ export async function markMessageRevoked(
   const result = await getPool().query(
     `UPDATE messages
         SET is_deleted = TRUE,
+            deleted_at = COALESCE(deleted_at, $3::timestamptz),
             status = 'deleted',
             status_at = now(),
             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(

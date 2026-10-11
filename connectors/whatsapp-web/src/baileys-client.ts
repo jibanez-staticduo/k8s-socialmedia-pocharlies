@@ -71,6 +71,16 @@ import {
 } from '@whiskeysockets/baileys/lib/Utils/tc-token-utils.js';
 import { Boom } from '@hapi/boom';
 import { EventEmitter } from 'events';
+import {
+  ensureMessageReceiptTables,
+  getMessageReceiptInfo,
+  recordAggregateStatus,
+  recordMessageReceipt,
+  recordRecipientSnapshot,
+  receiptJid,
+  receiptTime,
+  type ReceiptIdentity,
+} from './message-receipts';
 import { promises as fsp } from 'fs';
 import { join } from 'path';
 import QRCode from 'qrcode';
@@ -1753,6 +1763,7 @@ export class BaileysClient extends EventEmitter {
         }
         await ensureHistoryTables();
         await ensureDurableTables();
+        await ensureMessageReceiptTables();
         await adoptPayloadTimestampShape();
         await ensureNovedadesTables();
       }
@@ -2247,7 +2258,28 @@ export class BaileysClient extends EventEmitter {
         if (typeof st === 'number') {
           const mapped = mapWaStatus(st);
           if (mapped) {
-            void setMessageStatus(waMessageId, mapped).catch(() => {});
+            if (u.key.remoteJid && u.key.fromMe !== false) {
+              void this.recordProviderStatus(u.key.remoteJid, waMessageId, mapped).catch(error =>
+                this.logger.warn(`Message status persistence failed: ${error?.message || error}`)
+              );
+              // rc13 direct receipt updates carry attrs.t in update.messageTimestamp
+              // (messages-recv.js). Groups use their separate participant event.
+              const at = receiptTime(u.update.messageTimestamp);
+              if (
+                !this.isGroupJid(u.key.remoteJid) &&
+                at &&
+                (mapped === 'delivered' || mapped === 'read')
+              ) {
+                void this.persistParticipantReceipt(u.key.remoteJid, waMessageId, {
+                  userJid: u.key.remoteJid,
+                  ...(mapped === 'delivered'
+                    ? { receiptTimestamp: u.update.messageTimestamp }
+                    : { readTimestamp: u.update.messageTimestamp }),
+                }).catch(error =>
+                  this.logger.warn(`Direct receipt persistence failed: ${error?.message || error}`)
+                );
+              }
+            }
             if (mapped === 'failed') {
               const failureClass: WhatsAppSendFailureClass =
                 ackErrorCode === '463' ? 'account_restricted' : 'unknown';
@@ -2272,12 +2304,18 @@ export class BaileysClient extends EventEmitter {
     });
 
     // Receipts from individual recipients (group "✓✓ for everyone" or read).
-    sock.ev.on('message-receipt.update' as any, (updates: any[]) => {
+    sock.ev.on('message-receipt.update', updates => {
       for (const u of updates || []) {
         const waMessageId = u?.key?.id;
+        if (waMessageId && u.key.remoteJid && u.key.fromMe !== false && !novedadesKind(u.key)) {
+          void this.persistParticipantReceipt(u.key.remoteJid, waMessageId, u.receipt).catch(
+            error =>
+              this.logger.warn(`Message receipt persistence failed: ${error?.message || error}`)
+          );
+        }
         const t = directReceiptStatus(u);
         if (waMessageId && t) {
-          void setMessageStatus(waMessageId, t).catch(() => {});
+          void this.recordProviderStatus(u.key.remoteJid!, waMessageId, t).catch(() => {});
         }
       }
     });
@@ -2794,6 +2832,23 @@ export class BaileysClient extends EventEmitter {
       options.source === 'baileys_history_sync' && !waMessage.structured ? 'history' : 'live'
     );
     const msgId = await storeMessage(data);
+    if (msg.key.fromMe && !novedadesKind(msg.key)) {
+      // History proves an outbound message was sent, but never proves today's recipients.
+      // Reapply stored provider state to close the receipt-before-message-row race.
+      const status = typeof msg.status === 'number' ? mapWaStatus(msg.status) : null;
+      await recordAggregateStatus(
+        waMessage.conversationId,
+        waMessage.waMessageId,
+        status || 'sent'
+      );
+      for (const receipt of msg.userReceipt || []) {
+        await this.persistParticipantReceipt(
+          waMessage.conversationId,
+          waMessage.waMessageId,
+          receipt
+        );
+      }
+    }
     // Not for a REACTION: prod folds it into the target's messages.reactions
     // and never writes its row, so the key's FK to messages.wa_message_id can
     // only fail (a warning per reaction). Nothing reads a reaction's key: it
@@ -3459,6 +3514,106 @@ export class BaileysClient extends EventEmitter {
     }
   }
 
+  async getMessageInfo(chatId: string, messageId: string) {
+    return getMessageReceiptInfo(chatId, messageId);
+  }
+
+  private async receiptIdentity(
+    jid: string,
+    contact?: Partial<GroupParticipant>
+  ): Promise<ReceiptIdentity> {
+    const aliases = [
+      ...new Set(
+        (await this.jidAliases(receiptJid(jid)))
+          .concat(contact?.lid || [], contact?.phoneNumber || [])
+          .map(receiptJid)
+      ),
+    ];
+    return {
+      participantId: aliases.find(id => id.endsWith('@s.whatsapp.net')) || aliases[0],
+      aliases,
+      name:
+        contact?.name ||
+        contact?.notify ||
+        this.contactNameFor(jid, this.normalizeJid(jid)) ||
+        null,
+    };
+  }
+
+  private async persistParticipantReceipt(
+    chatId: string,
+    messageId: string,
+    receipt: proto.IUserReceipt
+  ): Promise<void> {
+    if (!this.ingest || !receipt.userJid) return;
+    const identity = await this.receiptIdentity(receipt.userJid);
+    await recordMessageReceipt(await this.receiptScopeChat(chatId), messageId, {
+      ...identity,
+      deliveredAt: receiptTime(receipt.receiptTimestamp),
+      readAt: receiptTime(receipt.readTimestamp),
+      playedAt: receiptTime(receipt.playedTimestamp),
+    });
+  }
+
+  private async receiptScopeChat(jid: string): Promise<string> {
+    if (!this.isGroupJid(jid) && /@(c\.us|s\.whatsapp\.net)$/.test(jid)) {
+      const aliases = await this.jidAliases(receiptJid(jid));
+      const lid = aliases.find(id => id.endsWith('@lid'));
+      if (lid) return lid;
+    }
+    return this.normalizeJid(jid);
+  }
+
+  private async recordProviderStatus(
+    chatId: string,
+    messageId: string,
+    status: string
+  ): Promise<void> {
+    await recordAggregateStatus(await this.receiptScopeChat(chatId), messageId, status);
+  }
+
+  private async captureSendRecipients(
+    sock: WASocket,
+    jid: string
+  ): Promise<ReceiptIdentity[] | null> {
+    if (!this.ingest || !this.isGroupJid(jid)) return null;
+    try {
+      // Fetch immediately before sending. Cached or current membership on a later read
+      // cannot describe who a historical message was sent to.
+      const meta = await this.race(sock.groupMetadata(jid), 10_000, 'Recipient snapshot timeout');
+      const own = (await this.ownIds()).map(receiptJid);
+      if (!own.length || !Array.isArray(meta.participants)) return null;
+      const participants = await Promise.all(
+        meta.participants.map(p => this.receiptIdentity(p.id, p))
+      );
+      if (!participants.some(p => p.aliases.some(id => own.includes(id)))) return null;
+      return participants.filter(p => !p.aliases.some(id => own.includes(id)));
+    } catch (error: any) {
+      this.logger.warn(`Recipient snapshot unavailable: ${error?.message || error}`);
+      return null;
+    }
+  }
+
+  private async sendWithReceiptSnapshot(
+    sock: WASocket,
+    jid: string,
+    content: AnyMessageContent,
+    options?: Parameters<WASocket['sendMessage']>[2]
+  ): Promise<WAMessage | undefined> {
+    const control = content as any;
+    const recipients =
+      control.edit || control.delete || control.react || control.pin
+        ? null
+        : await this.captureSendRecipients(sock, jid);
+    const sent = await sock.sendMessage(jid, content, options);
+    if (sent?.key?.id && recipients !== null) {
+      void recordRecipientSnapshot(this.normalizeJid(jid), sent.key.id, recipients).catch(error =>
+        this.logger.warn(`Recipient snapshot persistence failed: ${error?.message || error}`)
+      );
+    }
+    return sent;
+  }
+
   /**
    * A reaction seen on the socket (a contact, our phone, the echo of our own
    * react) → whatsapp_message_reactions. The reactor is the message sender:
@@ -3876,7 +4031,7 @@ export class BaileysClient extends EventEmitter {
         : undefined,
       ephemeralExpiration
     );
-    const sent = await this.sock.sendMessage(raw, payload, sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(this.sock, raw, payload, sendOptions);
     if (sent?.key?.id) {
       if (await this.persistSentNovedades(sent, ownJid)) return sent.key.id;
       try {
@@ -3965,8 +4120,8 @@ export class BaileysClient extends EventEmitter {
     );
     await sendRequest?.beforeSend?.();
     const sent = sendOptions
-      ? await this.sock.sendMessage(raw, payload, sendOptions)
-      : await this.sock.sendMessage(raw, payload);
+      ? await this.sendWithReceiptSnapshot(this.sock, raw, payload, sendOptions)
+      : await this.sendWithReceiptSnapshot(this.sock, raw, payload);
     const messageId = sent?.key?.id;
     if (sent?.key) {
       if (await this.persistSentNovedades(sent, ownJid)) return messageId || undefined;
@@ -4114,7 +4269,7 @@ export class BaileysClient extends EventEmitter {
         : undefined,
       ephemeralExpiration
     );
-    const sent = await sock.sendMessage(target.raw, content, sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(sock, target.raw, content, sendOptions);
     const messageId = sent?.key?.id;
     if (!sent || !messageId) throw new Error(`WhatsApp returned no message id for the ${kind}`);
     this.rememberKey(messageId, sent.key, target.raw);
@@ -4147,7 +4302,7 @@ export class BaileysClient extends EventEmitter {
       await this.outgoingEphemeral(target.raw, target.canonicalId)
     );
     await options.beforeSend?.();
-    const sent = await sock.sendMessage(target.raw, content, sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(sock, target.raw, content, sendOptions);
     const messageId = sent?.key?.id;
     if (!sent || !messageId) throw new Error('WhatsApp returned no message id for the contact');
     this.rememberKey(messageId, sent.key, target.raw);
@@ -4361,7 +4516,9 @@ export class BaileysClient extends EventEmitter {
     const sock = this.connectedSocket();
     const text = typeof emoji === 'string' ? emoji.trim() : '';
     const target = await this.resolveMutationTarget(chatId, messageId, 'reactToMessage');
-    const sent = await sock.sendMessage(target.chatJid, { react: { text, key: target.key } });
+    const sent = await this.sendWithReceiptSnapshot(sock, target.chatJid, {
+      react: { text, key: target.key },
+    });
     const reactedAt = reactionTime(sent?.message?.reactionMessage?.senderTimestampMs) || new Date();
     if (this.ingest && this.meJid) {
       await storeMessageReaction({
@@ -4619,7 +4776,12 @@ export class BaileysClient extends EventEmitter {
       await this.outgoingEphemeral(target.raw, target.canonicalId)
     );
     await options.beforeSend?.();
-    const sent = await sock.sendMessage(target.raw, buildPollContent(poll), sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(
+      sock,
+      target.raw,
+      buildPollContent(poll),
+      sendOptions
+    );
     return this.afterStructuredSend(sent, target, 'Poll', options.actor);
   }
 
@@ -4636,7 +4798,12 @@ export class BaileysClient extends EventEmitter {
       await this.outgoingEphemeral(target.raw, target.canonicalId)
     );
     await options.beforeSend?.();
-    const sent = await sock.sendMessage(target.raw, buildEventContent(event), sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(
+      sock,
+      target.raw,
+      buildEventContent(event),
+      sendOptions
+    );
     return this.afterStructuredSend(sent, target, 'Event', options.actor);
   }
 
@@ -4909,8 +5076,13 @@ export class BaileysClient extends EventEmitter {
     await this.guardDirectSend(rawTarget);
     const sendOptions = withEphemeralExpiration(undefined, await this.outgoingEphemeral(rawTarget));
     const sent = sendOptions
-      ? await this.sock.sendMessage(rawTarget, { forward: forwardable }, sendOptions)
-      : await this.sock.sendMessage(rawTarget, { forward: forwardable });
+      ? await this.sendWithReceiptSnapshot(
+          this.sock,
+          rawTarget,
+          { forward: forwardable },
+          sendOptions
+        )
+      : await this.sendWithReceiptSnapshot(this.sock, rawTarget, { forward: forwardable });
     await this.persistSentMessage(sent, rawTarget);
     const sentId = sent?.key?.id;
     this.logger.info(`Forwarded ${id} to ${rawTarget}${sentId ? ` id=${sentId}` : ''}`);
@@ -4955,7 +5127,10 @@ export class BaileysClient extends EventEmitter {
       );
     }
     return this.withOwnMutation('edit', target.id, async () => {
-      const sent = await sock.sendMessage(target.chatJid, { text: content, edit: target.key });
+      const sent = await this.sendWithReceiptSnapshot(sock, target.chatJid, {
+        text: content,
+        edit: target.key,
+      });
       await this.throwIfMutationRejected(sent?.key?.id, 'edit', target.id);
       const editedAt = new Date();
       if (this.ingest) {
@@ -5000,7 +5175,7 @@ export class BaileysClient extends EventEmitter {
       );
     }
     return this.withOwnMutation('revoke', target.id, async () => {
-      const sent = await sock.sendMessage(target.chatJid, { delete: target.key });
+      const sent = await this.sendWithReceiptSnapshot(sock, target.chatJid, { delete: target.key });
       await this.throwIfMutationRejected(sent?.key?.id, 'delete', target.id);
       const deletedAt = new Date();
       if (this.ingest) {
@@ -5168,7 +5343,7 @@ export class BaileysClient extends EventEmitter {
     const actionId = options.messageId || generateMessageIDV2(sock.user?.id);
     const sent = await this.withOwnMutation('pin', actionId, async () => {
       await options.beforeSend?.();
-      return sock.sendMessage(target.chatJid, content as AnyMessageContent, {
+      return this.sendWithReceiptSnapshot(sock, target.chatJid, content as AnyMessageContent, {
         messageId: actionId,
       });
     });
@@ -5325,7 +5500,7 @@ export class BaileysClient extends EventEmitter {
       ...(request.font ? { font: request.font } : {}),
     };
     await options.beforeSend?.();
-    const sent = await sock.sendMessage(STATUS_JID, payload, sendOptions as any);
+    const sent = await this.sendWithReceiptSnapshot(sock, STATUS_JID, payload, sendOptions as any);
     const messageId = sent?.key?.id;
     if (!sent?.key || !messageId) {
       throw new MessageMutationError(
@@ -6603,7 +6778,7 @@ export class BaileysClient extends EventEmitter {
             subject: meta.subject || '',
           },
         };
-        const sent = await sock.sendMessage(chatJid, content, sendOptions);
+        const sent = await this.sendWithReceiptSnapshot(sock, chatJid, content, sendOptions);
         const messageId = sent?.key?.id || null;
         if (sent?.key && messageId) {
           this.rememberKey(messageId, sent.key, chatJid);
@@ -7630,7 +7805,7 @@ export class BaileysClient extends EventEmitter {
       this.groupMetaCache.delete(target.raw);
     } else {
       await this.whatsappCall(`the disappearing timer of ${target.raw}`, () =>
-        sock.sendMessage(target.raw, { disappearingMessagesInChat: seconds })
+        this.sendWithReceiptSnapshot(sock, target.raw, { disappearingMessagesInChat: seconds })
       );
     }
     let persisted = false;
@@ -9118,11 +9293,20 @@ export class BaileysClient extends EventEmitter {
     if (options?.messageId) sendOpts.messageId = options.messageId;
     if (options?.ephemeralExpiration) sendOpts.ephemeralExpiration = options.ephemeralExpiration;
     await options?.beforeSend?.();
-    return this.race(
+    // The timeout covers only transport. Recipient metadata cannot turn an
+    // accepted provider message into a retry (and a second group message).
+    const recipients = await this.captureSendRecipients(this.sock, rawJid);
+    const sent = await this.race(
       this.sock.sendMessage(rawJid, { text: content }, sendOpts),
       timeoutMs,
       `sendMessage timeout after ${timeoutMs}ms`
     );
+    if (sent?.key?.id && recipients !== null)
+      void recordRecipientSnapshot(this.normalizeJid(rawJid), sent.key.id, recipients).catch(
+        error =>
+          this.logger.warn(`Recipient snapshot persistence failed: ${error?.message || error}`)
+      );
+    return sent;
   }
 
   private async readDirectPrivacyTokenState(
@@ -9443,7 +9627,7 @@ export class BaileysClient extends EventEmitter {
       ...(input.selectableCount === undefined ? {} : { selectableCount: input.selectableCount }),
     });
     await beforeSend();
-    const sent = await this.sock.sendMessage(raw, content, sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(this.sock, raw, content, sendOptions);
     const relayedId = sent?.key?.id;
     if (!relayedId || relayedId !== messageId)
       throw new StructuredSendError(
@@ -9482,7 +9666,7 @@ export class BaileysClient extends EventEmitter {
         : { extraGuestsAllowed: input.extraGuestsAllowed }),
     });
     await beforeSend();
-    const sent = await this.sock.sendMessage(raw, content, sendOptions);
+    const sent = await this.sendWithReceiptSnapshot(this.sock, raw, content, sendOptions);
     const relayedId = sent?.key?.id;
     if (!relayedId || relayedId !== messageId)
       throw new StructuredSendError(
@@ -9727,7 +9911,7 @@ export class BaileysClient extends EventEmitter {
 
     const ownJid = sock.user?.id;
     const started = Date.now();
-    const sent = await sock.sendMessage('status@broadcast', payload, options);
+    const sent = await this.sendWithReceiptSnapshot(sock, 'status@broadcast', payload, options);
     const messageId = sent?.key?.id;
     this.logger.info(
       `Novedades status dispatch finished id=${messageId || 'missing'} recipients=${recipients.length} type=${input.type} elapsedMs=${Date.now() - started}`
@@ -9805,7 +9989,11 @@ export class BaileysClient extends EventEmitter {
     input: { displayName: string; phone: string; organization?: string; email?: string }
   ): Promise<string | undefined> {
     if (!this.sock) throw new Error('Client not initialized');
-    const sent = await this.sock.sendMessage(this.toRawJid(chatId), buildContactMessage(input));
+    const sent = await this.sendWithReceiptSnapshot(
+      this.sock,
+      this.toRawJid(chatId),
+      buildContactMessage(input)
+    );
     await this.persistSentMessage(sent, this.toRawJid(chatId));
     return sent?.key?.id || undefined;
   }

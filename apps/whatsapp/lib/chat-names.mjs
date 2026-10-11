@@ -261,6 +261,13 @@ export const CHAT_LIST_ARCHIVED_SQL = `${CHAT_LIST_BASE_SQL}
 AND (COALESCE(c.archived, false) OR COALESCE(pn_alias.archived, false)) = true
 ${CHAT_LIST_ORDER_SQL}`;
 
+// Legacy NAS dates are UTC without a zone; other deployments use timestamptz.
+export const DELETED_AT_SQL = `CASE WHEN m.deleted_at IS NULL THEN NULL
+  WHEN pg_typeof(m.deleted_at) = 'timestamp without time zone'::regtype
+    THEN to_char(m.deleted_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z'
+  ELSE to_char(m.deleted_at::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z'
+END`;
+
 /** Query used by the app server before it maps attachment rows. */
 export const MESSAGE_LIST_BASE_SQL = `
 SELECT m.id,
@@ -271,6 +278,7 @@ SELECT m.id,
        m.reply_to_message_id AS "replyToMessageId",
        COALESCE(m.is_edited, false) AS "isEdited",
        COALESCE(m.is_deleted, false) AS "isDeleted",
+       ${DELETED_AT_SQL} AS "deletedAt",
        m.status AS "deliveryStatus",
        m.direction = 'OUTBOUND' AS "fromMe",
        m.wa_timestamp AS timestamp,

@@ -19,7 +19,8 @@ import { WHATSAPP_CONVERSATION_SQL } from './lib/conversation-scope.mjs';
 import { readContactDirectory } from './lib/contact-directory.mjs';
 import { readNovedades, novedadesMediaResponse, projectNovedadesChannel } from './lib/novedades-proxy.mjs';
 import { Sessions } from './lib/sessions.mjs';
-import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, MESSAGE_RETAINED_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
+import { CHAT_LIST_ARCHIVED_SQL, MESSAGE_LIST_BASE_SQL, MESSAGE_LIST_SQL, MESSAGE_REPLY_JOIN_SQL, MESSAGE_REPLY_SELECT_SQL, MESSAGE_VISIBLE_SQL, MESSAGE_RETAINED_SQL, DELETED_AT_SQL, isJidPlaceholder, readableChatName } from './lib/chat-names.mjs';
+import { publicMessageInfo } from './lib/message-info.mjs';
 import { pollVoterNames } from './lib/poll-voter-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
 import { publicMessageMetadata, publicPollResults, publicEventResults } from './lib/message-projection.mjs';
@@ -691,7 +692,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         `SELECT m.id, m.wa_message_id AS "waMessageId", m.content AS text, m.direction = 'OUTBOUND' AS "fromMe",
                 m.wa_timestamp AS timestamp, m.message_type AS type, m.metadata,
                 m.reply_to_message_id AS "replyToMessageId", COALESCE(m.is_edited, false) AS "isEdited",
-                COALESCE(m.is_deleted, false) AS "isDeleted", m.status AS "deliveryStatus",
+                COALESCE(m.is_deleted, false) AS "isDeleted", ${DELETED_AT_SQL} AS "deletedAt", m.status AS "deliveryStatus",
                 ${MESSAGE_REPLY_SELECT_SQL},
                 CASE WHEN m.direction = 'OUTBOUND' THEN NULL ELSE COALESCE(p.name, p.push_name, p.id) END AS "senderName"
            FROM messages m
@@ -2195,6 +2196,19 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         }
         return json(200, {account: a.accountId, chat, availability: 'local_partial', items});
       }
+      // CONTRACT: http.whatsapp-connector.messages-info.v1 (consumer)
+      if (req.method === 'GET' && path === '/api/messages/info') {
+        const a = accountParam(url.searchParams.get('account'));
+        const chat = safeChatId(url.searchParams.get('chat'));
+        const target = await actionMessage(a, chat, { messageId: url.searchParams.get('messageId') }, { allowRevoked: true });
+        if (target.message.direction !== 'OUTBOUND') throw fail(400, 'Message information is only available for sent messages');
+        const messageId = providerMessageId(target.message);
+        const result = await featureConnector(a, '/messages/info', { body: { chatId: target.providerChat, messageId } });
+        let info;
+        try { info = publicMessageInfo(result, { account: a.accountId, chatId: target.providerChat, messageId }); }
+        catch { throw fail(502, 'Invalid message information response'); }
+        return json(200, { account: a.accountId, chatId: chat, messageId: String(target.message.id), fromMe: true, ...info });
+      }
       if (req.method === 'GET' && path === '/api/messages/event/results') {
         const a = accountParam(url.searchParams.get('account'));
         const chat = safeChatId(url.searchParams.get('chat'));
@@ -2281,7 +2295,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (!['me', 'everyone'].includes(body.scope)) throw fail(400, 'Invalid delete scope');
           const suffix = body.scope === 'me' ? '/for-me' : '';
           result = await featureConnector(a, `/messages/${encodeURIComponent(target.providerChat)}/${encodeURIComponent(messageId)}${suffix}`, { method: 'DELETE', body: {}, requireSending: true });
-          await query("UPDATE messages SET is_deleted=true, status='deleted', deleted_at=now(), updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('deleted_for_me',$4::boolean) WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, body.scope === 'me']);
+          await query("UPDATE messages SET is_deleted=true, status='deleted', deleted_at=COALESCE(deleted_at,now()), updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('deleted_for_me',$4::boolean) WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, body.scope === 'me']);
         }
         return json(200, { account: a.accountId, chat, action, confirmed: true, ...result });
       }
