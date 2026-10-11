@@ -10,10 +10,13 @@ contracts:
   files:
   - connectors/whatsapp-web/src/api/controller.ts
   status: active
-  note: 'POST /api/v1/messages/info is a read with signed body {chatId,messageId}.
+  note: 'POST /api/v1/messages/info is a read with signed body {chatId,messageId,
+    refresh?}. Optional refresh=true requests bounded phone history recovery with
+    coalescing/cooldown; no captured evidence also enables best-effort recovery.
     Resolves the sent WhatsApp message within the connector account/chat. Returns
     account,chatId,messageId,fromMe,status,recipientCount (null when unknown),
-    completeRecipients,observedAt and receipts [{participantId,name,deliveredAt,
+    completeRecipients,observedAt, optional recovery {state: pending|complete|
+    unsupported|timeout|failed,retryAfterMs?} and receipts [{participantId,name,deliveredAt,
     readAt,playedAt}]. Receipt times are ISO instants or null; names and times are
     captured provider data. Never attributes current membership to old sends or
     marks an entire group read from one participant receipt. Consumed by the

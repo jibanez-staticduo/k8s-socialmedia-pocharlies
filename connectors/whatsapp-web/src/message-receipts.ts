@@ -248,6 +248,60 @@ async function verifiedReceiptAliases(params: string[]): Promise<string[]> {
   }
   return aliases;
 }
+
+export async function receiptRecoveryTarget(chatId: string, messageId: string) {
+  const params = await scope(chatId, messageId);
+  return {
+    account: params[0],
+    chatId: params[1],
+    messageId: params[2],
+    aliases: await verifiedReceiptAliases(params),
+  };
+}
+
+/** On-demand history is older than the cursor: use an observed successor, never the target or an invented time. */
+export async function receiptRecoveryAnchor(target: {
+  account: string;
+  chatId: string;
+  messageId: string;
+  aliases: string[];
+}) {
+  if (target.account !== connectorAccount()) return null;
+  const result = await getPool().query(
+    `SELECT k.wa_message_id,k.remote_jid,k.from_me,k.participant_jid,k.message_timestamp_ms
+    FROM messages m JOIN whatsapp_message_keys k ON k.wa_message_id=m.wa_message_id
+    JOIN whatsapp_message_keys original ON original.wa_message_id=$3 AND original.conversation_id=m.conversation_id
+    JOIN messages original_message ON original_message.wa_message_id=original.wa_message_id
+    WHERE m.account=$1 AND m.platform='whatsapp' AND m.conversation_id=ANY($2::text[])
+      AND original_message.account=$1 AND original_message.platform='whatsapp' AND original_message.direction='OUTBOUND'
+      AND k.conversation_id=m.conversation_id AND k.message_timestamp_ms>original.message_timestamp_ms
+      AND original.message_timestamp_ms>0 AND k.remote_jid IS NOT NULL
+    ORDER BY k.message_timestamp_ms ASC,k.wa_message_id ASC LIMIT 1`,
+    [target.account, target.aliases.map(accountKey), accountKey(target.messageId)]
+  );
+  const row = result.rows[0];
+  if (
+    !row ||
+    typeof row.remote_jid !== 'string' ||
+    !target.aliases.some(
+      alias =>
+        alias.replace(/@s\.whatsapp\.net$/, '@c.us') ===
+        row.remote_jid.replace(/@s\.whatsapp\.net$/, '@c.us')
+    )
+  )
+    return null;
+  const timestampMs = Number(row.message_timestamp_ms);
+  if (!Number.isFinite(timestampMs) || timestampMs <= 0) return null;
+  return {
+    key: {
+      id: stripAccountKey(row.wa_message_id),
+      remoteJid: row.remote_jid,
+      fromMe: !!row.from_me,
+      participant: row.participant_jid || undefined,
+    },
+    timestampMs,
+  };
+}
 export async function recordAggregateStatus(
   chatId: string,
   messageId: string,

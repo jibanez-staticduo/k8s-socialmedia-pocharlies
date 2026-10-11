@@ -395,7 +395,8 @@ export function messageInfoSections(info = {}) {
     .map(([key, title]) => ({ key, title, receipts: receipts.filter(item => item[key]).sort((a, b) => Date.parse(b[key]) - Date.parse(a[key])) }));
 }
 
-export function createMessageInfoPanel({ documentRef, container, message, context, requestInfo, isCurrent }) {
+export function createMessageInfoPanel({ documentRef, container, message, context, requestInfo, isCurrent,
+  schedule = (callback, delay) => setTimeout(callback, delay), cancel = timer => clearTimeout(timer) }) {
   const node = (tag, className, value) => makeElement(documentRef, tag, className, value);
   const summary = node('div', 'feature-message-info-summary');
   summary.append(node('p', 'feature-message-info-preview', messageText(message)));
@@ -405,10 +406,15 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
   const content = node('div', 'feature-message-info-content');
   container.append(summary, notice, retry, content);
   let version = 0;
+  let timer = null;
+  let automaticRefreshes = 0;
+  let disposed = false;
+  const clearScheduled = () => { if (timer !== null) cancel(timer); timer = null; };
   const load = async () => {
-    if (!isCurrent()) return;
+    clearScheduled();
+    if (disposed || !isCurrent()) return;
     const attempt = ++version;
-    const current = () => attempt === version && isCurrent();
+    const current = () => !disposed && attempt === version && isCurrent();
     notice.textContent = 'Cargando información del mensaje…';
     container.setAttribute('aria-busy', 'true');
     retry.disabled = true; retry.hidden = true;
@@ -420,9 +426,13 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
       }
       content.replaceChildren();
       const total = Number.isInteger(info.recipientCount) && info.recipientCount >= 0 ? info.recipientCount : null;
-      for (const section of messageInfoSections(info)) {
+      const sections = messageInfoSections(info);
+      const noEvidence = sections.every(section => !section.receipts.length);
+      for (const section of sections) {
         const block = node('section', `feature-message-info-section feature-message-info-${section.key}`);
-        block.append(node('h3', 'feature-section-title', `${section.title} · ${section.receipts.length}${total === null ? ' / total desconocido' : ` / ${total}`}`));
+        const count = !section.receipts.length && (total === null || info.completeRecipients !== true || (noEvidence && info.recovery?.state === 'complete')) ? 'Sin datos'
+          : `${section.receipts.length}${total === null ? ' / total desconocido' : ` / ${total}`}`;
+        block.append(node('h3', 'feature-section-title', `${section.title} · ${count}`));
         if (!section.receipts.length) block.append(node('p', 'feature-muted', section.key === 'readAt' ? 'Sin confirmaciones de lectura disponibles.' : 'Sin confirmaciones de entrega disponibles.'));
         for (const receipt of section.receipts) {
           const row = node('div', 'feature-message-info-receipt');
@@ -435,7 +445,26 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
         }
         content.append(block);
       }
-      notice.textContent = info.completeRecipients === true ? 'Confirmaciones disponibles para este mensaje.' : 'Información parcial: puede haber destinatarios sin confirmaciones disponibles.';
+      notice.textContent = noEvidence && info.completeRecipients !== true
+        ? 'No hay confirmaciones guardadas para este mensaje. Esto no indica que nadie lo haya leído o recibido.'
+        : info.completeRecipients === true ? 'Confirmaciones disponibles para este mensaje.' : 'Información parcial: puede haber destinatarios sin confirmaciones disponibles.';
+      const recovery = info.recovery?.state;
+      if (recovery === 'pending') {
+        notice.textContent = 'Buscando confirmaciones de este mensaje en WhatsApp. Los datos disponibles se muestran abajo.';
+        if (automaticRefreshes < 3) {
+          automaticRefreshes += 1;
+          const delay = Number.isFinite(info.recovery.retryAfterMs) ? Math.max(500, Math.min(5000, info.recovery.retryAfterMs)) : 5000;
+          timer = schedule(() => { timer = null; if (current()) void load(); }, delay);
+        } else notice.textContent = 'La recuperación sigue pendiente. Puedes actualizar para comprobar si hay nuevas confirmaciones.';
+      } else if (recovery === 'complete' && noEvidence) {
+        notice.textContent = 'WhatsApp no ha facilitado confirmaciones para este mensaje.';
+      } else if (recovery === 'unsupported') {
+        notice.textContent = 'Esta conexión no permite recuperar las confirmaciones antiguas de WhatsApp. Se muestran los datos guardados disponibles.';
+      } else if (recovery === 'timeout') {
+        notice.textContent = 'WhatsApp no respondió a tiempo al recuperar las confirmaciones. Puedes volver a intentarlo.';
+      } else if (recovery === 'failed') {
+        notice.textContent = 'No se pudieron recuperar las confirmaciones de WhatsApp. Puedes volver a intentarlo.';
+      }
       retry.textContent = 'Actualizar'; retry.hidden = false;
     } catch (error) {
       if (!current()) return;
@@ -446,7 +475,7 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
     }
   };
   retry.onclick = load;
-  return { load };
+  return { load, dispose: () => { disposed = true; version += 1; clearScheduled(); } };
 }
 
 function field(documentRef, label, type = 'text', name = '', value = '') {
@@ -1303,6 +1332,7 @@ export function installFeatureUI({
         && runtime.chat === context.chat && runtime.generation === context.generation,
       requestInfo: () => request('/api/messages/info', undefined, { account: context.account, chat: context.chat, messageId: message.id }),
     });
+    runtime.modal.onClose = () => panel.dispose();
     void panel.load();
     modal.close.focus();
   }

@@ -22,5 +22,12 @@ export function publicMessageInfo(result, { account, chatId, messageId }) {
     return { participantId: id, name: receipt.name || id, deliveredAt: timestamp(receipt.deliveredAt), readAt: timestamp(receipt.readAt), playedAt: timestamp(receipt.playedAt) };
   });
   const status = ['pending', 'sent', 'delivered', 'read', 'played', 'failed', 'deleted'].includes(result.status) ? result.status : null;
-  return { status, recipientCount, completeRecipients: result.completeRecipients, receipts, observedAt: timestamp(result.observedAt) };
+  const info = { status, recipientCount, completeRecipients: result.completeRecipients, receipts, observedAt: timestamp(result.observedAt) };
+  if (result.recovery != null) {
+    const { state, retryAfterMs } = result.recovery;
+    if (!['pending', 'complete', 'unsupported', 'timeout', 'failed'].includes(state)) throw Error('Invalid receipt recovery state');
+    if (retryAfterMs != null && (!Number.isSafeInteger(retryAfterMs) || retryAfterMs < 500 || retryAfterMs > 5000)) throw Error('Invalid receipt recovery delay');
+    info.recovery = { state, ...(retryAfterMs == null ? {} : { retryAfterMs }) };
+  }
+  return info;
 }

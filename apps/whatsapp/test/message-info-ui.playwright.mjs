@@ -62,9 +62,38 @@ try {
   await tab.evaluate(() => { state.account='beta'; ui.accountChanged('beta'); });
   await tab.evaluate(() => answer(2));
   assert.equal(await tab.locator('.feature-message-info').count(), 0);
+  await tab.evaluate(() => { state.account='alpha'; ui.accountChanged('alpha'); ui.chatChanged({id:'group',isGroup:true}); ui.messagesChanged([{id:'42',fromMe:true,text:'Historical message'}]); });
+  await open();
+  await tab.evaluate(() => answer(3,{receipts:[],recovery:{state:'pending',retryAfterMs:500}}));
+  await tab.waitForFunction(() => requests.length === 5);
+  assert.match(await tab.locator('.feature-message-info').textContent(), /Sin datos/);
+  await tab.evaluate(() => answer(4,{receipts:[],recovery:{state:'complete'}}));
+  await tab.waitForFunction(() => document.querySelector('.feature-message-info')?.textContent.includes('WhatsApp no ha facilitado'));
+  assert.doesNotMatch(await tab.locator('.feature-message-info').textContent(), /Leído por · 0|Entregado a · 0/);
+  if (process.env.UI_OUTPUT_DIR) {
+    for (const width of [1280, 390]) {
+      await tab.setViewportSize({ width, height: 800 });
+      await tab.screenshot({ path: join(process.env.UI_OUTPUT_DIR, `message-info-sin-datos-${width}.png`) });
+    }
+    await tab.setViewportSize({ width: 1280, height: 800 });
+  }
+  await tab.getByRole('button',{name:'Actualizar',exact:true}).click();
+  await tab.evaluate(() => answer(5,{receipts:[],recovery:{state:'pending',retryAfterMs:500}}));
+  await tab.waitForFunction(() => document.querySelector('.feature-message-info')?.textContent.includes('Buscando confirmaciones'));
+  await tab.keyboard.press('Escape');
+  await tab.waitForTimeout(700);
+  assert.equal(await tab.evaluate(() => requests.length), 6, 'Closing panel cancels recovery timer');
+  await open();
+  await tab.evaluate(() => answer(6,{receipts:[],recovery:{state:'pending',retryAfterMs:500}}));
+  await tab.waitForFunction(() => requests.length === 8);
+  await tab.evaluate(() => answer(7,{recipientCount:2,recovery:{state:'complete'}}));
+  await tab.waitForFunction(() => document.querySelector('.feature-message-info-readAt')?.textContent.includes('1 / 2'));
+  assert.match(await tab.locator('.feature-message-info-deliveredAt').textContent(), /1 \/ 2/);
+  assert.equal(await tab.evaluate(() => xss), 0);
+  await tab.keyboard.press('Escape');
   assert.equal(await tab.evaluate(() => requests[0].url), '/api/messages/info?account=alpha&chat=group&messageId=42');
   assert.deepEqual(errors, []);
-  console.log('Message info browser: action eligibility, escaping, scoped request, stale response, Escape and desktop/mobile pass');
+  console.log('Message info browser: scoped actions, escaping, stale responses, desktop/mobile, bounded recovery and populated/empty recovery completion pass');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

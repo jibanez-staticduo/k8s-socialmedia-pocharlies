@@ -2203,7 +2203,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const target = await actionMessage(a, chat, { messageId: url.searchParams.get('messageId') }, { allowRevoked: true });
         if (target.message.direction !== 'OUTBOUND') throw fail(400, 'Message information is only available for sent messages');
         const messageId = providerMessageId(target.message);
-        const result = await featureConnector(a, '/messages/info', { body: { chatId: target.providerChat, messageId } });
+        const result = await featureConnector(a, '/messages/info', { body: { chatId: target.providerChat, messageId, refresh: true } });
         let info;
         try { info = publicMessageInfo(result, { account: a.accountId, chatId: target.providerChat, messageId }); }
         catch { throw fail(502, 'Invalid message information response'); }

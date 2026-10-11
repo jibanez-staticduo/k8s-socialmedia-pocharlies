@@ -195,7 +195,7 @@ test('message info is read-only, scoped and uses the stored WhatsApp message ide
   assert.equal(info.messageId, '22222222-2222-2222-2222-222222222222');
   assert.equal(info.receipts[0].readAt, '2026-10-11T09:20:00.000Z');
   assert.equal(info.receipts[0].deliveredAt, null);
-  assert.deepEqual(upstream, [{url: 'http://secondary-connector/api/v1/messages/info', body: {chatId: 'secondary-chat', messageId: 'wa-secondary-1'}}]);
+  assert.deepEqual(upstream, [{url: 'http://secondary-connector/api/v1/messages/info', body: {chatId: 'secondary-chat', messageId: 'wa-secondary-1', refresh: true}}]);
   result.account = 'personal';
   assert.equal((await request(endpoint)).status, 502);
   result.account = 'secondary'; result.messageId = 'unrelated';
@@ -205,6 +205,13 @@ test('message info is read-only, scoped and uses the stored WhatsApp message ide
   result.chatId = 'secondary-chat'; result.receipts[0].readAt = 'bad date';
   assert.equal((await request(endpoint)).status, 502);
   result.receipts[0].readAt = '2026-10-11T09:20:00Z';
+  result.recovery = {state: 'pending', retryAfterMs: 5000, privateDebug: 'must not leak'};
+  assert.deepEqual((await (await request(endpoint)).json()).recovery, {state: 'pending', retryAfterMs: 5000});
+  result.recovery.state = 'invented';
+  assert.equal((await request(endpoint)).status, 502);
+  result.recovery = {state: 'pending', retryAfterMs: -1};
+  assert.equal((await request(endpoint)).status, 502);
+  result.recovery = {state: 'complete'};
   database.messages['secondary-chat'][0].is_deleted = true;
   assert.equal((await request(endpoint)).status, 200);
 });

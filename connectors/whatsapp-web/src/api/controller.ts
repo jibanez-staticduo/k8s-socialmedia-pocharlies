@@ -3110,12 +3110,18 @@ export function createRouter(
       const body = optionalObject(req.body);
       const chatId = optionalString(body.chatId);
       const messageId = optionalString(body.messageId);
-      if (!chatId || !messageId) {
+      if (
+        !chatId ||
+        !messageId ||
+        (body.refresh !== undefined && typeof body.refresh !== 'boolean')
+      ) {
         res.status(400).json({ error: 'Missing chatId or messageId' });
         return;
       }
       try {
-        res.json(await client.getMessageInfo(chatId, messageId));
+        res.json(
+          await client.getMessageInfo(chatId, messageId, { refresh: body.refresh === true })
+        );
       } catch (error) {
         res
           .status(error instanceof MessageInfoError ? error.status : 500)

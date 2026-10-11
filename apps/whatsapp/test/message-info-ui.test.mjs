@@ -16,9 +16,9 @@ const scope = { account: 'alpha', chat: 'group', generation: 1 };
 const message = { id: '42', fromMe: true, text: '<img src=x onerror=alert(1)>' };
 const result = extra => ({ account: scope.account, chatId: scope.chat, messageId: message.id, fromMe: true,
   recipientCount: null, completeRecipients: false, receipts: [], ...extra });
-function fixture(requestInfo, getContext = () => scope, isOpen = () => true) {
+function fixture(requestInfo, getContext = () => scope, isOpen = () => true, timers = {}) {
   const container = element('div');
-  const panel = createMessageInfoPanel({ documentRef, container, message, context: scope, requestInfo,
+  const panel = createMessageInfoPanel({ documentRef, container, message, context: scope, requestInfo, ...timers,
     isCurrent: () => isOpen() && ['account', 'chat', 'generation'].every(key => getContext()[key] === scope[key]),
   });
   return { ...panel, container, notice: container.children[1], retry: container.children[2], content: container.children[3] };
@@ -35,10 +35,10 @@ test('information action only applies to persisted outgoing messages including B
 test('empty provider receipts show unknown total and never imply unread or undelivered', async () => {
   const ui = fixture(async () => result());
   await ui.load();
-  assert.match(flatten(ui.container), /Leído por · 0 \/ total desconocido/);
-  assert.match(flatten(ui.container), /Entregado a · 0 \/ total desconocido/);
+  assert.match(flatten(ui.container), /Leído por · Sin datos/);
+  assert.match(flatten(ui.container), /Entregado a · Sin datos/);
   assert.match(flatten(ui.container), /Sin confirmaciones de lectura disponibles/);
-  assert.match(ui.notice.textContent, /Información parcial/);
+  assert.match(ui.notice.textContent, /Esto no indica que nadie lo haya leído o recibido/);
   assert.doesNotMatch(flatten(ui.content), /Reproducido/);
   assert.equal(ui.container.attributes['aria-busy'], 'false');
 });
@@ -59,6 +59,14 @@ test('render actual local times, newest read first and untrusted names as text',
   assert.equal(ui.container.children[0].children[0].textContent, message.text);
   assert.match(flatten(ui.container), /Reproducido por · 1 \/ 3/);
   assert.equal(ui.content.children[1].children.length, 2, 'read-only receipt must not fabricate delivery');
+});
+
+test('partial empty sections are missing data even with a known group total', async () => {
+  const ui = fixture(async () => result({ recipientCount: 2, receipts: [{ participantId: 'a', deliveredAt: '2026-10-11T08:00:00Z' }] }));
+  await ui.load();
+  assert.match(flatten(ui.content), /Leído por · Sin datos/);
+  assert.match(flatten(ui.content), /Entregado a · 1 \/ 2/);
+  assert.doesNotMatch(flatten(ui.content), /Leído por · 0/);
 });
 
 test('invalid timestamps and missing identities cannot generate receipts', () => {
@@ -109,4 +117,60 @@ test('refresh errors preserve the last receipt evidence and allow another retry'
   assert.equal(ui.retry.disabled, false);
   await ui.retry.onclick();
   assert.equal(calls, 3);
+});
+
+test('recovery pending refreshes at most three times and keeps a manual update', async () => {
+  const scheduled = [];
+  let calls = 0;
+  const ui = fixture(async () => { calls += 1; return result({ recovery: { state: 'pending' } }); }, undefined, undefined,
+    { schedule: (callback, delay) => { scheduled.push({ callback, delay }); return scheduled.length; }, cancel: () => {} });
+  await ui.load();
+  for (let i = 0; i < 3; i += 1) {
+    assert.equal(scheduled[i].delay, 5000);
+    scheduled[i].callback();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(calls, 4);
+  assert.equal(scheduled.length, 3);
+  assert.match(ui.notice.textContent, /sigue pendiente/);
+  assert.match(flatten(ui.content), /Sin datos/);
+  await ui.retry.onclick();
+  assert.equal(calls, 5);
+  assert.equal(scheduled.length, 3, 'Manual update does not renew automatic budget');
+});
+
+test('recovery timer is canceled on dispose and does not load a switched scope', async () => {
+  for (const close of [false, true]) {
+    let callback;
+    let calls = 0;
+    let active = scope;
+    const canceled = [];
+    const ui = fixture(async () => { calls += 1; return result({ recovery: { state: 'pending', retryAfterMs: 99999 } }); }, () => active, undefined,
+      { schedule: (fn, delay) => { callback = fn; assert.equal(delay, 5000); return 'timer'; }, cancel: id => canceled.push(id) });
+    await ui.load();
+    if (close) { ui.dispose(); assert.deepEqual(canceled, ['timer']); }
+    else active = { ...scope, account: 'beta' };
+    callback();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 1);
+  }
+});
+
+test('complete empty recovery and unavailable recovery explain missing historical evidence', async () => {
+  for (const [state, explanation] of [
+    ['complete', /WhatsApp no ha facilitado confirmaciones/],
+    ['unsupported', /Esta conexión no permite recuperar/],
+    ['timeout', /no respondió a tiempo/],
+    ['failed', /No se pudieron recuperar/],
+  ]) {
+    const ui = fixture(async () => result({ recovery: { state } }));
+    await ui.load();
+    assert.match(ui.notice.textContent, explanation);
+    assert.match(flatten(ui.content), /Leído por · Sin datos/);
+    assert.equal(ui.retry.disabled, false);
+  }
+  const complete = fixture(async () => result({ recipientCount: 2, completeRecipients: true, recovery: { state: 'complete' } }));
+  await complete.load();
+  assert.match(flatten(complete.content), /Leído por · Sin datos/);
+  assert.doesNotMatch(flatten(complete.content), /· 0/);
 });

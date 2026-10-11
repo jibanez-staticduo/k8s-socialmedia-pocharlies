@@ -74,6 +74,8 @@ import { EventEmitter } from 'events';
 import {
   ensureMessageReceiptTables,
   getMessageReceiptInfo,
+  receiptRecoveryTarget,
+  receiptRecoveryAnchor,
   recordAggregateStatus,
   recordMessageReceipt,
   recordRecipientSnapshot,
@@ -81,6 +83,7 @@ import {
   receiptTime,
   type ReceiptIdentity,
 } from './message-receipts';
+import { ReceiptHistoryRecovery } from './receipt-history-recovery';
 import { promises as fsp } from 'fs';
 import { join } from 'path';
 import QRCode from 'qrcode';
@@ -1709,6 +1712,25 @@ export class BaileysClient extends EventEmitter {
   private readonly historyRecoveryAnchors = new Map<string, WAMessage>();
   private readonly historyRecoveryRequestedAt = new Map<string, number>();
   private readonly historyRecoveryInFlight = new Map<string, Promise<ChatHistoryRecoveryResult>>();
+  private readonly receiptHistoryRecovery = new ReceiptHistoryRecovery({
+    anchor: receiptRecoveryAnchor,
+    fetch: (count, key, timestampMs) => {
+      if (!this.sock || !this.isConnected())
+        return Promise.reject(new Error('WhatsApp disconnected'));
+      return this.sock.fetchMessageHistory(count, key, timestampMs);
+    },
+    persist: async (target, message) => {
+      if (!this.ingest || target.account !== connectorAccount())
+        throw new Error('Receipt recovery account changed');
+      // Only captured provider receipt fields are written. This never ingests
+      // the content, discovers today's members, or opens a full backfill window.
+      for (const receipt of message.userReceipt || []) {
+        await this.persistParticipantReceipt(target.chatId, target.messageId, receipt);
+      }
+      const status = typeof message.status === 'number' ? mapWaStatus(message.status) : null;
+      if (status) await recordAggregateStatus(target.chatId, target.messageId, status);
+    },
+  });
 
   constructor(sessionPath: string, encryptionKey: string, options: BaileysClientOptions = {}) {
     super();
@@ -1862,6 +1884,7 @@ export class BaileysClient extends EventEmitter {
   }
 
   private async destroyCurrentSocket(reason: string): Promise<void> {
+    this.receiptHistoryRecovery.stop();
     const sock = this.sock;
     this.sock = null;
     if (!sock) return;
@@ -2002,6 +2025,9 @@ export class BaileysClient extends EventEmitter {
     });
 
     sock.ev.on('messaging-history.set', async update => {
+      // Own on-demand replies are receipt-only, including when the ordinary
+      // history ingest gate is closed. Their other messages stay untouched.
+      if (await this.receiptHistoryRecovery.consume(update)) return;
       const { chats, contacts, messages, isLatest, syncType } = update;
       // The patched Baileys carries HistorySync field 19 (NCT salt) here. It is
       // logged before the ingest gate: the INITIAL_BOOTSTRAP of a pairing
@@ -3514,8 +3540,30 @@ export class BaileysClient extends EventEmitter {
     }
   }
 
-  async getMessageInfo(chatId: string, messageId: string) {
-    return getMessageReceiptInfo(chatId, messageId);
+  async getMessageInfo(chatId: string, messageId: string, options: { refresh?: boolean } = {}) {
+    const info = await getMessageReceiptInfo(chatId, messageId);
+    const target = await receiptRecoveryTarget(chatId, messageId);
+    const evidence = info.receipts.some(
+      receipt => receipt.deliveredAt || receipt.readAt || receipt.playedAt
+    );
+    const current = this.receiptHistoryRecovery.current(target);
+    if (
+      !this.ingest ||
+      !this.sock ||
+      !this.isConnected() ||
+      !/^\d+(?:-\d+)?@(?:lid|c\.us|s\.whatsapp\.net|g\.us)$/.test(target.chatId)
+    ) {
+      const captured =
+        current?.state === 'complete' ? await getMessageReceiptInfo(chatId, messageId) : info;
+      return { ...captured, recovery: current || { state: 'unsupported' as const } };
+    }
+    const recovery =
+      options.refresh === true || !evidence ? this.receiptHistoryRecovery.request(target) : current;
+    // Completion may have raced the first DB read; never report complete with
+    // the stale pre-recovery snapshot or the UI would stop polling too early.
+    const captured =
+      recovery?.state === 'complete' ? await getMessageReceiptInfo(chatId, messageId) : info;
+    return { ...captured, ...(recovery ? { recovery } : {}) };
   }
 
   private async receiptIdentity(
