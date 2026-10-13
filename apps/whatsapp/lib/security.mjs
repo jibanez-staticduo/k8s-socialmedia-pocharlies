@@ -21,6 +21,21 @@ export function required(value, name, max = 1024) {
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw fail(400, `Invalid ${name}`);
   return value;
 }
+export function isValidBase64(value) {
+  if (typeof value !== 'string' || value.length % 4 !== 0) return false;
+  let end = value.length;
+  if (value[end - 1] === '=') {
+    end--;
+    if (value[end - 1] === '=') end--;
+  }
+  // A grouped regex can exhaust V8's stack on otherwise valid multi-MiB uploads.
+  for (let i = 0; i < end; i++) {
+    const code = value.charCodeAt(i);
+    if (!((code >= 65 && code <= 90) || (code >= 97 && code <= 122) ||
+        (code >= 48 && code <= 57) || code === 43 || code === 47)) return false;
+  }
+  return true;
+}
 export function uploadBytes(body) {
   required(body.name, 'filename', 255);
   if (/[\x00-\x1f/\\]/.test(body.name)) throw fail(400, 'Invalid filename');
@@ -38,7 +53,7 @@ export function uploadBytes(body) {
   if (!mediaType.test(body.mimeType || '') && !extension) throw fail(400, 'Unsupported media type');
   if (extension && !body.name.toLowerCase().endsWith(extension)) throw fail(400, 'Filename does not match media type');
   const data = required(body.data, 'base64 data', 16 * 1024 * 1024);
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw fail(400, 'Invalid base64');
+  if (!isValidBase64(data)) throw fail(400, 'Invalid base64');
   const bytes = Buffer.from(data, 'base64');
   if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw fail(413, 'Upload too large');
   if (extension === '.pdf' && bytes.subarray(0, 5).toString() !== '%PDF-') throw fail(400, 'Invalid PDF');

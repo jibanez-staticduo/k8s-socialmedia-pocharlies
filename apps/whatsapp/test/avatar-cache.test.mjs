@@ -7,6 +7,16 @@ import { createApp } from '../server.mjs';
 
 const auth = `Basic ${Buffer.from('operator:password').toString('base64')}`;
 
+test('a provider avatar at the 4 MiB cap validates without overflowing the stack', async t => {
+  const bytes = Buffer.alloc(4 * 1024 * 1024, 1);
+  const { request } = await fixture(t, {
+    fetchImpl: async () => Response.json({ data: bytes.toString('base64'), contentType: 'image/png' }),
+  });
+  const response = await request('/api/chats/same-chat/avatar?account=personal');
+  assert.equal(response.status, 200);
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+});
+
 async function waitFor(predicate, message) {
   const deadline = Date.now() + 1000;
   while (!predicate()) {

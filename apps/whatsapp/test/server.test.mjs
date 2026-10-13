@@ -214,6 +214,52 @@ test('image upload sends one media message with its caption', async t => {
   assert.equal(outbound.body.sourceMimeType, 'image/png');
   assert.equal((await response.json()).messageId, 'image-receipt');
 });
+for (const size of [4 * 1024 * 1024, 10 * 1024 * 1024]) {
+  test(`image upload forwards ${size} bytes once with metadata and idempotency`, async t => {
+    const bytes = Buffer.alloc(size, 0x61);
+    Buffer.from('89504e470d0a1a0a', 'hex').copy(bytes);
+    const outbound = [];
+    const { request } = await fixture(t, { fetchImpl: async (url, options) => {
+      outbound.push({ url, body: JSON.parse(options.body) });
+      return Response.json({ messageId: 'large-image-receipt' });
+    } });
+    const token = '11111111-1111-4111-8111-111111111111';
+    const response = await request('/api/upload', {
+      account: 'personal', chat: 'personal-chat', name: 'image.png', mimeType: 'image/png',
+      data: bytes.toString('base64'), caption: '  Large image  ', quality: 'hd', sendToken: token,
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).messageId, 'large-image-receipt');
+    assert.equal(outbound.length, 1);
+    const { url, body } = outbound[0];
+    assert.equal(url, 'http://connector/api/v1/messages/media/send');
+    assert.equal(body.conversationId, 'personal-chat');
+    assert.equal(body.fileName, 'image.png');
+    assert.equal(body.caption, 'Large image');
+    assert.equal(body.quality, 'hd');
+    assert.equal(body.sendToken, token);
+    assert.equal(body.idempotencyKey, token);
+    assert.equal(body.sourceMimeType, 'image/png');
+    assert.equal(body.sourceDigest, createHash('sha256').update(bytes).digest('hex'));
+    assert.match(body.fileUrl, /^data:image\/png;base64,/);
+    assert.deepEqual(Buffer.from(body.fileUrl.split(',')[1], 'base64'), bytes);
+  });
+}
+test('upload rejects malformed base64 and decoded bytes above 10 MiB before dispatch', async t => {
+  let dispatches = 0;
+  const { request } = await fixture(t, { fetchImpl: async () => {
+    dispatches++;
+    return Response.json({ messageId: 'unexpected' });
+  } });
+  const body = { account: 'personal', chat: 'personal-chat', name: 'image.png', mimeType: 'image/png' };
+  for (const data of ['eA=', 'eA===', 'e=A=', '=eAA', 'eA==AAAA', 'eA==\n', 'eA==\r', 'eA==\t', 'eA== ', 'eA==\0', 'eA-_']) {
+    assert.equal((await request('/api/upload', { ...body, data })).status, 400, JSON.stringify(data));
+  }
+  assert.equal((await request('/api/upload', {
+    ...body, data: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64'),
+  })).status, 413);
+  assert.equal(dispatches, 0);
+});
 test('view-once media is forwarded only for supported photos and videos', async t => {
   const outbound = [];
   const { request } = await fixture(t, { fetchImpl: async (_url, options) => {

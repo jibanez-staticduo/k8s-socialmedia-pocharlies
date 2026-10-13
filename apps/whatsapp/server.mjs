@@ -10,7 +10,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import pg from 'pg';
 import { utcDatabaseTypes } from './lib/database-time.mjs';
-import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, fail } from './lib/security.mjs';
+import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, isValidBase64, fail } from './lib/security.mjs';
 import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
 import { readMediaLibrary } from './lib/media-library.mjs';
@@ -881,7 +881,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         throw error;
       }
       const data = typeof result.data === 'string' ? result.data : '';
-      if (!data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || data.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 8) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this chat');
+      if (!data || data.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 8 || !isValidBase64(data)) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this chat');
       let bytes;
       try { bytes = Buffer.from(data, 'base64'); } catch { throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this chat'); }
       if (!bytes.length || bytes.length > MAX_AVATAR_BYTES) throw featureError(413, 'AVATAR_TOO_LARGE', 'Avatar exceeds the allowed size');
@@ -1896,7 +1896,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const providerContact = participant.wa_user_id || participant.id;
         const result = await featureConnector(a, `/chats/${encodeURIComponent(providerContact)}/photo`, { method: 'GET' });
         const data = typeof result.data === 'string' ? result.data : '';
-        if (!data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || data.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 8) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this contact');
+        if (!data || data.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 8 || !isValidBase64(data)) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this contact');
         const bytes = Buffer.from(data, 'base64');
         if (!bytes.length || bytes.length > MAX_AVATAR_BYTES) throw featureError(413, 'AVATAR_TOO_LARGE', 'Avatar exceeds the allowed size');
         res.statusCode = 200; res.setHeader('content-type', safeImageType(result.contentType || result.mimetype)); res.setHeader('content-length', bytes.length); res.setHeader('content-disposition', 'inline; filename="avatar"'); res.end(bytes); return;

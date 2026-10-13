@@ -1722,7 +1722,10 @@ contracts:
     ≤ 200 chars. Absent → the last path segment of fileUrl WITHOUT its query string (before, a presigned
     URL''s `…/x.pdf?X-Amz-…` became the name). Not a string → 400 failureClass invalid_file_name, before
     the gate. It enters the Idempotency-Key hash only when set, so a key recorded without it replays the
-    same send. Consumers: the MCP social_send_message (attachment `name`) and dgx-messages send-media
+    same send. The web upload proxy validates standard Base64 without recursive regex groups, so
+    uploads up to its existing 10 MiB decoded limit cannot overflow the validation stack. Invalid
+    Base64 remains 400 and oversize files remain 413 before connector dispatch. Consumers:
+    the MCP social_send_message (attachment `name`) and dgx-messages send-media
     (the uploaded file''s name). Unicode names are preserved in attachments.file_name, not copied into
     signed S3 metadata headers; a committed attachment emits an account-scoped existing message refresh
     hint. Neither storage completion nor a refresh hint sends a second WhatsApp message. Renaming the
