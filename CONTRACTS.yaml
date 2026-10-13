@@ -94,7 +94,10 @@ contracts:
     Concurrent calls coalesce; per-chat requests are limited to once per minute. The app exposes
     only account, chat, status and counters, maintains account/chat isolation and offers retry.
     Existing captured content is retained after remote revoke with isDeleted; local deleted_for_me
-    remains hidden. View-once wrappers add metadata.viewOnce without erasing captured text/media.'
+    remains hidden. View-once wrappers add metadata.viewOnce without erasing captured text/media.
+    Captured business template/button/list content is reprojected locally; genuine provider
+    placeholder envelopes remain eligible for resend and never count as recovered content.
+    The web waiting notice expires after 30 seconds and offers manual retry without automatic loops.'
 - id: http.whatsapp-pairing.internal-sessions.v1
   kind: http-route
   value: /internal/whatsapp/sessions

@@ -920,11 +920,11 @@ export async function storeMessage(data: MessageData): Promise<string | null> {
          AND NOT COALESCE(messages.is_edited, false)
          AND EXCLUDED.message_type NOT IN
            ('UNAVAILABLE', 'SECRETENCRYPTEDMESSAGE', 'MESSAGECONTEXTINFO',
-            'SENDERKEYDISTRIBUTIONMESSAGE', 'ENCREACTIONMESSAGE', 'POLLUPDATEMESSAGE')
+            'SENDERKEYDISTRIBUTIONMESSAGE', 'ENCREACTIONMESSAGE', 'POLLUPDATEMESSAGE', 'PLACEHOLDERMESSAGE')
          AND (
            (messages.message_type IN
              ('UNAVAILABLE', 'SECRETENCRYPTEDMESSAGE', 'MESSAGECONTEXTINFO',
-              'SENDERKEYDISTRIBUTIONMESSAGE', 'ENCREACTIONMESSAGE', 'POLLUPDATEMESSAGE')
+              'SENDERKEYDISTRIBUTIONMESSAGE', 'ENCREACTIONMESSAGE', 'POLLUPDATEMESSAGE', 'PLACEHOLDERMESSAGE')
              AND NULLIF(messages.content, '') IS NULL)
            OR (messages.message_type = EXCLUDED.message_type
              AND NULLIF(messages.content, '') IS NULL AND NULLIF(EXCLUDED.content, '') IS NOT NULL)

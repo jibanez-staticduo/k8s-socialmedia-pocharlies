@@ -24,6 +24,7 @@ import { publicMessageInfo } from './lib/message-info.mjs';
 import { pollVoterNames } from './lib/poll-voter-names.mjs';
 import { AppState, stateItemKey } from './lib/app-state.mjs';
 import { publicMessageMetadata, publicPollResults, publicEventResults } from './lib/message-projection.mjs';
+import { projectReplyPreview } from './lib/reply-preview.mjs';
 import { pollDraft } from './public/poll-draft.mjs';
 import { eventDraft } from './public/event-draft.mjs';
 import { validateDayRange } from './public/message-date.mjs';
@@ -318,16 +319,6 @@ function decodeMediaPageCursor(value, scope, name) {
   throw fail(400, `Invalid ${name}`);
 }
 
-function replyPreview(row) {
-  if (!row.replyToMessageId) return null;
-  if (!row.replyAvailable) return { type: null, text: '', senderName: null, available: false };
-  return {
-    type: row.replyType || 'TEXT',
-    text: String(row.replyText || '').replace(/\s+/g, ' ').trim().slice(0, 180),
-    senderName: row.replySenderName || null,
-    available: true,
-  };
-}
 async function bodyJSON(req) {
   let size = 0; const chunks = [];
   for await (const chunk of req) { size += chunk.length; if (size > 17 * 1024 * 1024) throw fail(413, 'Request too large'); chunks.push(chunk); }
@@ -768,7 +759,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       } catch { /* The chat remains readable when poll results are unavailable. */ }
     }
     const local = appState.get(account.accountId);
-    const messages = rows.slice().reverse().map(({ metadata, replyType, replyText, replySenderName, replyAvailable, ...row }) => ({
+    const messages = rows.slice().reverse().map(({ metadata, replyType, replyText, replySenderName, replyAvailable, replyLocallyDeleted, ...row }) => ({
       ...row,
       ...(row.type === 'TEXT' && row.text ? {
         linkPreview: (() => {
@@ -780,7 +771,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           } : {}) };
         })(),
       } : {}),
-      ...(row.replyToMessageId ? { replyPreview: replyPreview({ replyToMessageId: row.replyToMessageId, replyType, replyText, replySenderName, replyAvailable }) } : {}),
+      ...(row.replyToMessageId ? { replyPreview: projectReplyPreview({ replyToMessageId: row.replyToMessageId, replyType, replyText, replySenderName, replyAvailable, replyLocallyDeleted }, metadata, conversation) } : {}),
       metadata: {
         ...publicMessageMetadata(metadata),
         ...(row.type === 'POLL' && pollResults.has(optionalProviderMessageId(row.waMessageId))

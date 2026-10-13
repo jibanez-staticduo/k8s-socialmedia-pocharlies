@@ -11,7 +11,7 @@ import {
   resetDurableStoreStateForTests,
   markMessageDeletedForMe,
 } from './durable-message-store';
-import { isViewOnceContent } from './message-preservation';
+import { isViewOnceContent, RECOVERABLE_MESSAGE_TYPES, UNAVAILABLE_MESSAGE_TYPES } from './message-preservation';
 import { createRouter } from './api/controller';
 import { generateHMACSignature } from './api/auth';
 
@@ -182,6 +182,55 @@ test('concurrent recovery calls share a single phone request', async () => {
   } finally {
     db.restore();
   }
+});
+
+test('captured genuine placeholder remains eligible for provider resend instead of false recovery', async () => {
+  const anchor = { wa_message_id: 'professional:MISSING', remote_jid: '123@lid', from_me: false,
+    participant_jid: null, message_timestamp_ms: String(timestamp) };
+  const db = stubPool(sql => {
+    if (/SELECT m\.wa_message_id, k\./.test(sql)) return [anchor];
+    if (/SELECT message_key, message_payload/.test(sql)) return [{
+      message_key: { id: 'MISSING', remoteJid: '123@lid', fromMe: false },
+      message_payload: { placeholderMessage: { type: 0 } }, message_timestamp_ms: String(timestamp),
+    }];
+    return [];
+  });
+  try {
+    const { client, internals, resends } = harness();
+    internals.ingestMessage = async () => { assert.fail('placeholder cannot be counted as restored'); };
+    const result = await client.recoverChatHistory('123@lid');
+    assert.equal(result.recovered, 0);
+    assert.equal(result.placeholderRequests, 1);
+    assert.equal(resends.length, 1);
+  } finally { db.restore(); }
+});
+
+test('empty legacy business row reprojects its local payload without placeholder resend', async () => {
+  const db = stubPool(sql => {
+    if (/SELECT p.wa_message_id/.test(sql)) return [{ wa_message_id: 'professional:BUSINESS' }];
+    if (/SELECT message_key, message_payload/.test(sql)) return [{
+      message_key: { id: 'BUSINESS', remoteJid: '123@lid', fromMe: false },
+      message_payload: { templateMessage: { hydratedTemplate: { hydratedContentText: 'Please confirm' } } },
+      message_timestamp_ms: String(timestamp),
+    }];
+    return [];
+  });
+  try {
+    const { client, internals, resends } = harness();
+    internals.ingestMessage = async (msg: WAMessage) => {
+      assert.equal(internals.convertMessage(msg).content, 'Please confirm');
+      return { inserted: true };
+    };
+    const result = await client.recoverChatHistory('123@lid');
+    assert.equal(result.recovered, 1);
+    assert.equal(resends.length, 0);
+    const scan = db.calls.find(call => /SELECT p.wa_message_id/.test(call.sql))!;
+    const requestable = db.calls.find(call => /SELECT m\.wa_message_id, k\./.test(call.sql))!;
+    assert.deepEqual(scan.params[2], RECOVERABLE_MESSAGE_TYPES);
+    assert.deepEqual(requestable.params[2], UNAVAILABLE_MESSAGE_TYPES);
+    assert.ok((scan.params[2] as string[]).includes('TEMPLATEMESSAGE'));
+    assert.ok(!(requestable.params[2] as string[]).includes('TEMPLATEMESSAGE'));
+  } finally { db.restore(); }
 });
 
 test('foreign namespaces and disconnected sockets cannot trigger recovery', async () => {

@@ -1,8 +1,10 @@
 'use strict';
 let needsMessageRecovery;
 let recoveryLabel;
+let historyRecoveryWaitMs;
 const recoveryReady = import('./history-recovery.mjs').then(module => {
   ({ needsMessageRecovery, recoveryLabel } = module);
+  historyRecoveryWaitMs = module.HISTORY_RECOVERY_WAIT_MS;
 });
 let mergeMessages;
 let mergeRecentMessages;
@@ -83,6 +85,8 @@ const state = {account: '', chat: '', chats: [], messages: [], historyMode: fals
 function node(tag, className, text) { const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = text; return element; }
 const historyNotice = node('div', 'notice');
 const recoveryStates = new Map();
+const recoveryTimers = new Map();
+const recoveryRequests = new Map();
 const recoveryNotice = node('div', 'notice');
 recoveryNotice.hidden = true;
 $('messages').before(recoveryNotice);
@@ -91,23 +95,40 @@ function updateRecoveryNotice() {
   const status = recoveryStates.get(`${state.account}:${state.chat}`);
   recoveryNotice.hidden = !state.chat || state.historyMode || !needsMessageRecovery(state.messages) || !status;
   recoveryNotice.replaceChildren(node('span', '', recoveryLabel(status)));
-  if (['failed', 'no_anchor', 'cooldown'].includes(status)) {
+  if (['failed', 'no_anchor', 'cooldown', 'timeout'].includes(status)) {
     const retry = node('button', 'text-button', 'Reintentar');
     retry.onclick = () => void recoverMessages(context(), true);
     recoveryNotice.append(retry);
   }
 }
 
+function setRecoveryStatus(key, status) {
+  clearTimeout(recoveryTimers.get(key));
+  recoveryTimers.delete(key);
+  recoveryStates.set(key, status);
+  if (['pending', 'requested', 'cooldown'].includes(status)) {
+    recoveryTimers.set(key, setTimeout(() => {
+      recoveryTimers.delete(key);
+      recoveryStates.set(key, 'timeout');
+      if (`${state.account}:${state.chat}` === key) updateRecoveryNotice();
+    }, historyRecoveryWaitMs));
+  }
+}
+
 async function recoverMessages(ctx, retry = false) {
   const key = `${ctx.account}:${ctx.chat}`;
   if (!current(ctx) || (!retry && recoveryStates.has(key)) || recoveryStates.get(key) === 'pending') return;
-  recoveryStates.set(key, 'pending'); updateRecoveryNotice();
+  const request = Symbol();
+  recoveryRequests.set(key, request);
+  setRecoveryStatus(key, 'pending'); updateRecoveryNotice();
   try {
     const result = await api('/api/messages/recover', { account: ctx.account, chat: ctx.chat });
-    recoveryStates.set(key, result.status);
+    if (recoveryRequests.get(key) !== request || recoveryStates.get(key) !== 'pending') return;
+    setRecoveryStatus(key, result.status);
     if (current(ctx)) { updateRecoveryNotice(); if (result.recovered > 0) void loadMessages(); }
   } catch {
-    recoveryStates.set(key, 'failed'); if (current(ctx)) updateRecoveryNotice();
+    if (recoveryRequests.get(key) !== request || recoveryStates.get(key) !== 'pending') return;
+    setRecoveryStatus(key, 'failed'); if (current(ctx)) updateRecoveryNotice();
   }
 }
 historyNotice.id = 'history-notice';

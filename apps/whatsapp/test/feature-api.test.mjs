@@ -1008,6 +1008,25 @@ test('messages endpoint projects reply, edit, reactions and safe content metadat
   assert(messageQuery.sql.includes(MESSAGE_VISIBLE_SQL));
 });
 
+test('captured quote metadata supplies business text without exposing raw identities or secrets', async t => {
+  const calls = []; const db = fixtureDatabase(calls); const originalQuery = db.query;
+  db.query = async (sql, args) => {
+    calls.push({sql, args});
+    if (/reply\.message_type AS "replyType"/.test(sql)) return {rows: [{
+      id:'11111111-1111-1111-1111-111111111111', waMessageId:'wa-personal-1', text:'CONFIRMAR', type:'TEXT',
+      replyToMessageId:'appointment', replyAvailable:false,
+      metadata:{reply_preview:'Your appointment Clinic', reply_type:'TEMPLATEMESSAGE', reply_from_id:'personal:unknown@lid', reply_from:'unknown@lid', secret:'PRIVATE'},
+    }]};
+    return originalQuery(sql, args);
+  };
+  const {request} = await fixture(t, {db});
+  const message = (await (await request('/api/messages?account=personal&chat=personal-chat')).json()).messages[0];
+  assert.deepEqual(message.replyPreview, {type:'TEMPLATEMESSAGE', text:'Your appointment Clinic', senderName:null, available:true});
+  assert.doesNotMatch(JSON.stringify(message), /unknown@lid|PRIVATE|reply_preview|reply_from/);
+  const sql = calls.find(call => /reply\.message_type AS "replyType"/.test(call.sql)).sql;
+  assert.match(sql, /hidden_reply.account=m.account AND hidden_reply.conversation_id=ANY\(\$2::text\[\]\)/);
+});
+
 test('missing quoted message has an explicit unavailable preview on paginated reads', async t => {
   const calls = [];
   const db = fixtureDatabase(calls);

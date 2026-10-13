@@ -1,4 +1,5 @@
 import { normalizeMessageContent, type proto } from '@whiskeysockets/baileys';
+import { BUSINESS_MESSAGE_TYPES } from './business-message-text';
 
 /** Historic envelope rows that can be filled when the phone supplies real content. */
 export const UNAVAILABLE_MESSAGE_TYPES = [
@@ -8,7 +9,11 @@ export const UNAVAILABLE_MESSAGE_TYPES = [
   'SENDERKEYDISTRIBUTIONMESSAGE',
   'ENCREACTIONMESSAGE',
   'POLLUPDATEMESSAGE',
+  'PLACEHOLDERMESSAGE',
 ] as const;
+
+/** Full captured business payloads need reprojection, not a placeholder resend. */
+export const RECOVERABLE_MESSAGE_TYPES = [...UNAVAILABLE_MESSAGE_TYPES, ...BUSINESS_MESSAGE_TYPES];
 
 const WRAPPERS = [
   'ephemeralMessage',
@@ -55,6 +60,7 @@ function hasPayloadContent(message: proto.IMessage | null | undefined, userOnly:
     'senderKeyDistributionMessage',
     'protocolMessage',
     'secretEncryptedMessage',
+    'placeholderMessage',
     'encReactionMessage',
     ...(userOnly ? ['pollUpdateMessage', 'encEventResponseMessage', 'pinInChatMessage'] : []),
   ]);

@@ -20,7 +20,14 @@ export const MESSAGE_REPLY_SELECT_SQL = `
                 THEN '+' || substring(reply.sender_wa_id FROM '(?:^|:)(\\d{6,15})@')
                 ELSE regexp_replace(reply.sender_wa_id, '^[^:]+:', '') END
             ) END AS "replySenderName",
-       reply.id IS NOT NULL AS "replyAvailable"`;
+       reply.id IS NOT NULL AS "replyAvailable",
+       EXISTS (
+         SELECT 1 FROM messages hidden_reply
+          WHERE hidden_reply.account=m.account AND hidden_reply.conversation_id=ANY($2::text[])
+            AND hidden_reply.platform='whatsapp' AND hidden_reply.metadata->>'deleted_for_me' = 'true'
+            AND hidden_reply.wa_message_id IN (m.reply_to_message_id, m.account || ':' || m.reply_to_message_id,
+              regexp_replace(m.reply_to_message_id, '^[^:]+:', ''))
+       ) AS "replyLocallyDeleted"`;
 
 export const MESSAGE_REPLY_JOIN_SQL = `
 LEFT JOIN LATERAL (

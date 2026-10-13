@@ -24,10 +24,11 @@ const browser = await chromium.launch({headless:true, executablePath:process.env
 const context = await browser.newContext({viewport:{width:1280,height:900}, serviceWorkers:'block'});
 await context.tracing.start({screenshots:true, snapshots:true, sources:true});
 const page = await context.newPage();
+await page.clock.install();
 page.setDefaultTimeout(10000);
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
-const chats = ['empty', 'placeholder', 'populated', 'delayed-chat', 'delayed-account'].map(id => ({id, name:`Fixture ${id}`}));
+const chats = ['empty', 'placeholder', 'populated', 'business', 'delayed-chat', 'delayed-account'].map(id => ({id, name:`Fixture ${id}`}));
 const message = (id, text) => ({id, text, type:'TEXT', timestamp:'2026-10-09T12:00:00Z', fromMe:false, attachments:[]});
 const calls = [];
 const gets = [];
@@ -45,7 +46,11 @@ await page.route('**/*', async route => {
     const key = `${url.searchParams.get('account')}:${url.searchParams.get('chat')}`;
     gets.push(key);
     const chat = url.searchParams.get('chat');
-    return json({messages:chat === 'populated' ? [message('existing', 'Existing populated content')] : chat === 'placeholder' ? [message('placeholder', '')] : []});
+    return json({messages:chat === 'populated' ? [message('existing', 'Existing populated content')] : chat === 'business' ? [
+      {...message('appointment', 'Tu cita es el jueves a las 10:00.\nClinica de ejemplo\nCONFIRMAR\nNO'), type:'TEMPLATEMESSAGE'},
+      {...message('confirm', 'CONFIRMAR'), fromMe:true, type:'TEMPLATEBUTTONREPLYMESSAGE', replyToMessageId:'appointment',
+        replyPreview:{available:true, type:'TEMPLATEMESSAGE', text:'Tu cita es el jueves a las 10:00. Clinica de ejemplo', senderName:'Clinica de ejemplo'}},
+    ] : chat === 'placeholder' ? [message('placeholder', '')] : []});
   }
   if (url.pathname === '/api/messages/recover') {
     assert.equal(request.method(), 'POST');
@@ -79,6 +84,12 @@ try {
   await select('populated');
   await label('Existing populated content').waitFor();
   assert.equal(calls.length, 0, 'populated chats must not trigger recovery');
+  await select('business');
+  await page.locator('.message-reply-reference').filter({hasText:'Clinica de ejemplo'}).waitFor();
+  assert.match(await page.locator('#messages').innerText(), /Tu cita es el jueves/);
+  assert.doesNotMatch(await page.locator('#messages').innerText(), /@lid|Mensaje no disponible/);
+  assert.equal(calls.length, 0, 'captured business content must not trigger phone recovery');
+  await page.screenshot({path:path.join(artifactDir, 'business-messages.png'), fullPage:true});
 
   await select('empty');
   await label(pending).waitFor();
@@ -92,6 +103,10 @@ try {
   await page.getByRole('button', {name:'Reintentar', exact:true}).click();
   await label(requested).waitFor();
   assert.equal(count('alpha:empty'), 2, 'explicit retry must issue a second request');
+  await page.clock.fastForward(31000);
+  await label('WhatsApp no ha entregado nuevos mensajes durante la espera. El contenido no disponible sigue pendiente; puedes reintentar.').waitFor();
+  assert.equal(count('alpha:empty'), 2, 'timeout must not repeat phone recovery automatically');
+  await page.getByRole('button', {name:'Reintentar', exact:true}).waitFor();
 
   await select('placeholder');
   await label(failed).waitFor();

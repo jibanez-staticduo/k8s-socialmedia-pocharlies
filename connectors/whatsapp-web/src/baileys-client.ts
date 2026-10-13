@@ -62,6 +62,7 @@ import {
   hasUserMessageContent,
   isViewOnceContent,
   UNAVAILABLE_MESSAGE_TYPES,
+  RECOVERABLE_MESSAGE_TYPES,
 } from './message-preservation';
 import {
   isTcTokenExpired,
@@ -126,8 +127,10 @@ import {
   isOfficialWhatsAppJid,
   linksSenderToChat,
   OFFICIAL_WHATSAPP_NAME,
+  messageContextInfo,
   quotedReply,
 } from './ingest-extras';
+import { businessMessageText } from './business-message-text';
 import {
   DurablePayloadSource,
   ensureDurableTables,
@@ -3052,6 +3055,7 @@ export class BaileysClient extends EventEmitter {
     let event: ReturnType<typeof parseEventDefinition> = null;
     let structured: Record<string, unknown> | undefined;
     let metadata: Record<string, unknown> | undefined;
+    const business = businessMessageText(content);
 
     const text = content.conversation;
     const ext = content.extendedTextMessage;
@@ -3182,6 +3186,12 @@ export class BaileysClient extends EventEmitter {
       messageType = 'EVENT';
       body = event.name || null;
       structured = { event };
+    } else if (business) {
+      messageType = business.type;
+      body = business.text;
+    } else if (content.placeholderMessage && !hasUserMessageContent(content)) {
+      messageType = 'UNAVAILABLE';
+      metadata = { contentUnavailable: true, unavailableReason: 'provider_placeholder' };
     } else if ((content as any).secretEncryptedMessage && !hasUserMessageContent(content)) {
       messageType = 'UNAVAILABLE';
       metadata = { contentUnavailable: true, unavailableReason: 'encrypted_provider_payload' };
@@ -3210,7 +3220,7 @@ export class BaileysClient extends EventEmitter {
       content.contactMessage,
     ]
       .map(item => item?.contextInfo)
-      .find(Boolean);
+      .find(Boolean) || messageContextInfo(content);
     if (context) {
       isForwarded = !!context.isForwarded || (context.forwardingScore || 0) > 0;
       if (!replyToWaId && context.stanzaId) replyToWaId = context.stanzaId;
@@ -8556,7 +8566,7 @@ export class BaileysClient extends EventEmitter {
           AND (m.wa_message_id IS NULL OR
             (m.message_type = ANY($3::text[]) AND NULLIF(m.content, '') IS NULL))
         ORDER BY p.created_at DESC LIMIT 50`,
-        [connectorAccount(), ids, UNAVAILABLE_MESSAGE_TYPES]
+        [connectorAccount(), ids, RECOVERABLE_MESSAGE_TYPES]
       )
     ).rows;
     let recovered = 0;
