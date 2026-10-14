@@ -1,4 +1,5 @@
 import { createMediaDownloadPolicy } from './settings-ui.mjs';
+import { installMediaViewerZoom } from './media-viewer-zoom.mjs';
 
 const HTTP_PROTOCOLS = new Set(['http:', 'https:']);
 const FORMAT_TYPES = { '*': 'strong', '_': 'em', '~': 'del' };
@@ -412,6 +413,7 @@ function closeImageViewer(documentRef, restoreFocus = true) {
   const state = mediaViewerStates.get(documentRef);
   if (!state) return;
   documentRef.removeEventListener?.('keydown', state.onKey);
+  state.zoom?.dispose();
   state.overlay.remove();
   mediaViewerStates.delete(documentRef);
   if (restoreFocus && state.opener && state.opener.isConnected !== false) state.opener.focus?.();
@@ -438,6 +440,23 @@ export function openImageViewer(url, name, documentRef, opener, loadPage) {
   const image = makeElement(documentRef, 'img', 'media-viewer-image');
   image.src = url;
   image.alt = name;
+  image.draggable = false;
+  const stage = makeElement(documentRef, 'div', 'media-viewer-stage');
+  stage.append(image);
+  const zoomControls = makeElement(documentRef, 'div', 'media-viewer-zoom');
+  zoomControls.setAttribute('role', 'group');
+  zoomControls.setAttribute('aria-label', 'Zoom de imagen');
+  const zoomOut = makeElement(documentRef, 'button', 'media-viewer-zoom-out', '-');
+  const zoomIn = makeElement(documentRef, 'button', 'media-viewer-zoom-in', '+');
+  const zoomReset = makeElement(documentRef, 'button', 'media-viewer-zoom-reset', 'Restablecer');
+  const zoomLevel = makeElement(documentRef, 'output', 'media-viewer-zoom-level', '100%');
+  for (const [button, label] of [[zoomOut, 'Alejar imagen'], [zoomIn, 'Acercar imagen'], [zoomReset, 'Restablecer zoom']]) {
+    button.type = 'button';
+    button.setAttribute('aria-label', label);
+  }
+  zoomLevel.setAttribute('aria-label', 'Nivel de zoom');
+  zoomControls.append(zoomOut, zoomLevel, zoomIn, zoomReset);
+  const zoom = installMediaViewerZoom({ stage, image, overlay, controls: { out: zoomOut, in: zoomIn, reset: zoomReset, level: zoomLevel } });
   const actions = makeElement(documentRef, 'div', 'media-viewer-actions');
   appendDownload(actions, url, name, documentRef);
   const scope = opener?.closest?.('#messages');
@@ -507,6 +526,7 @@ export function openImageViewer(url, name, documentRef, opener, loadPage) {
     index += delta;
     displayed = target;
     historyError = '';
+    zoom.reset();
     image.src = targetUrl; image.alt = entryName(target);
     overlay.setAttribute('aria-label', image.alt);
     actions.replaceChildren(); appendDownload(actions, targetUrl, image.alt, documentRef);
@@ -515,6 +535,7 @@ export function openImageViewer(url, name, documentRef, opener, loadPage) {
   previous.onclick = () => { void move(-1); }; next.onclick = () => { void move(1); };
   const close = () => closeImageViewer(documentRef);
   const onKey = event => {
+    if (zoom.handleKey(event)) return;
     if (index >= 0 && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
       event.preventDefault(); void move(event.key === 'ArrowLeft' ? -1 : 1); return;
     }
@@ -547,10 +568,9 @@ export function openImageViewer(url, name, documentRef, opener, loadPage) {
   };
   closeButton.onclick = close;
   overlay.addEventListener?.('click', event => { if (event.target === overlay) close(); });
-  overlay.addEventListener?.('touchend', event => { if (event.target === overlay) close(); }, { passive: true });
-  mediaViewerStates.set(documentRef, { overlay, onKey, opener });
+  mediaViewerStates.set(documentRef, { overlay, onKey, opener, zoom });
   documentRef.addEventListener?.('keydown', onKey);
-  overlay.append(closeButton, image, actions);
+  overlay.append(closeButton, stage, zoomControls, actions);
   if (index >= 0) {updateNavigation(); overlay.append(previous, next, counter);}
   documentRef.body.append(overlay);
   closeButton.focus?.();

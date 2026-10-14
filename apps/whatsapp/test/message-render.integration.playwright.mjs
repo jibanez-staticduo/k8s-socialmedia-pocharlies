@@ -22,7 +22,7 @@ const server = createServer(async (request, response) => {
     response.end('<!doctype html><html><head><link rel="stylesheet" href="/styles.css"></head><body></body></html>');
     return;
   }
-  if (path === '/message-render.mjs' || path === '/settings-ui.mjs' || path === '/styles.css') {
+  if (path === '/message-render.mjs' || path === '/media-viewer-zoom.mjs' || path === '/settings-ui.mjs' || path === '/styles.css') {
     response.writeHead(200, { 'content-type': path.endsWith('.css') ? 'text/css' : 'text/javascript; charset=utf-8' });
     response.end(await readFile(join(publicDir, path.slice(1))));
     return;
@@ -100,7 +100,11 @@ try {
   assert.match(result.text, /uno/);
   assert.match(result.text, /dos/);
   await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.media-viewer-zoom-in')), true);
+  await page.keyboard.press('Tab');
   assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.media-viewer-actions a')), true);
+  await page.keyboard.press('Shift+Tab');
+  assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.media-viewer-zoom-in')), true);
   await page.keyboard.press('Shift+Tab');
   assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('.media-viewer-close')), true);
   await page.evaluate(() => document.querySelector('.media-viewer-close').click());
