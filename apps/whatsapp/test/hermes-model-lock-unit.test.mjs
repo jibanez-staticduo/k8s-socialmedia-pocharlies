@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import {modelLockAction, syncHermesModelLock} from '../lib/hermes-model-lock.mjs';
 
 const target = {model: 'gpt-6-luna', provider: 'existing-provider'};
-const confirmed = {hermesId: 'existing-session', hermesModelLock: {...target, state: 'confirmed'}};
+const confirmed = {hermesId: 'existing-session', hermesModelLock: {...target, reasoningEffort: 'default', state: 'confirmed'}};
 const accepted = (model = target.model, provider = target.provider) => Response.json({
   object: 'hermes.session.model_lock', runtime: {model, provider, model_lock: 'accepted'},
 });
@@ -31,7 +31,7 @@ test('model sync uses the existing profile and confirms the returned runtime', a
     calls++;
     assert.equal(url, 'http://hermes/p/socialmedia/api/sessions/existing%2Fsession/model');
     assert.equal(request.method, 'POST');
-    assert.deepEqual(JSON.parse(request.body), target);
+    assert.deepEqual(JSON.parse(request.body), {...target, model_options: {}});
     return accepted();
   }});
   assert.equal(calls, 1);
@@ -39,6 +39,16 @@ test('model sync uses the existing profile and confirms the returned runtime', a
   assert.equal(session.hermesModelLock.state, 'confirmed');
   assert.equal(session.hermesModelLock.model, target.model);
   assert.deepEqual(session.messages, [{role: 'user', content: 'History to preserve'}]);
+});
+
+test('reasoning transitions re-lock the same model and explicitly clear its previous override', async () => {
+  const session = structuredClone(confirmed);
+  const bodies = [];
+  const remote = async (_url, request) => {bodies.push(JSON.parse(request.body)); return accepted();};
+  assert.equal(await syncHermesModelLock({...options(session), remote, reasoningEffort: 'high'}), 'confirmed');
+  assert.equal(await syncHermesModelLock({...options(session), remote, reasoningEffort: 'high'}), 'none');
+  assert.equal(await syncHermesModelLock({...options(session), remote}), 'confirmed');
+  assert.deepEqual(bodies.map(body => body.model_options), [{reasoning: {enabled: true, effort: 'high'}}, {}]);
 });
 
 test('rejected, mismatched and unreachable model locks do not claim the new model', async () => {

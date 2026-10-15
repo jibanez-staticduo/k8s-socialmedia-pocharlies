@@ -1896,6 +1896,22 @@ contracts:
     and the production migration 010 table; sendToken alone never deduplicates a legacy caller. Canonical
     production messageId input and voted response remain supported; app compatibility replies include
     ok, sent and messageId.'
+- id: http.whatsapp-app.hermes-settings.v1
+  kind: http-route
+  value: /api/ai/settings
+  role: provider
+  files:
+  - apps/whatsapp/server.mjs
+  status: active
+  note: 'Authenticated GET account/chat returns model, reasoningEffort, provider and a safe models
+    catalog from the configured authenticated Hermes provider. POST with same-origin JSON account,
+    chat, model and reasoningEffort validates catalog membership then persists settings in that
+    account/conversation session. Unknown models or unsupported efforts return 400; other scopes
+    cannot read or change this selection. Settings affect future turns, not an in-progress run or
+    retry: each owner attempt retains its original model/effort snapshot. Model options are sent
+    to the native session lock and run/completion request; default sends an empty options object
+    to clear a prior explicit reasoning override. The provider may clamp reasoning levels; the
+    catalog must not claim a distinct unsupported wire level or expose credentials.'
 - id: http.whatsapp-app.hermes-stop.v1
   kind: http-route
   value: /api/ai/stop

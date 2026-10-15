@@ -33,6 +33,7 @@ import { linkPreviewFromPayload } from './lib/link-preview.mjs';
 import { HermesStreamAccumulator, openSse, sseHeaders } from './lib/hermes-stream.mjs';
 import { createChangeBus } from './lib/change-bus.mjs';
 import { hermesApiBaseUrl, syncHermesModelLock } from './lib/hermes-model-lock.mjs';
+import {defaultModelSettings, sessionModelSettings, hermesModelOptions, modelCatalog, validateModelSettings} from './lib/agent-model-settings.mjs';
 import { hermesImages, hermesUserContent, stopHermesRun, readHermesRun, hermesRunFailure, settledHermesTranscript, safeHermesRunText, consumeHermesRun, terminalRun, cancelledHermesTranscript } from './lib/hermes-runs.mjs';
 import { communityJid, communityCreateBody, communityActionBody, publicCommunity, publicCommunityList, publicLinkedGroups } from './lib/communities.mjs';
 const root = dirname(fileURLToPath(import.meta.url));
@@ -2670,6 +2671,27 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         }
         return json(200, {stopped: true, status: result.status, turnId, ...(result.status === 'failed' ? hermesRunFailure(result, savedAttempt) : {})});
       }
+      // CONTRACT: http.whatsapp-app.hermes-settings.v1
+      if (['GET', 'POST'].includes(req.method) && path === '/api/ai/settings') {
+        if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'Hermes endpoint is not configured');
+        const body = req.method === 'POST' ? await bodyJSON(req) : Object.fromEntries(url.searchParams);
+        const a = accountFor(body.account);
+        const conversation = await conversationFor(a, body.chat);
+        const payload = await (await remote(`${hermesApiBaseUrl(env.HERMES_API_URL)}/api/model/options`, {
+          headers: {authorization: `Bearer ${env.HERMES_API_KEY}`},
+        }, 10000)).json();
+        const models = modelCatalog(payload, env.HERMES_PROVIDER);
+        const scopeId = sessions.canonicalId(a.accountId, conversation.id, false);
+        const selection = req.method === 'POST'
+          ? await sessions.serial(scopeId, async () => {
+            const session = await hermesSessionFor(a, conversation);
+            session.modelSettings = validateModelSettings(body, models);
+            await sessions.save(session);
+            return session.modelSettings;
+          })
+          : sessionModelSettings(await hermesSessionFor(a, conversation), env);
+        return json(200, {...selection, models, provider: env.HERMES_PROVIDER});
+      }
       if (req.method === 'GET' && path === '/api/ai/sessions') {
         if (url.searchParams.get('global') === 'true') throw fail(400, 'A WhatsApp chat is required');
         const a = accountFor(url.searchParams.get('account')); const global = false; const chat = url.searchParams.get('chat');
@@ -2733,7 +2755,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'Hermes endpoint is not configured');
         const images = hermesImages(body.images);
         const message = required(body.message || (images.length ? 'Describe estas imagenes' : ''), 'message', 20000);
-        const model = required(env.HERMES_DEFAULT_MODEL || env.APP_AI_DEFAULT_MODEL, 'HERMES_DEFAULT_MODEL', 200);
+        required(env.HERMES_DEFAULT_MODEL || env.APP_AI_DEFAULT_MODEL, 'HERMES_DEFAULT_MODEL', 200);
         const clientTurnId = ownerTurnId(body.turnId);
         if (body.allowSend === true && env.HERMES_CHAT_ALLOW_DIRECT_SEND !== 'true') throw fail(403, 'Hermes direct sending is disabled');
         const allowSend = body.allowSend === true && env.HERMES_CHAT_ALLOW_DIRECT_SEND === 'true';
@@ -2758,6 +2780,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           return result;
         };
         try {
+        // Reserve the active key before this read so duplicate requests cannot both enter.
+        // Capture before waiting on the chat queue: later settings affect only later dispatches.
+        const dispatchedSettings = sessionModelSettings(await hermesSessionFor(a, conversation), env);
         const result = await sessions.serial(scopeId, async () => {
           const session = await hermesSessionFor(a, conversation);
           if (active.stopped) return deliver({sessionId: session.id, text: '', status: 'cancelled', cancelled: true});
@@ -2811,15 +2836,19 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             if (directAttempt?.answer !== undefined) return deliver({ sessionId: session.id, text: directAttempt.answer });
             if (allowSend && directAttempt && now - directAttempt.createdAt >= SEND_LEDGER_TTL_MS) throw fail(409, 'El envío anterior no está confirmado y el plazo de reintento ha caducado. Comprueba el chat.');
             if (!directAttempt) {
-              directAttempt = { digest, requestId: randomUUID(), createdAt: now, allowSend, allowPropose: body.allowPropose === true, userContent: hermesUserContent(message, images), imageNames: images.map(image => image.name), ...(clientTurnId ? {turnId: clientTurnId} : {}) };
+              directAttempt = { digest, requestId: randomUUID(), createdAt: now, modelSettings: {...dispatchedSettings}, allowSend, allowPropose: body.allowPropose === true, userContent: hermesUserContent(message, images), imageNames: images.map(image => image.name), ...(clientTurnId ? {turnId: clientTurnId} : {}) };
               session.directSendAttempts.push(directAttempt);
             }
             requestId = directAttempt.requestId;
+            // Pre-selector attempts always used deployment defaults, never the new chat selection.
+            directAttempt.modelSettings ||= defaultModelSettings(env);
             // The legacy ledger also stores read turns, avoiding duplicate history after a lost result.
             await sessions.save(session);
           }
+          const {model, reasoningEffort} = directAttempt?.modelSettings || dispatchedSettings;
+          const model_options = hermesModelOptions(reasoningEffort);
           const lock = await syncHermesModelLock({remote, apiUrl: env.HERMES_API_URL, apiKey: env.HERMES_API_KEY,
-            session, model, provider: env.HERMES_PROVIDER});
+            session, model, reasoningEffort, provider: env.HERMES_PROVIDER});
           if (lock === 'failed' || lock === 'unavailable') throw fail(502, 'Hermes no ha confirmado el modelo configurado. Inténtalo de nuevo.');
           if (lock === 'missing') {
             delete session.hermesId;
@@ -2853,7 +2882,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
               if (active.stopped) return deliver({sessionId: session.id, text: '', status: 'cancelled', cancelled: true});
               active.submitting = true;
               if (directAttempt) {directAttempt.submissionPending = true; await sessions.save(session);}
-              const submitted = await (await remote(`${base}/v1/runs`, {method: 'POST', headers: {...headers, ...(requestId ? {'Idempotency-Key': directAttempt?.runSubmissionKey || requestId} : {})}, body: JSON.stringify({model, ...(env.HERMES_PROVIDER ? {provider: env.HERMES_PROVIDER} : {}), instructions: system, ...(session.hermesId ? {session_id: session.hermesId} : {}), input: [...(session.hermesId ? [] : session.messages.slice(-30)), {role: 'user', content: user}]})})).json();
+              const submitted = await (await remote(`${base}/v1/runs`, {method: 'POST', headers: {...headers, ...(requestId ? {'Idempotency-Key': directAttempt?.runSubmissionKey || requestId} : {})}, body: JSON.stringify({model, model_options, ...(env.HERMES_PROVIDER ? {provider: env.HERMES_PROVIDER} : {}), instructions: system, ...(session.hermesId ? {session_id: session.hermesId} : {}), input: [...(session.hermesId ? [] : session.messages.slice(-30)), {role: 'user', content: user}]})})).json();
               if (typeof submitted.run_id !== 'string' || !/^run_[a-zA-Z0-9_-]+$/.test(submitted.run_id)) throw fail(502, 'Hermes no ha confirmado la ejecucion.');
               active.runId = submitted.run_id;
               active.submitting = false;
@@ -2893,7 +2922,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
               }
               outcome = {completed: result.status === 'completed' && result.completed !== false, answer: result.output || '', sessionId: session.hermesId || status.session_id};
             } else {
-            const response = await remote(`${hermesApiBaseUrl(env.HERMES_API_URL)}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${env.HERMES_API_KEY}`, 'content-type': 'application/json', 'x-hermes-session-key': `whatsapp-app:${session.id}`, ...(resumeId ? { 'x-hermes-session-id': resumeId } : {}) }, body: JSON.stringify({ model, ...(env.HERMES_PROVIDER ? { provider: env.HERMES_PROVIDER } : {}), stream: Boolean(sse), ...(session.hermesResponseId ? { previous_response_id: session.hermesResponseId } : session.hermesConversation ? { conversation: session.hermesConversation } : {}), messages: [{ role: 'system', content: system }, ...(resumeId ? [] : session.messages.slice(-30)), { role: 'user', content: historyData }, { role: 'user', content: hermesUserContent(sse ? `${marker}\n${message}` : message, images) }] }) }, HERMES_TURN_TIMEOUT_MS);
+            const response = await remote(`${hermesApiBaseUrl(env.HERMES_API_URL)}/v1/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${env.HERMES_API_KEY}`, 'content-type': 'application/json', 'x-hermes-session-key': `whatsapp-app:${session.id}`, ...(resumeId ? { 'x-hermes-session-id': resumeId } : {}) }, body: JSON.stringify({ model, model_options, ...(env.HERMES_PROVIDER ? { provider: env.HERMES_PROVIDER } : {}), stream: Boolean(sse), ...(session.hermesResponseId ? { previous_response_id: session.hermesResponseId } : session.hermesConversation ? { conversation: session.hermesConversation } : {}), messages: [{ role: 'system', content: system }, ...(resumeId ? [] : session.messages.slice(-30)), { role: 'user', content: historyData }, { role: 'user', content: hermesUserContent(sse ? `${marker}\n${message}` : message, images) }] }) }, HERMES_TURN_TIMEOUT_MS);
             if (sse && response.headers.get('content-type')?.includes('text/event-stream')) {
               const handle = response.headers.get('x-hermes-session-id');
               if (handle) { session.hermesId = handle; await sessions.save(session); }

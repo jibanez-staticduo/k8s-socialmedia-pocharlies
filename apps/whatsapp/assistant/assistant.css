@@ -9,6 +9,16 @@
 
 .ai-conversation { position: relative; z-index: 1; display: flex; min-height: 0; flex: 1; flex-direction: column; }
 
+.ai-settings { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.ai-settings label { display: flex; min-width: 0; flex: 1 1 120px; align-items: center; gap: 7px; color: var(--muted-strong); font-size: 12px; }
+.ai-settings label:first-child { flex-grow: 2; }
+.ai-settings select { width: 0; min-width: 0; flex: 1; min-height: 32px; border: 1px solid var(--line); border-radius: 7px; padding: 4px 6px; background: var(--bg); color: var(--text); font: inherit; text-overflow: ellipsis; }
+.ai-settings select:disabled { opacity: .6; }
+.ai-settings select:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.ai-settings-status { color: var(--muted); font-size: 12px; }
+.ai-settings-error { flex-basis: 100%; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.ai-settings-error button { border: 0; border-radius: 5px; padding: 3px 6px; background: var(--surface-raised); color: var(--text); font: inherit; }
+
 .ai-history {
   display: flex;
   min-height: 0;

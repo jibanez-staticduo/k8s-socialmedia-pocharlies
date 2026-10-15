@@ -59,6 +59,15 @@ Hermes can persist a model selection on an existing session; its official
 replacing the session or losing history. The profile's default should match the
 app's model for requests that do not supply an explicit selection.
 
+The panel offers per-conversation Model and Thinking selectors,
+populated from the configured provider's authenticated Hermes model inventory.
+Choices persist by account/chat and apply to future turns. Retries retain the
+original attempt's model and reasoning selection. Thinking levels are requests
+to Hermes; the underlying model/provider may clamp its supported effort.
+Choosing the default clears any previous explicit reasoning override. Both the
+session model lock and execution receive `model_options` so a resumed session
+cannot silently retain an older override.
+
 The web app issues a signed capability for one owner-selected account, chat,
 and turn. The profile also exposes the owner's general Hermes tools.
 `social_send_current_chat` creates a pending proposal for web approval;

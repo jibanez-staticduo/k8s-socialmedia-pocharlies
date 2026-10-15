@@ -16,11 +16,14 @@
 //   POST /api/sessions/{id}/model {}   -> 400 {"error":{"code":"missing_model",...}}
 // and GET /v1/capabilities advertises features.session_model_lock=true.
 //
-// Only a 200 whose echoed runtime matches the requested pair counts as confirmed. "accepted" alone is
+// Only a 200 whose echoed runtime matches the requested pair counts as confirmed. Hermes does not
+// echo effective reasoning: reasoningEffort records the accepted request for cache invalidation,
+// and the underlying provider may clamp it. "accepted" alone is
 // not proof the provider resolves, so it is never claimed on a non-OK or mismatched answer, and an
 // unconfirmed session keeps its previous marker so a later turn retries.
 
 const LOCK_PATH = '/model';
+import {hermesModelOptions} from './agent-model-settings.mjs';
 
 export function hermesApiBaseUrl(apiUrl) {
   return String(apiUrl || '').replace(/\/v1\/?$/, '').replace(/\/+$/, '');
@@ -31,7 +34,8 @@ function modelLockPath(apiUrl, hermesId) {
 }
 
 function sameTarget(record, target) {
-  return Boolean(record) && record.model === target.model && (record.provider || '') === (target.provider || '');
+  return Boolean(record) && record.model === target.model && (record.provider || '') === (target.provider || '')
+    && record.reasoningEffort === (target.reasoningEffort || 'default');
 }
 
 // A turn may only skip the lock when this app already CONFIRMED the exact configured pair for that Hermes
@@ -57,8 +61,8 @@ async function discard(response) {
 // Returns 'none' | 'confirmed' | 'unavailable' | 'missing' | 'failed'. Only 'confirmed' records the pair as
 // applied, and the caller must not run the turn after 'failed' because continuing would silently answer
 // from the previous model. 'unavailable' and 'missing' stay unconfirmed so a later turn retries.
-export async function syncHermesModelLock({ remote, apiUrl, apiKey, session, model, provider, force = false, log = () => {} }) {
-  const target = { model: typeof model === 'string' ? model : '', provider: typeof provider === 'string' ? provider : '' };
+export async function syncHermesModelLock({ remote, apiUrl, apiKey, session, model, provider, reasoningEffort = 'default', force = false, log = () => {} }) {
+  const target = { model: typeof model === 'string' ? model : '', provider: typeof provider === 'string' ? provider : '', reasoningEffort };
   const action = modelLockAction(session, target, { force });
   if (action === 'none') return 'none';
   let response;
@@ -66,7 +70,8 @@ export async function syncHermesModelLock({ remote, apiUrl, apiKey, session, mod
     response = await remote(modelLockPath(apiUrl, session.hermesId), {
       method: 'POST',
       headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: target.model, ...(target.provider ? { provider: target.provider } : {}) }),
+      // An explicit empty object clears a previous session reasoning override in Hermes.
+      body: JSON.stringify({ model: target.model, ...(target.provider ? { provider: target.provider } : {}), model_options: hermesModelOptions(reasoningEffort) }),
     }, 10000, [400, 404, 405, 422, 501]);
   } catch (error) {
     log(`Hermes session model lock request failed: ${error?.message || 'unknown error'}`);

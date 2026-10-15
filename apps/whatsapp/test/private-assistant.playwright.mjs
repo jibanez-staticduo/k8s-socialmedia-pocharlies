@@ -51,6 +51,15 @@ const proposals = new Map([
   ['personal:three', [{id: 'proposal-base-three', text: 'Propuesta base de Tres', expiresAt: '2099-01-01T00:00:00Z'}]]
 ]);
 const turns = [];
+const modelChoices = [
+  {id: 'gpt-6-luna', label: 'GPT-6 Luna', reasoningEfforts: [{value: 'default', label: 'Predeterminado'}, {value: 'low', label: 'Bajo'}]},
+  {id: 'qwen3.8-flash-next', label: 'Qwen 3.8 Flash Next', reasoningEfforts: [{value: 'default', label: 'Predeterminado'}, {value: 'none', label: 'Desactivado'}, {value: 'high', label: 'Alto'}]},
+  {id: 'plain', label: 'Sin thinking', reasoningEfforts: [{value: 'default', label: 'Predeterminado'}]}
+];
+const settings = new Map();
+const settingsWrites = [];
+let failSettings = false;
+let holdSettings = null;
 const decisions = [];
 const stops = [];
 const stoppedStreams = [];
@@ -87,6 +96,15 @@ await page.route('**/api/**', async route => {
   if (url.pathname === '/api/accounts') return json({accounts: [{id: 'personal', label: 'Personal'}, {id: 'secondary', label: 'Secundaria'}], sendingEnabled});
   if (url.pathname === '/api/chats') return json({chats: chats[account] || []});
   if (url.pathname === '/api/messages') return json({messages: []});
+  if (url.pathname === '/api/ai/settings') {
+    if (body) {
+      settingsWrites.push(body);
+      if (failSettings) { failSettings = false; return route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'No se pudo guardar el modelo'})}); }
+      if (holdSettings) await holdSettings;
+      settings.set(key, {model: body.model, reasoningEffort: body.reasoningEffort});
+    }
+    return json({...settings.get(key) || {model: 'gpt-6-luna', reasoningEffort: 'default'}, models: modelChoices, provider: 'litellm'});
+  }
   if (url.pathname === '/api/send') { directSends++; return json({messageId: 'wa-confirmed'}); }
   if (url.pathname === '/api/ai/session') {
     sessionCalls.push(key);
@@ -119,7 +137,8 @@ await page.route('**/api/**', async route => {
     assert.equal(typeof body.allowSend, 'boolean', 'the web UI omitted the direct-send grant state');
     assert.match(String(body.turnId), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'the web UI sent a non-UUID turnId');
     assert.equal(body.requestId, undefined, 'the browser must not assign direct-send request IDs');
-    turns.push({key, message: body.message, allowPropose: body.allowPropose, allowSend: body.allowSend, turnId: body.turnId, ...(body.images?.length ? {images: body.images} : {})});
+    assert.equal(body.model, undefined, 'the browser must use settings captured by the server');
+    turns.push({key, settings: {...settings.get(key)}, message: body.message, allowPropose: body.allowPropose, allowSend: body.allowSend, turnId: body.turnId, ...(body.images?.length ? {images: body.images} : {})});
     chatLog.push({key, at: Date.now()});
     if (holdNext && !holdNext.route) { holdNext.route = route; if (holdNext.openStream) await route.continue(); return; }
     if (failNext) { failNext = false; return route.fulfill({status: 503, contentType: 'application/json', body: JSON.stringify({error: 'Hermes no disponible'})}); }
@@ -178,7 +197,29 @@ try {
   for (const legacy of ['Asistente privado', 'SOLO PARA TI', 'Permitir proponer']) {
     assert.equal(panelText.includes(legacy), false, `the panel still shows "${legacy}"`);
   }
-  assert.equal(await page.locator('#ai-panel input:not([type=file]), #ai-panel select, #ai-panel output').count(), 0, 'the panel exposes configuration controls');
+  assert.equal(await page.locator('#ai-panel select').count(), 2, 'the model and thinking selectors are missing');
+  const modelSelect = page.getByRole('combobox', {name: 'Modelo', exact: true});
+  const thinkingSelect = page.getByRole('combobox', {name: 'Thinking', exact: true});
+  await until(() => modelSelect.isEnabled(), 'settings inventory');
+  await modelSelect.selectOption('qwen3.8-flash-next');
+  await until(async () => await modelSelect.isEnabled() && await modelSelect.inputValue() === 'qwen3.8-flash-next', 'model save');
+  await thinkingSelect.selectOption('high');
+  await until(async () => await thinkingSelect.isEnabled() && await thinkingSelect.inputValue() === 'high', 'thinking save');
+  assert.equal(turns.length, 0, 'changing settings sent an agent message');
+  assert.deepEqual(settingsWrites.at(-1), {account: 'personal', chat: 'one', model: 'qwen3.8-flash-next', reasoningEffort: 'high'});
+  await modelSelect.selectOption('plain');
+  await until(async () => await modelSelect.isEnabled() && await modelSelect.inputValue() === 'plain', 'unsupported thinking model');
+  assert.equal(await thinkingSelect.isDisabled(), true);
+  await modelSelect.selectOption('qwen3.8-flash-next');
+  await until(() => modelSelect.isEnabled(), 'restore model');
+  await thinkingSelect.selectOption('high');
+  await until(() => modelSelect.isEnabled(), 'restore effort');
+  failSettings = true;
+  await modelSelect.selectOption('gpt-6-luna');
+  await page.getByRole('alert').filter({hasText: 'No se pudo guardar el modelo'}).waitFor();
+  assert.equal(await modelSelect.inputValue(), 'qwen3.8-flash-next', 'failed save changed the confirmed model');
+  await page.getByRole('button', {name: 'Recargar', exact: true}).click();
+  await until(() => modelSelect.isEnabled(), 'settings recovery');
   assert.equal(await page.locator('#ai-allow-propose').count(), 0, 'the proposal permission checkbox is still mounted');
   assert.equal(await page.locator('.ai-bubble-in .ai-bubble-text').first().innerText(), 'Respuesta previa', 'the agent reply did not render as an incoming bubble');
   assert.equal(await page.locator('.ai-bubble-out').first().innerText(), 'Consulta previa', 'the owner turn did not render as an outgoing bubble');
@@ -186,6 +227,8 @@ try {
   await page.locator('.chat-item').nth(1).click();
   await page.getByText('Escribe para consultar sobre esta conversación.').waitFor();
   assert.equal(await page.locator('.ai-bubble').count(), 0, 'bubbles leaked between chats');
+  await until(() => modelSelect.isEnabled(), 'second chat settings');
+  assert.equal(await modelSelect.inputValue(), 'gpt-6-luna', 'model leaked between chats');
 
   // Held turn: optimistic bubble, cleared composer, temporary receipt, and the
   // owner can leave/return or type the next draft without losing anything.
@@ -198,6 +241,8 @@ try {
   await page.locator('.ai-bubble-out').filter({hasText: 'Resume el chat'}).waitFor();
   assert.equal(await page.locator('#ai-prompt').inputValue(), '', 'the composer kept the sent text instead of clearing optimistically');
   await page.locator('.ai-activity').filter({hasText: 'Pensando'}).waitFor();
+  assert.equal(await modelSelect.isDisabled(), true, 'model can change during a turn');
+  assert.deepEqual(turns.at(-1).settings, {model: 'qwen3.8-flash-next', reasoningEffort: 'high'});
   assert.equal(await page.locator('#ai-stop').isVisible(), true, 'the panel omitted the server stop control while answering');
   assert.equal(await page.locator('.ai-typing').count(), 1, 'the typing receipt is not part of the activity row');
 
@@ -274,7 +319,7 @@ try {
   assert.equal(await page.locator('#message').inputValue(), '', 'the draft arrived before the answer');
   await settleTurn();
   await until(() => draftTurns('personal:one') === draftTurnsBefore + 1, 'Proponer mensaje to ask the session once');
-  assert.deepEqual(turns.filter(turn => turn.key === 'personal:one').at(-1), {key: 'personal:one', message: DRAFT_INSTRUCTION, allowPropose: true, allowSend: false, turnId: turns.filter(turn => turn.key === 'personal:one').at(-1).turnId}, 'Proponer mensaje asked another chat or requested direct sending');
+  assert.deepEqual(turns.filter(turn => turn.key === 'personal:one').at(-1), {key: 'personal:one', settings: {model: 'qwen3.8-flash-next', reasoningEffort: 'high'}, message: DRAFT_INSTRUCTION, allowPropose: true, allowSend: false, turnId: turns.filter(turn => turn.key === 'personal:one').at(-1).turnId}, 'Proponer mensaje asked another chat or requested direct sending');
   assert.equal(await page.locator('#message').inputValue(), reply, 'the proposal was not written as a draft');
   assert.equal(directSends, 0, 'Proponer mensaje sent a WhatsApp message');
   assert.equal(await page.locator('#ai-panel').isVisible(), false, 'Proponer mensaje opened the panel');
@@ -477,6 +522,8 @@ try {
   await page.getByText('Escribe para consultar sobre esta conversación.').waitFor();
   assert.equal(await page.getByText('Respuesta previa').count(), 0, 'history leaked across accounts');
   assert.equal(await page.locator('.ai-proposal').count(), 0, 'proposals leaked into another account');
+  await until(() => modelSelect.isEnabled(), 'second account settings');
+  assert.equal(await modelSelect.inputValue(), 'gpt-6-luna', 'model leaked between accounts');
   await closePanel();
 
   await page.setViewportSize({width: 390, height: 844});
@@ -493,6 +540,24 @@ try {
   await page.locator('.chat-item').first().click();
   assert.equal(await page.locator('#send').isDisabled(), true, 'sending stayed enabled without the server gate');
   assert.equal(await page.locator('#suggest').isEnabled(), true, 'Proponer mensaje requires the send gate to draft a message');
+  await openPanel();
+  await until(() => modelSelect.isEnabled(), 'reloaded settings');
+  assert.equal(await modelSelect.inputValue(), 'qwen3.8-flash-next', 'model was not restored after reload');
+  assert.equal(await thinkingSelect.inputValue(), 'high', 'thinking was not restored after reload');
+  await shot('private-agent-model-settings-desktop.png');
+  let releaseSettings;
+  holdSettings = new Promise(resolve => { releaseSettings = resolve; });
+  const beforeSavedDraft = turns.length;
+  await thinkingSelect.selectOption('none');
+  await page.getByRole('status').filter({hasText: 'Guardando'}).waitFor();
+  await page.locator('#suggest').click();
+  await sleep(100);
+  assert.equal(turns.length, beforeSavedDraft, 'Proponer mensaje dispatched before saving settings');
+  releaseSettings();
+  holdSettings = null;
+  await until(() => turns.length === beforeSavedDraft + 1, 'draft after settings save');
+  assert.deepEqual(turns.at(-1).settings, {model: 'qwen3.8-flash-next', reasoningEffort: 'none'}, 'draft ignored the saved settings');
+  await until(async () => await page.locator('#suggest').getAttribute('aria-busy') === 'false', 'saved settings draft completion');
   assert.equal(directSends, 0, 'a draft was sent to WhatsApp without the owner');
 
   assert.deepEqual(errors, []);

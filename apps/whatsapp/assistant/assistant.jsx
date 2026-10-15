@@ -69,6 +69,13 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
   const [readingImages, setReadingImages] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stoppedNotice, setStoppedNotice] = useState(false);
+  const [settings, setSettings] = useState(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsProblem, setSettingsProblem] = useState('');
+  const settingsRequest = useRef(0);
+  const settingsSave = useRef(null);
+  const settingsUncertain = useRef(false);
   const turnStateRef = useRef(null);
   const fileRef = useRef(null);
   const [failedTurn, setFailedTurn] = useState(null);
@@ -95,6 +102,47 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
   useEffect(() => { api.hasDraft = Boolean(prompt || images.length || readingImages); }, [api, prompt, images.length, readingImages]);
 
   const shownPrompt = useCallback(text => (draftPrompt && text === draftPrompt && draftLabel ? draftLabel : text), [draftLabel, draftPrompt]);
+
+  const loadSettings = useCallback(async () => {
+    if (!ctx.account || !ctx.chat || settingsSave.current) return;
+    const requestId = ++settingsRequest.current;
+    setSettingsLoading(true);
+    setSettingsProblem('');
+    try {
+      const params = new URLSearchParams({account: ctx.account, chat: ctx.chat});
+      const result = await request(`/api/ai/settings?${params}`);
+      if (mountedRef.current && requestId === settingsRequest.current) { setSettings(result); settingsUncertain.current = false; }
+    } catch (error) {
+      if (mountedRef.current && requestId === settingsRequest.current) setSettingsProblem(error.message);
+    } finally {
+      if (mountedRef.current && requestId === settingsRequest.current) setSettingsLoading(false);
+    }
+  }, [ctx.account, ctx.chat, request]);
+
+  useEffect(() => {
+    if (active) void loadSettings();
+    return () => { settingsRequest.current++; };
+  }, [active, ctx.version, loadSettings]);
+
+  const saveSettings = (model, reasoningEffort) => {
+    if (settingsSave.current || api.pending || running || failedTurn || loading || settingsLoading) return;
+    settingsRequest.current++;
+    setSettingsSaving(true);
+    setSettingsProblem('');
+    const pending = request('/api/ai/settings', {account: ctx.account, chat: ctx.chat, model, reasoningEffort}).then(result => {
+      settingsUncertain.current = false;
+      if (mountedRef.current) setSettings(result);
+    }).catch(error => {
+      settingsUncertain.current = true;
+      if (mountedRef.current) setSettingsProblem(error.message);
+      throw error;
+    }).finally(() => {
+      settingsSave.current = null;
+      if (mountedRef.current) setSettingsSaving(false);
+    });
+    settingsSave.current = pending;
+    void pending.catch(() => {});
+  };
 
   const loadProposals = useCallback(async () => {
     if (!ctx.account || !ctx.chat) return;
@@ -211,6 +259,9 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     };
     let partial = '';
     try {
+      // Composer suggestions share this path and must wait for a settings save.
+      await settingsSave.current;
+      if (settingsUncertain.current) throw new Error('Recarga la configuración del agente antes de enviar.');
       await loadHistory();
       if (turnState.cancelled) return '';
       turnState.dispatched = true;
@@ -367,7 +418,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     finally { setReadingImages(false); }
   };
 
-  const runtime = useExternalStoreRuntime({messages, onNew, onCancel: stopTurn, convertMessage: message => message, isRunning: running, isSendDisabled: !ctx.chat || loading || running || failedTurn?.uncertain});
+  const runtime = useExternalStoreRuntime({messages, onNew, onCancel: stopTurn, convertMessage: message => message, isRunning: running, isSendDisabled: !ctx.chat || loading || settingsSaving || settingsUncertain.current || running || failedTurn?.uncertain});
   const lastAnswer = [...messages].reverse().find(message => message.role === 'assistant');
   const lastReply = lastAnswer?.status?.type === 'incomplete' ? '' : lastAnswer?.content[0]?.text || '';
   const retryTurn = () => {
@@ -378,7 +429,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
   const submit = event => {
     event.preventDefault();
     const text = prompt.trim();
-    if ((text || images.length) && !readingImages && !running && !loading) onNew({role: 'user', content: [{type: 'text', text}]}).catch(() => {});
+    if ((text || images.length) && !readingImages && !running && !loading && !settingsSave.current && !settingsUncertain.current) onNew({role: 'user', content: [{type: 'text', text}]}).catch(() => {});
   };
   const onKeyDown = event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -397,10 +448,25 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
   useEffect(() => { if (active) scrollToLatest(); }, [active, messages, activity, running, loading, scrollToLatest]);
 
   const emptyNotice = !ctx.chat ? 'Selecciona una conversación para empezar.' : 'Escribe para consultar sobre esta conversación.';
+  const models = settings?.models || [];
+  const thinkingOptions = models.find(model => model.id === settings?.model)?.reasoningEfforts || [];
+  const settingsDisabled = !ctx.chat || !settings || loading || settingsLoading || settingsSaving || running || Boolean(failedTurn);
 
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="ai-thread" ref={threadRef}>
       <ThreadPrimitive.Root className="ai-conversation">
+        <div className="ai-settings" aria-label="Configuración del agente" aria-busy={settingsLoading || settingsSaving}>
+          <label>Modelo<select aria-label="Modelo" value={settings?.model || ''} disabled={settingsDisabled || !models.length} onChange={event => {
+            const model = models.find(item => item.id === event.target.value);
+            const effort = model?.reasoningEfforts.some(item => item.value === settings.reasoningEffort) ? settings.reasoningEffort : 'default';
+            saveSettings(event.target.value, effort);
+          }}>{!models.length && <option value="">{settingsLoading ? 'Cargando…' : 'No disponible'}</option>}{models.map(model => <option key={model.id} value={model.id}>{model.label || model.id}</option>)}</select></label>
+          <label>Thinking<select aria-label="Thinking" value={settings?.reasoningEffort || 'default'} disabled={settingsDisabled || thinkingOptions.length < 2} onChange={event => saveSettings(settings.model, event.target.value)}>
+            {!thinkingOptions.length && <option value="default">Predeterminado</option>}{thinkingOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select></label>
+          {(settingsLoading || settingsSaving) && <span className="ai-settings-status" role="status">{settingsSaving ? 'Guardando…' : 'Cargando…'}</span>}
+          {settingsProblem && <div className="ai-settings-error" role="alert">{settingsProblem} <button type="button" disabled={settingsSaving || settingsLoading} onClick={() => void loadSettings()}>Recargar</button></div>}
+        </div>
         <ThreadPrimitive.Viewport className="ai-history" aria-label="Conversación con Social Media Agent" onScroll={event => {
           const pane = event.currentTarget;
           followLatest.current = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 80;
@@ -440,7 +506,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
             const files = Array.from(event.clipboardData?.files || []);
             if (files.length) { event.preventDefault(); void addImages(files); }
           }} placeholder="Escribe un mensaje" rows="1" disabled={!ctx.chat || loading} />
-          {running || failedTurn?.uncertain ? <button id="ai-stop" className="ai-send ai-stop" type="button" disabled={stopping} onClick={stopTurn} aria-label="Detener respuesta">{stopping ? '…' : '■'}</button> : <button id="ai-send" className="ai-send" type="submit" disabled={!ctx.chat || loading || running || readingImages || (!prompt.trim() && !images.length)} aria-label="Enviar mensaje"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d={SEND_PATH}/></svg></button>}
+          {running || failedTurn?.uncertain ? <button id="ai-stop" className="ai-send ai-stop" type="button" disabled={stopping} onClick={stopTurn} aria-label="Detener respuesta">{stopping ? '…' : '■'}</button> : <button id="ai-send" className="ai-send" type="submit" disabled={!ctx.chat || loading || settingsSaving || settingsUncertain.current || running || readingImages || (!prompt.trim() && !images.length)} aria-label="Enviar mensaje"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d={SEND_PATH}/></svg></button>}
         </form>
       </ThreadPrimitive.Root>
     </div>
