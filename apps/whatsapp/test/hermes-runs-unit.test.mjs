@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {stopHermesRun, hermesImages} from '../lib/hermes-runs.mjs';
+import {stopHermesRun, hermesImages, hermesRunFailure, safeHermesRunText} from '../lib/hermes-runs.mjs';
 
 test('a stop acceptance without terminal status never claims cancellation', async () => {
   const calls = [];
@@ -17,4 +17,21 @@ test('image validation rejects unsupported schemes, malformed base64 and excessi
   }
   const bytes = Buffer.alloc(5 * 1024 * 1024).toString('base64');
   assert.throws(() => hermesImages([image(`data:image/png;base64,${bytes}`), image(`data:image/png;base64,${bytes}`)]), error => error.status === 413);
+});
+
+test('only exact pre-execution provider errors without observed work authorize retry', () => {
+  const error = "\u26a0\ufe0f Provider authentication failed: Unknown provider 'old-provider'. Check 'hermes model' for available providers, or run 'hermes doctor' to diagnose config issues.";
+  assert.equal(hermesRunFailure({error}).retryable, true);
+  for (const run of [{error: 'Unknown provider'}, {error: error + ' secret'}, {error, output: 'Action done'}, {error, tool_calls: [{}]}]) {
+    assert.equal(hermesRunFailure(run).retryable, false);
+  }
+  assert.equal(hermesRunFailure({error}, {toolActivity: true}).retryable, false);
+  assert.equal(hermesRunFailure({error}, {partialText: 'Started'}).retryable, false);
+});
+
+test('recovered run text redacts expired capabilities from earlier attempts', () => {
+  const payload = Buffer.from(JSON.stringify({account: 'personal', chat: 'contact', turn: 'old', exp: 10})).toString('base64url');
+  const token = `${payload}.${'a'.repeat(43)}`;
+  assert.equal(safeHermesRunText(`Answer ${token}`), 'Answer [redacted capability]');
+  assert.equal(safeHermesRunText('Ordinary answer'), 'Ordinary answer');
 });

@@ -354,3 +354,154 @@ test('stop recovers a run after a lost event transport and persists its cancelle
   assert.equal((await readAgentStream(await request(body))).cancelled, true);
   assert.equal(submissions, 1);
 });
+
+const unknownProvider = "\u26a0\ufe0f Provider authentication failed: Unknown provider 'openclaw-litellm'. Check 'hermes model' for available providers, or run 'hermes doctor' to diagnose config issues.";
+
+test('terminal provider failure is persisted and only an explicit safe retry submits with a fresh run key', async t => {
+  const submissions = [];
+  const {app, request} = await fixture(t, async (url, options) => {
+    if (url.endsWith('/runs')) {
+      submissions.push({key: options.headers['Idempotency-Key'], body: JSON.parse(options.body)});
+      return Response.json({run_id: submissions.length === 1 ? 'run_failed' : 'run_retry'});
+    }
+    if (url.endsWith('/events')) return new Response(url.includes('run_failed') ? runFrame('run.failed', {error: unknownProvider}) : runFrame('run.completed', {output: 'Delivered once', completed: true}));
+    return Response.json(url.includes('run_failed') ? {run_id: 'run_failed', session_id: 'same-session', status: 'failed', error: unknownProvider} : {run_id: 'run_retry', status: 'completed', output: 'Delivered once'});
+  }, {runs: true});
+  const images = [{name: 'original-photo.png', url: 'data:image/png;base64,iVBORw0KGgo='}, {name: 'second-photo.png', url: 'data:image/png;base64,YQ=='}];
+  const body = {...command, message: 'Envia el mensaje', allowSend: true, turnId: tokenOne, images};
+  const failed = await readAgentStream(await request(body));
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.retryable, true);
+  assert.match(failed.error, /proveedor desconocido/);
+  let saved = await app.sessions.canonical('personal', 'contact', false);
+  const requestId = saved.directSendAttempts[0].requestId;
+  assert.equal(saved.messages[1].status, 'failed');
+  assert.equal(saved.messages[1].turnId, tokenOne);
+  assert.deepEqual(saved.messages[1].retryImageNames, images.map(image => image.name));
+  assert(!JSON.stringify(saved.messages[1]).includes('data:image/'), 'image metadata does not duplicate image bytes');
+  const restoredImages = saved.messages[0].content.filter(part => part.type === 'image_url').map((part, index) => ({name: saved.messages[1].retryImageNames[index], url: part.image_url.url}));
+  assert.deepEqual(restoredImages, images);
+  assert.equal((await readAgentStream(await request(body))).status, 'failed');
+  assert.equal((await app.sessions.canonical('personal', 'contact', false)).activeHermesRun, undefined);
+  const stopped = await (await request(body, '/api/ai/stop')).json();
+  assert.equal(stopped.status, 'failed', 'stop must find the run in its ledger after terminal cleanup');
+  assert.equal(submissions.length, 1);
+  assert.equal((await readAgentStream(await request({...body, images: restoredImages, retryFailedRun: true}))).text, 'Delivered once');
+  assert.equal((await readAgentStream(await request(body))).text, 'Delivered once');
+  assert.equal(submissions.length, 2);
+  assert.notEqual(submissions[0].key, submissions[1].key);
+  saved = await app.sessions.canonical('personal', 'contact', false);
+  assert.equal(saved.directSendAttempts[0].requestId, requestId);
+  assert.equal(saved.messages.length, 2, 'retry replaces the failed answer without duplicating the owner turn');
+  const grant = submissions[1].body.instructions.match(/capability for this turn: ([\w.-]+)/)[1];
+  assert.equal(JSON.parse(Buffer.from(grant.split('.')[0], 'base64url')).requestId, requestId);
+});
+
+test('retry recovers a completed run after event loss without another POST or duplicate transcript', async t => {
+  let submissions = 0;
+  const {app, request} = await fixture(t, async url => {
+    if (url.endsWith('/runs')) {submissions++; return Response.json({run_id: 'run_complete_lost'});}
+    if (url.endsWith('/events')) return new Response(new ReadableStream({start(controller) {controller.error(new Error('lost'));}}));
+    return Response.json({run_id: 'run_complete_lost', session_id: 'recovered', status: 'completed', output: 'Recovered answer'});
+  }, {runs: true});
+  const body = {...command, turnId: tokenOne};
+  await assert.rejects(readAgentStream(await request(body)), /confirmada/);
+  assert.equal((await readAgentStream(await request(body))).text, 'Recovered answer');
+  assert.equal((await readAgentStream(await request(body))).text, 'Recovered answer');
+  assert.equal(submissions, 1);
+  assert.equal((await app.sessions.canonical('personal', 'contact', false)).messages.length, 2);
+});
+
+test('running, unknown, missing and unresolved submission states never authorize another POST', async t => {
+  for (const status of ['running', 'unknown', 'missing', 'submissionPending']) await t.test(status, async t => {
+    let submissions = 0;
+    const {app, request} = await fixture(t, async url => {
+      if (url.endsWith('/runs')) {submissions++; return Response.json({run_id: 'run_uncertain'});}
+      if (url.endsWith('/events')) return new Response(new ReadableStream({start(controller) {controller.error(new Error('lost'));}}));
+      return status === 'missing' ? new Response('', {status: 404}) : Response.json({run_id: 'run_uncertain', status});
+    }, {runs: true});
+    const body = {...command, turnId: tokenOne};
+    await assert.rejects(readAgentStream(await request(body)), /confirmada/);
+    if (status === 'submissionPending') {
+      const saved = await app.sessions.canonical('personal', 'contact', false);
+      delete saved.directSendAttempts[0].runId;
+      saved.directSendAttempts[0].submissionPending = true;
+      await app.sessions.save(saved);
+    }
+    await assert.rejects(readAgentStream(await request({...body, retryFailedRun: true})), /confirmada|HTTP 404/);
+    assert.equal(submissions, 1);
+  });
+});
+
+test('generic terminal failure does not reveal its error or permit resubmission', async t => {
+  let submissions = 0;
+  const {request} = await fixture(t, async url => {
+    if (url.endsWith('/runs')) {submissions++; return Response.json({run_id: 'run_tool_failed'});}
+    if (url.endsWith('/events')) return new Response(runFrame('tool.started', {tool: 'terminal'}) + runFrame('run.failed', {error: 'secret-provider-token'}));
+    return Response.json({run_id: 'run_tool_failed', status: 'failed', error: 'secret-provider-token'});
+  }, {runs: true});
+  const body = {...command, turnId: tokenOne};
+  for (const retryFailedRun of [false, true]) {
+    const failed = await readAgentStream(await request({...body, retryFailedRun}));
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.retryable, false);
+    assert(!JSON.stringify(failed).includes('secret-provider-token'));
+  }
+  assert.equal(submissions, 1);
+});
+
+test('an immediate same-turn retry survives old capability cleanup and blocks duplicate submissions', async t => {
+  let releaseCleanup;
+  const cleanup = new Promise(resolve => {releaseCleanup = resolve;});
+  t.after(() => releaseCleanup());
+  let submits = 0, nextController;
+  const {request} = await fixture(t, async url => {
+    if (url.endsWith('/runs')) {submits++; return Response.json({run_id: submits === 1 ? 'run_first' : 'run_second'});}
+    if (url.endsWith('/events')) return url.includes('run_first') ? new Response(runFrame('run.failed', {error: unknownProvider})) : new Response(new ReadableStream({start(controller) {nextController = controller;}}));
+    return Response.json(url.includes('run_first') ? {run_id: 'run_first', status: 'failed', error: unknownProvider} : {run_id: 'run_second', status: 'completed', output: 'Retry answer'});
+  }, {runs: true, revoke: () => cleanup});
+  const body = {...command, turnId: tokenOne};
+  assert.equal((await readAgentStream(await request(body))).status, 'failed');
+  const next = request({...body, retryFailedRun: true});
+  // Release the first turn's cleanup only after the next request has its own active slot.
+  const duplicate = await request({...body, retryFailedRun: true});
+  assert.equal(duplicate.status, 409);
+  releaseCleanup();
+  const response = await next;
+  while (!nextController) await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await request(body)).status, 409);
+  nextController.enqueue(encoder.encode(runFrame('run.completed', {output: 'Retry answer', completed: true})));
+  nextController.close();
+  assert.equal((await readAgentStream(response)).text, 'Retry answer');
+  assert.equal(submits, 2);
+});
+
+test('a delayed stop result from a failed run cannot overwrite its completed retry', async t => {
+  let releaseOldRead, oldReadStarted;
+  const oldReadGate = new Promise(resolve => {releaseOldRead = resolve;});
+  const oldRead = new Promise(resolve => {oldReadStarted = resolve;});
+  t.after(() => releaseOldRead());
+  let submissions = 0, pauseOldRead = false;
+  const {app, request} = await fixture(t, async url => {
+    if (url.endsWith('/runs')) {submissions++; return Response.json({run_id: submissions === 1 ? 'run_old' : 'run_new'});}
+    if (url.endsWith('/events')) return new Response(url.includes('run_old') ? runFrame('run.failed', {error: unknownProvider}) : runFrame('run.completed', {output: 'New answer', completed: true}));
+    if (url.endsWith('/run_old')) {
+      if (pauseOldRead) {pauseOldRead = false; oldReadStarted(); await oldReadGate;}
+      return Response.json({run_id: 'run_old', status: 'failed', session_id: 'old-session', error: unknownProvider});
+    }
+    return Response.json({run_id: 'run_new', status: 'completed', session_id: 'new-session', output: 'New answer'});
+  }, {runs: true});
+  const body = {...command, turnId: tokenOne};
+  assert.equal((await readAgentStream(await request(body))).status, 'failed');
+  pauseOldRead = true;
+  const stopped = request(body, '/api/ai/stop');
+  await oldRead;
+  assert.equal((await readAgentStream(await request({...body, retryFailedRun: true}))).text, 'New answer');
+  releaseOldRead();
+  assert.equal((await stopped).status, 409);
+  const saved = await app.sessions.canonical('personal', 'contact', false);
+  assert.equal(saved.hermesId, 'new-session');
+  assert.equal(saved.directSendAttempts[0].runId, 'run_new');
+  assert.equal(saved.directSendAttempts[0].answer, 'New answer');
+  assert.equal(saved.messages[1].content, 'New answer');
+});

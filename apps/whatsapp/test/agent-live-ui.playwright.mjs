@@ -71,11 +71,22 @@ const server = createServer(async (request, response) => {
       assert.match(String(body.turnId), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, 'live UI sent a non-UUID turnId');
       const key = `${body.account}:${body.chat}`;
       const attempt = chatRequests.filter(entry => entry.key === key && entry.message === body.message).length + 1;
-      chatRequests.push({key, message: body.message, turnId: body.turnId, allowPropose: body.allowPropose, allowSend: body.allowSend, attempt});
+      chatRequests.push({key, message: body.message, images: body.images, turnId: body.turnId, allowPropose: body.allowPropose, allowSend: body.allowSend, retryFailedRun: body.retryFailedRun, attempt});
       const sessionId = `session-${key}`;
       const remember = text => { const store = history.get(key) || []; store.push({role: 'user', content: body.message}, {role: 'assistant', content: text}); history.set(key, store); };
 
       if (body.message === 'JSONfallback') { remember('Respuesta por JSON'); return json({sessionId, text: 'Respuesta por JSON'}); }
+      if (body.message === 'CorteCompletado') {
+        remember('Respuesta recuperada sin reenvio');
+        return stream(response, [{event: 'activity', data: {phase: 'thinking', label: 'Pensando'}}]);
+      }
+      if (body.message === 'FalloProveedor' && attempt === 1 || body.message === 'FalloGeneral') {
+        history.set(key, [...(history.get(key) || []), {role: 'user', content: [{type: 'text', text: body.message}, ...(body.images || []).map(image => ({type: 'image_url', image_url: {url: image.url}}))], turnId: body.turnId}, {role: 'assistant', content: '', turnId: body.turnId, status: 'failed', error: 'No se pudo iniciar el agente', retryable: body.message === 'FalloProveedor', allowSend: body.allowSend, allowPropose: body.allowPropose, ...(body.message === 'FalloProveedor' ? {retryImageNames: (body.images || []).map(image => image.name)} : {})}]);
+        return stream(response, [
+          {event: 'activity', data: {phase: 'thinking', label: 'Pensando'}},
+          {event: 'result', data: {sessionId, status: 'failed', text: '', error: 'No se pudo iniciar el agente', retryable: body.message === 'FalloProveedor'}}
+        ]);
+      }
       if (body.message === 'Flujo' && attempt === 1) {
         remember('Parcial del resumen todavía sin cerrar y **final**.');
         const toTool = waitGate('flujo-tool');
@@ -148,6 +159,7 @@ const server = createServer(async (request, response) => {
     if (pathname === '/api/send') { sendCount++; return json({messageId: 'wa-x'}); }
     if (pathname === '/api/ai/session') { sessionCalls.push(key); return json({sessionId: `session-${key}`, messages: history.get(key) || []}); }
     if (pathname === '/api/ai/proposals') return json({proposals: []});
+    if (pathname === '/api/ai/stop') return json({stopped: true, status: 'completed'});
 
     const filename = path.resolve(publicDir, `.${pathname === '/' ? '/index.html' : pathname}`);
     if (!filename.startsWith(`${publicDir}${path.sep}`)) return response.writeHead(403).end();
@@ -247,16 +259,65 @@ try {
   await page.locator('#ai-panel .ai-error').filter({hasText: 'Hermes cortó la respuesta'}).waitFor();
   await page.locator('.ai-incomplete').filter({hasText: 'Respuesta incompleta'}).waitFor();
   assert.equal(await page.locator('.ai-activity').count(), 0, 'the receipt stayed after an SSE error');
+  assert.equal(await page.locator('#ai-stop').count(), 1, 'Stop disappeared while the execution status was uncertain');
   assert.equal(await page.locator('.ai-bubble-out').filter({hasText: 'ErrorParcial'}).count(), 1, 'the failed owner bubble duplicated');
   const firstTurnId = requestsFor('ErrorParcial').at(-1).turnId;
   await page.locator('#ai-panel .ai-error button', {hasText: 'Reintentar'}).click();
   await until(() => requestsFor('ErrorParcial').length === 2, 'the retry request');
   assert.equal(requestsFor('ErrorParcial').at(-1).turnId, firstTurnId, 'Reintentar changed the stable turnId');
+  assert.equal(requestsFor('ErrorParcial').at(-1).retryFailedRun, undefined, 'an uncertain transport failure authorized a new backend run');
   await page.locator('.ai-bubble-in').filter({hasText: 'Respuesta a ErrorParcial'}).last().waitFor();
   assert.equal(await page.locator('.ai-bubble-out').filter({hasText: 'ErrorParcial'}).count(), 1, 'the retry created a second owner bubble instead of reusing it');
   assert.equal(await page.locator('.ai-incomplete').count(), 0, 'the completed retry kept the incomplete marker');
   assert.equal(await page.locator('#ai-panel .ai-error').count(), 0, 'the error banner survived the successful retry');
   await shot('live-agent-retry-complete.png');
+
+  // Terminal failures clear thinking and authorize a new run only on an explicit safe retry.
+  await page.locator('#ai-panel input[type="file"]').setInputFiles({name: 'original-foto.png', mimeType: 'image/png', buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO9sAAAAASUVORK5CYII=', 'base64')});
+  await page.locator('.ai-attachment').waitFor();
+  await page.locator('#ai-prompt').fill('FalloProveedor');
+  await page.locator('#ai-prompt').press('Enter');
+  await page.locator('.ai-error').filter({hasText: 'No se pudo iniciar el agente'}).waitFor();
+  await page.locator('#ai-send').waitFor();
+  assert.equal(await page.locator('.ai-activity').count(), 0, 'terminal failure left a thinking receipt');
+  assert.equal(await page.locator('.ai-activity-details').count(), 0, 'terminal failure left stale thinking activity');
+  assert.equal(requestsFor('FalloProveedor').length, 1, 'terminal failure retried automatically');
+  const failedTurnId = requestsFor('FalloProveedor')[0].turnId;
+  await page.reload();
+  await page.locator('.chat-item').first().click();
+  await openPanel();
+  await page.locator('.ai-error').filter({hasText: 'No se pudo iniciar el agente'}).waitFor();
+  assert.equal(requestsFor('FalloProveedor').length, 1, 'history reload resubmitted a failed turn');
+  await page.locator('.ai-error button', {hasText: 'Reintentar'}).click();
+  await page.locator('.ai-bubble-in').filter({hasText: 'Respuesta a FalloProveedor'}).waitFor();
+  assert.equal(requestsFor('FalloProveedor')[1].turnId, failedTurnId, 'safe retry created a new owner turn');
+  assert.equal(requestsFor('FalloProveedor')[1].retryFailedRun, true, 'explicit safe retry did not authorize a replacement run');
+  assert.deepEqual(requestsFor('FalloProveedor')[1].images, requestsFor('FalloProveedor')[0].images.map(({name, url}) => ({name, url})), 'reload retry changed the original image name or payload');
+  assert.equal(await page.locator('.ai-bubble-out').filter({hasText: 'FalloProveedor'}).count(), 1);
+
+  await page.locator('#ai-prompt').fill('FalloGeneral');
+  await page.locator('#ai-prompt').press('Enter');
+  await page.locator('.ai-error').filter({hasText: 'No se pudo iniciar el agente'}).waitFor();
+  await page.locator('#ai-send').waitFor();
+  assert.equal(await page.locator('.ai-error button').count(), 0, 'generic terminal failure offered an unsafe retry');
+  assert.equal(await page.locator('.ai-activity').count(), 0, 'generic terminal failure left a spinner');
+  assert.equal(requestsFor('FalloGeneral').length, 1, 'generic failure dispatched again');
+  history.set('personal:one', [...history.get('personal:one'), {role: 'user', content: [{type: 'text', text: 'Imagen antigua'}, {type: 'image_url', image_url: {url: requestsFor('FalloProveedor')[0].images[0].url}}], turnId: failedTurnId}, {role: 'assistant', content: '', turnId: failedTurnId, status: 'failed', error: 'Fallo antiguo', retryable: true}]);
+  await page.reload();
+  await page.locator('.chat-item').first().click();
+  await openPanel();
+  await page.locator('.ai-error').filter({hasText: 'No se conservaron los datos originales'}).waitFor();
+  assert.equal(await page.locator('.ai-error button').count(), 0, 'legacy image turn offered retry without original names');
+  await shot('live-agent-terminal-failure.png');
+
+  await page.locator('#ai-prompt').fill('CorteCompletado');
+  await page.locator('#ai-prompt').press('Enter');
+  await page.locator('.ai-error').filter({hasText: 'La acción no está confirmada'}).waitFor();
+  await page.locator('#ai-stop').click();
+  await page.locator('.ai-bubble-in').filter({hasText: 'Respuesta recuperada sin reenvio'}).waitFor();
+  await page.locator('#ai-send').waitFor();
+  assert.equal(await page.locator('.ai-error').count(), 0, 'completed Stop left the uncertain error');
+  assert.equal(requestsFor('CorteCompletado').length, 1, 'completed Stop resubmitted the owner turn');
 
   // 7. Per-contact isolation: a hidden draft request only touches its own chat.
   await closePanel();

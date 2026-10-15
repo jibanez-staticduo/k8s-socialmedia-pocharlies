@@ -33,7 +33,7 @@ import { linkPreviewFromPayload } from './lib/link-preview.mjs';
 import { HermesStreamAccumulator, openSse, sseHeaders } from './lib/hermes-stream.mjs';
 import { createChangeBus } from './lib/change-bus.mjs';
 import { hermesApiBaseUrl, syncHermesModelLock } from './lib/hermes-model-lock.mjs';
-import { hermesImages, hermesUserContent, stopHermesRun, consumeHermesRun, terminalRun, cancelledHermesTranscript } from './lib/hermes-runs.mjs';
+import { hermesImages, hermesUserContent, stopHermesRun, readHermesRun, hermesRunFailure, settledHermesTranscript, safeHermesRunText, consumeHermesRun, terminalRun, cancelledHermesTranscript } from './lib/hermes-runs.mjs';
 import { communityJid, communityCreateBody, communityActionBody, publicCommunity, publicCommunityList, publicLinkedGroups } from './lib/communities.mjs';
 const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
@@ -2639,7 +2639,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           }
           await Promise.race([active.ready, new Promise(resolve => {const timer = setTimeout(resolve, 10000); timer.unref();})]);
         }
-        const runId = active?.runId || (session.activeHermesRun?.turnId === turnId ? session.activeHermesRun.runId : null);
+        const savedAttempt = session.directSendAttempts?.find(row => row.turnId === turnId);
+        const runId = active?.runId || (session.activeHermesRun?.turnId === turnId ? session.activeHermesRun.runId : null) || savedAttempt?.runId;
         if (!runId) {
           if (active?.submitting) throw fail(502, 'Hermes no ha confirmado la ejecucion; la cancelacion no esta confirmada.');
           if (active?.stopped) return json(200, {stopped: true, status: 'cancelled', turnId});
@@ -2648,13 +2649,18 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (attempt?.answer || attempt?.cancelled) return json(200, {stopped: true, status: attempt.cancelled ? 'cancelled' : 'completed', turnId});
           throw fail(404, 'Active turn not found');
         }
-        const result = await stopHermesRun({remote, base: hermesApiBaseUrl(env.HERMES_API_URL), headers: {authorization: `Bearer ${env.HERMES_API_KEY}`}, runId});
-        if (active) {active.stopResult = result; active.eventController?.abort();}
-        if (['cancelled', 'interrupted'].includes(result.status)) {
+        const runScope = {remote, base: hermesApiBaseUrl(env.HERMES_API_URL), headers: {authorization: `Bearer ${env.HERMES_API_KEY}`}, runId};
+        const current = await readHermesRun(runScope);
+        const result = terminalRun(current.status) ? current : await stopHermesRun(runScope);
+        if (active?.runId === runId) {active.stopResult = result; active.eventController?.abort();}
+        if (terminalRun(result.status)) {
           const settle = async saved => {
-            if (result.session_id) saved.hermesId = result.session_id;
             const attempt = saved.directSendAttempts?.find(row => row.turnId === turnId);
-            cancelledHermesTranscript(saved, attempt, '', result.status);
+            if (attempt ? attempt.runId !== runId : saved.activeHermesRun?.runId !== runId) throw fail(409, 'El turno ya tiene otra ejecucion. Comprueba su estado actual.');
+            if (result.session_id) saved.hermesId = result.session_id;
+            if (['cancelled', 'interrupted'].includes(result.status)) cancelledHermesTranscript(saved, attempt, '', result.status);
+            else if (result.status === 'failed') settledHermesTranscript(saved, attempt, hermesRunFailure(result, attempt));
+            else if (typeof result.output === 'string') settledHermesTranscript(saved, attempt, {text: result.output});
             if (saved.activeHermesRun?.runId === runId) delete saved.activeHermesRun;
             await sessions.save(saved);
           };
@@ -2662,7 +2668,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           // A concurrent save of active.session could rename an older empty snapshot last.
           await sessions.serial(scopeId, async () => settle(await sessions.read(session.id)));
         }
-        return json(200, {stopped: true, status: result.status, turnId});
+        return json(200, {stopped: true, status: result.status, turnId, ...(result.status === 'failed' ? hermesRunFailure(result, savedAttempt) : {})});
       }
       if (req.method === 'GET' && path === '/api/ai/sessions') {
         if (url.searchParams.get('global') === 'true') throw fail(400, 'A WhatsApp chat is required');
@@ -2745,7 +2751,12 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const heartbeat = sse ? setInterval(() => sse.comment(), HERMES_STREAM_HEARTBEAT_MS) : null;
         heartbeat?.unref();
         sse?.event('activity', { phase: 'thinking', label: 'Pensando' });
-        const deliver = result => { sse?.event('result', result); return result; };
+        const deliver = result => {
+          // A saved result can be replayed while the previous capability cleanup finishes.
+          if (activeHermesTurns.get(activeKey) === active) activeHermesTurns.delete(activeKey);
+          sse?.event('result', result);
+          return result;
+        };
         try {
         const result = await sessions.serial(scopeId, async () => {
           const session = await hermesSessionFor(a, conversation);
@@ -2764,12 +2775,43 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             directAttempt = session.directSendAttempts.find(attempt => clientTurnId ? attempt.turnId === clientTurnId : attempt.digest === digest);
             if (directAttempt && directAttempt.digest !== digest) throw fail(409, 'Este turno ya se usó para otra instrucción.');
             if (directAttempt?.allowSend !== undefined && directAttempt.allowSend !== allowSend) throw fail(409, 'Los permisos de este turno han cambiado. Inicia otra consulta.');
-            if ((directAttempt?.runId || directAttempt?.submissionPending) && !directAttempt.answer && !directAttempt.cancelled) throw fail(409, 'La ejecucion anterior no esta confirmada. Detenla o comprueba su estado antes de repetir.');
+            if (directAttempt?.allowPropose !== undefined && directAttempt.allowPropose !== (body.allowPropose === true)) throw fail(409, 'Los permisos de este turno han cambiado. Inicia otra consulta.');
+            if (directAttempt?.runId && directAttempt.answer === undefined && !directAttempt.cancelled) {
+              const previous = await readHermesRun({remote, base: hermesApiBaseUrl(env.HERMES_API_URL), headers: {authorization: `Bearer ${env.HERMES_API_KEY}`}, runId: directAttempt.runId});
+              if (previous.session_id) session.hermesId = previous.session_id;
+              if (!terminalRun(previous.status)) throw fail(409, 'La ejecucion anterior no esta confirmada. Detenla o comprueba su estado antes de repetir.');
+              if (previous.status === 'completed') {
+                if (typeof previous.output !== 'string') throw fail(502, 'Hermes ha completado el turno, pero no ha confirmado su respuesta.');
+                settledHermesTranscript(session, directAttempt, {text: previous.output});
+              } else if (['cancelled', 'interrupted'].includes(previous.status)) {
+                cancelledHermesTranscript(session, directAttempt, '', previous.status);
+              } else {
+                const failure = hermesRunFailure(previous, directAttempt);
+                settledHermesTranscript(session, directAttempt, failure);
+                if (body.retryFailedRun === true && failure.retryable) {
+                  if (allowSend && now - directAttempt.createdAt >= SEND_LEDGER_TTL_MS) throw fail(409, 'El plazo seguro de reintento ha caducado. Comprueba el chat.');
+                  (directAttempt.previousRunIds ||= []).push(directAttempt.runId);
+                  delete directAttempt.runId;
+                  delete directAttempt.status;
+                  delete directAttempt.error;
+                  delete directAttempt.retryable;
+                  delete directAttempt.submissionPending;
+                  directAttempt.runSubmissionKey = randomUUID();
+                } else {
+                  if (session.activeHermesRun?.runId === directAttempt.runId) delete session.activeHermesRun;
+                  await sessions.save(session);
+                  return deliver({sessionId: session.id, text: '', ...failure});
+                }
+              }
+              if (session.activeHermesRun?.runId === previous.run_id) delete session.activeHermesRun;
+              await sessions.save(session);
+            }
+            if ((directAttempt?.runId || directAttempt?.submissionPending) && directAttempt.answer === undefined && !directAttempt.cancelled) throw fail(409, 'La ejecucion anterior no esta confirmada. Detenla o comprueba su estado antes de repetir.');
             if (directAttempt?.cancelled) return deliver({sessionId: session.id, text: directAttempt.partialText || '', status: 'cancelled', cancelled: true});
-            if (directAttempt?.answer) return deliver({ sessionId: session.id, text: directAttempt.answer });
+            if (directAttempt?.answer !== undefined) return deliver({ sessionId: session.id, text: directAttempt.answer });
             if (allowSend && directAttempt && now - directAttempt.createdAt >= SEND_LEDGER_TTL_MS) throw fail(409, 'El envío anterior no está confirmado y el plazo de reintento ha caducado. Comprueba el chat.');
             if (!directAttempt) {
-              directAttempt = { digest, requestId: randomUUID(), createdAt: now, allowSend, userContent: hermesUserContent(message, images), ...(clientTurnId ? {turnId: clientTurnId} : {}) };
+              directAttempt = { digest, requestId: randomUUID(), createdAt: now, allowSend, allowPropose: body.allowPropose === true, userContent: hermesUserContent(message, images), imageNames: images.map(image => image.name), ...(clientTurnId ? {turnId: clientTurnId} : {}) };
               session.directSendAttempts.push(directAttempt);
             }
             requestId = directAttempt.requestId;
@@ -2811,7 +2853,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
               if (active.stopped) return deliver({sessionId: session.id, text: '', status: 'cancelled', cancelled: true});
               active.submitting = true;
               if (directAttempt) {directAttempt.submissionPending = true; await sessions.save(session);}
-              const submitted = await (await remote(`${base}/v1/runs`, {method: 'POST', headers: {...headers, ...(requestId ? {'Idempotency-Key': requestId} : {})}, body: JSON.stringify({model, ...(env.HERMES_PROVIDER ? {provider: env.HERMES_PROVIDER} : {}), instructions: system, ...(session.hermesId ? {session_id: session.hermesId} : {}), input: [...(session.hermesId ? [] : session.messages.slice(-30)), {role: 'user', content: user}]})})).json();
+              const submitted = await (await remote(`${base}/v1/runs`, {method: 'POST', headers: {...headers, ...(requestId ? {'Idempotency-Key': directAttempt?.runSubmissionKey || requestId} : {})}, body: JSON.stringify({model, ...(env.HERMES_PROVIDER ? {provider: env.HERMES_PROVIDER} : {}), instructions: system, ...(session.hermesId ? {session_id: session.hermesId} : {}), input: [...(session.hermesId ? [] : session.messages.slice(-30)), {role: 'user', content: user}]})})).json();
               if (typeof submitted.run_id !== 'string' || !/^run_[a-zA-Z0-9_-]+$/.test(submitted.run_id)) throw fail(502, 'Hermes no ha confirmado la ejecucion.');
               active.runId = submitted.run_id;
               active.submitting = false;
@@ -2825,15 +2867,25 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
               let result;
               try {
                 const response = await remote(`${base}/v1/runs/${active.runId}/events`, {headers, signal: active.eventController.signal}, HERMES_TURN_TIMEOUT_MS);
-                result = await consumeHermesRun({response, capability, signal: active.eventController.signal, onActivity: activity => sse?.event('activity', activity), onDelta: text => sse?.event('delta', {text})});
+                result = await consumeHermesRun({response, capability, signal: active.eventController.signal, onActivity: activity => {if (directAttempt) directAttempt.toolActivity = true; sse?.event('activity', activity);}, onDelta: text => {if (directAttempt) directAttempt.partialText = (directAttempt.partialText || '') + text; sse?.event('delta', {text});}});
               } catch (error) {
-                if (!active.stopResult) throw error;
+                if (!active.stopResult) {
+                  if (directAttempt) await sessions.save(session);
+                  throw error;
+                }
                 result = active.stopResult;
               }
               if (!terminalRun(result.status)) result = {...(active.stopResult || await (await remote(`${base}/v1/runs/${active.runId}`, {headers})).json()), partialText: result.partialText};
-              const status = active.stopResult || await (await remote(`${base}/v1/runs/${active.runId}`, {headers})).json();
+              const status = active.stopResult || await readHermesRun({remote, base, headers, runId: active.runId});
+              result = {...result, ...status};
               active.terminal = terminalRun(result.status);
               if (status.session_id) session.hermesId = status.session_id;
+              if (result.status === 'failed') {
+                const failure = hermesRunFailure({...result, ...status}, directAttempt);
+                settledHermesTranscript(session, directAttempt, failure);
+                await sessions.save(session);
+                return deliver({sessionId: session.id, text: '', ...failure});
+              }
               if (result.status === 'cancelled' || result.status === 'interrupted') {
                 cancelledHermesTranscript(session, directAttempt, result.partialText || '', result.status);
                 await sessions.save(session);
@@ -2867,16 +2919,17 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             if (!outcome.completed) throw fail(502, 'Hermes did not complete the session turn');
             const hermesId = outcome.sessionId || outcome.responseId || outcome.conversation;
             const rawAnswer = outcome.answer;
-            const answer = capability ? rawAnswer.replaceAll(capability, '[redacted capability]') : rawAnswer;
+            const answer = safeHermesRunText(capability ? rawAnswer.replaceAll(capability, '[redacted capability]') : rawAnswer);
             session.hermesId = hermesId;
             if (outcome.responseId) session.hermesResponseId = outcome.responseId;
             if (outcome.conversation) session.hermesConversation = outcome.conversation;
             if (!session.title) session.title = message.slice(0, 80);
-            session.messages.push({ role: 'user', content: hermesUserContent(message, images) }, { role: 'assistant', content: answer });
-            if (directAttempt) directAttempt.answer = answer;
+            if (directAttempt) settledHermesTranscript(session, directAttempt, {text: answer});
+            else session.messages.push({ role: 'user', content: hermesUserContent(message, images) }, { role: 'assistant', content: answer });
             await sessions.save(session);
             return deliver({ sessionId: session.id, text: answer });
           } finally {
+            if (directAttempt?.toolActivity || directAttempt?.partialText) await sessions.save(session);
             if (active.terminal && active.runId && session.activeHermesRun?.runId === active.runId) {
               delete session.activeHermesRun;
               await sessions.save(session);
@@ -2896,7 +2949,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           sse.event('error', {error: error.status ? error.message : 'Hermes no pudo completar la respuesta. La acción no está confirmada.'});
         } finally {
           runReady();
-          activeHermesTurns.delete(activeKey);
+          if (activeHermesTurns.get(activeKey) === active) activeHermesTurns.delete(activeKey);
           if (heartbeat) clearInterval(heartbeat);
           sse?.end();
         }

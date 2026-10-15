@@ -46,8 +46,15 @@ Set the deployment's `HERMES_API_URL` to the Fedora gateway URL ending in
 the default profile's API key for this path.
 
 Set `HERMES_DEFAULT_MODEL=gpt-6-luna` in the Compose `.env` to select the app's
-model independently of other Hermes conversations. Hermes can persist a model
-selection on an existing session; its official
+model independently of other Hermes conversations.
+The deployment's `HERMES_PROVIDER` must match a provider ID in the existing
+profile's `providers` map (for example `litellm`). It is not an API-key variable
+name: `OPENCLAW_LITELLM_API_KEY` can remain the credential variable after a
+provider has been renamed. A stale provider ID can be accepted by the session
+model-lock endpoint and still fail before model execution; verify an actual
+read-only turn after changing provider configuration.
+
+Hermes can persist a model selection on an existing session; its official
 `POST /api/sessions/{session_id}/model` endpoint changes that selection without
 replacing the session or losing history. The profile's default should match the
 app's model for requests that do not supply an explicit selection.

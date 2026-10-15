@@ -1912,7 +1912,12 @@ contracts:
     assistant response collected by the stream consumer and releasing the active run for the next turn.
     It never overwrites that
     response with an older empty snapshot. The path, scoped identity, confirmation and history
-    preservation are contract.'
+    preservation are contract. A saved run is read before issuing stop; confirmed completed or
+    failed runs are reconciled without another execution, including after active state cleanup.
+    Settlement checks the current ledger run under the session lock so an old stop cannot overwrite
+    a later retry. Failed results add sanitized error and retryable fields; only a proven unknown
+    provider failure before execution permits explicit retryFailedRun on the same owner turn,
+    preserving its delivery request ID and using a separate run-submission idempotency key.'
 - id: http.whatsapp-app.favicon.v1
   kind: http-route
   value: /favicon.ico

@@ -104,8 +104,8 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     if (requestId === proposalRequest.current) setProposals((result.proposals || []).filter(proposal => typeof proposal.id === 'string' && typeof proposal.text === 'string'));
   }, [ctx.account, ctx.chat, request]);
 
-  const loadHistory = useCallback((refresh = false) => {
-    if (historyPromise.current && (!refresh || historyLoading.current || api.pending || failedTurnRef.current)) return historyPromise.current;
+  const loadHistory = useCallback((refresh = false, reconcile = false) => {
+    if (historyPromise.current && (!refresh || historyLoading.current || !reconcile && (api.pending || failedTurnRef.current))) return historyPromise.current;
     if (!ctx.account || !ctx.chat) return Promise.resolve();
     const previousPromise = historyPromise.current;
     historyLoading.current = true;
@@ -115,16 +115,31 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
       if (!mountedRef.current) return;
       sessionIdRef.current = result.sessionId || 'chat';
       const history = (result.messages || []).filter(message => ['user', 'assistant'].includes(message.role) && (typeof message.content === 'string' || Array.isArray(message.content))).map((message, index) => ({
-        id: `${sessionIdRef.current}-${index}`,
+        id: message.turnId && message.role === 'user' ? `user-${message.turnId}` : message.turnId && message.role === 'assistant' ? `answer-user-${message.turnId}` : `${sessionIdRef.current}-${index}`,
         role: message.role,
         ...(message.role === 'assistant' && (message.cancelled || ['cancelled', 'interrupted'].includes(message.status)) ? {status: {type: 'incomplete', reason: 'cancelled'}} : {}),
-        content: typeof message.content === 'string' ? [{type: 'text', text: shownPrompt(message.content)}] : message.content.flatMap(part => part.type === 'text' ? [{type: 'text', text: shownPrompt(part.text || '')}] : part.type === 'image_url' && /^data:image\/(png|jpeg|webp|gif);base64,/.test(part.image_url?.url || '') ? [{type: 'image', image: part.image_url.url}] : [])
+        ...(message.role === 'assistant' && message.status === 'failed' ? {status: {type: 'incomplete', reason: 'error'}} : {}),
+        content: message.role === 'assistant' && message.status === 'failed' ? [{type: 'text', text: message.error || 'El agente no pudo completar la respuesta.'}] : typeof message.content === 'string' ? [{type: 'text', text: shownPrompt(message.content)}] : message.content.flatMap(part => part.type === 'text' ? [{type: 'text', text: shownPrompt(part.text || '')}] : part.type === 'image_url' && /^data:image\/(png|jpeg|webp|gif);base64,/.test(part.image_url?.url || '') ? [{type: 'image', image: part.image_url.url}] : [])
       }));
       // A draft request may start while the hidden panel has not loaded history yet.
       const replace = hasHistory.current;
       hasHistory.current = true;
       const pendingUserId = currentTurnRef.current;
       setMessages(previous => [...history, ...(replace ? previous.filter(item => item.id === pendingUserId) : previous)]);
+      const failed = result.messages?.at(-1);
+      if (!pendingUserId && failed?.role === 'assistant' && failed.status === 'failed') {
+        const owner = result.messages.find(message => message.role === 'user' && message.turnId === failed.turnId);
+        const parts = typeof owner?.content === 'string' ? [{type: 'text', text: owner.content}] : owner?.content || [];
+        const text = parts.filter(part => part.type === 'text').map(part => part.text || '').join('');
+        const imageParts = parts.filter(part => part.type === 'image_url');
+        const names = Array.isArray(failed.retryImageNames) ? failed.retryImageNames : [];
+        const imagesRestored = names.length === imageParts.length && names.every(name => typeof name === 'string' && name);
+        const attachments = imagesRestored ? imageParts.map((part, index) => ({name: names[index], url: part.image_url?.url})) : [];
+        setFailedTurn({text, retryable: Boolean(owner && failed.turnId && failed.retryable === true && imagesRestored), options: {userId: `user-${failed.turnId}`, images: attachments, allowSend: failed.allowSend === true, allowPropose: failed.allowPropose === true, retryFailedRun: true}});
+        setProblem(`${failed.error || 'El agente no pudo completar la respuesta.'}${imagesRestored ? '' : ' No se conservaron los datos originales de las imagenes. Adjuntalas de nuevo en un mensaje nuevo.'}`);
+        setActivity(null);
+        setActivityLog([]);
+      }
     }).catch(error => {
       historyPromise.current = previousPromise;
       throw error;
@@ -174,13 +189,13 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     if (pane && followLatest.current) pane.scrollTop = pane.scrollHeight;
   }, []);
 
-  const runTurn = useCallback(async (text, {allowPropose = true, allowSend = true, userId = `user-${crypto.randomUUID()}`, images = []} = {}) => {
+  const runTurn = useCallback(async (text, {allowPropose = true, allowSend = true, userId = `user-${crypto.randomUUID()}`, images = [], retryFailedRun = false} = {}) => {
     const message = String(text || '').trim();
     if (!message && !images.length) return '';
     if (!ctx.account || !ctx.chat) throw new Error('Selecciona una conversación para consultar.');
     const assistantId = `answer-${userId}`;
     currentTurnRef.current = userId;
-    const turnState = {userId, cancelled: false, dispatched: false, controller: new AbortController()};
+    const turnState = {userId, text: message, options: {allowPropose, allowSend, userId, images}, cancelled: false, dispatched: false, controller: new AbortController()};
     turnStateRef.current = turnState;
     setActivityLog([]);
     setStoppedNotice(false);
@@ -199,7 +214,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
       await loadHistory();
       if (turnState.cancelled) return '';
       turnState.dispatched = true;
-      const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, images, allowPropose, allowSend, stream: true, turnId: userId.replace(/^user-/, '')}, (event, payload) => {
+      const result = await request('/api/ai/chat', {account: ctx.account, chat: ctx.chat, message, images, allowPropose, allowSend, stream: true, turnId: userId.replace(/^user-/, ''), ...(retryFailedRun ? {retryFailedRun: true} : {})}, (event, payload) => {
         if (turnState.cancelled) return;
         if (event === 'activity' && payload && typeof payload.label === 'string') {
           setActivity(payload);
@@ -220,6 +235,14 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
           }
         }
       }, AbortSignal.any([turnState.controller.signal, AbortSignal.timeout(240000)]));
+      if (result.sessionId) sessionIdRef.current = result.sessionId;
+      if (result.status === 'failed') {
+        setFailedTurn({text: message, retryable: result.retryable === true, options: {allowPropose, allowSend, userId, images, retryFailedRun: true}});
+        setProblem(result.error || 'El agente no pudo completar la respuesta.');
+        setActivityLog([]);
+        setMessages(previous => previous.map(item => item.id === assistantId ? {...item, status: {type: 'incomplete', reason: 'error'}} : item));
+        return '';
+      }
       if (turnState.cancelled || result.cancelled || ['cancelled', 'interrupted'].includes(result.status)) {
         turnState.cancelled = true;
         setStoppedNotice(true);
@@ -233,12 +256,13 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
       return answer;
     } catch (error) {
       if (turnState.cancelled || error.code === 'cancelled') return '';
-      setFailedTurn({text: message, options: {allowPropose, allowSend, userId, images}});
+      turnState.uncertain = turnState.dispatched;
+      setFailedTurn({text: message, retryable: true, uncertain: turnState.uncertain, options: {allowPropose, allowSend, userId, images}});
       setProblem(error.message);
       if (partial) setMessages(previous => previous.map(item => item.id === assistantId ? {...item, status: {type: 'incomplete', reason: 'error'}} : item));
       throw error;
     } finally {
-      if (turnStateRef.current === turnState) turnStateRef.current = null;
+      if (turnStateRef.current === turnState && !turnState.uncertain) turnStateRef.current = null;
       currentTurnRef.current = null;
       setActivity(null);
     }
@@ -267,7 +291,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
 
   const onNew = useCallback(message => {
     const text = message.content.filter(part => part.type === 'text').map(part => part.text).join('').trim();
-    if ((!text && !images.length) || submittingRef.current) return Promise.resolve();
+    if ((!text && !images.length) || submittingRef.current || failedTurnRef.current?.uncertain) return Promise.resolve();
     submittingRef.current = true;
     const attachments = images;
     setImages([]);
@@ -285,12 +309,36 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     setStopping(true);
     try {
       const result = turn.dispatched ? await request('/api/ai/stop', {account: ctx.account, chat: ctx.chat, turnId: turn.userId.replace(/^user-/, ''), sessionId: sessionIdRef.current}) : {stopped: true, status: 'cancelled'};
+      if (result.stopped === true && result.status === 'completed') {
+        turn.cancelled = true;
+        turn.controller.abort();
+        turnStateRef.current = null;
+        currentTurnRef.current = null;
+        setFailedTurn(null);
+        setProblem('');
+        setActivity(null);
+        setActivityLog([]);
+        await loadHistory(true, true);
+        return;
+      }
+      if (result.status === 'failed') {
+        turn.cancelled = true;
+        turn.controller.abort();
+        turnStateRef.current = null;
+        setFailedTurn({text: turn.text, uncertain: false, retryable: result.retryable === true, options: {...turn.options, retryFailedRun: true}});
+        setProblem(result.error || 'El agente no pudo completar la respuesta.');
+        setActivity(null);
+        setActivityLog([]);
+        setMessages(previous => previous.map(item => item.id === `answer-${turn.userId}` ? {...item, status: {type: 'incomplete', reason: 'error'}} : item));
+        return;
+      }
       if (result.stopped !== true) throw new Error('No se pudo confirmar la detencion del agente.');
       if (['cancelled', 'interrupted'].includes(result.status)) {
         turn.cancelled = true;
         turn.controller.abort();
         setStoppedNotice(true);
         setFailedTurn(null);
+        turnStateRef.current = null;
         setProblem('');
         setActivity(null);
         setMessages(previous => previous.map(item => item.id === `answer-${turn.userId}` ? {...item, status: {type: 'incomplete', reason: 'cancelled'}} : item));
@@ -298,7 +346,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
       }
     } catch (error) { setProblem(error.message); }
     finally { setStopping(false); }
-  }, [ctx.account, ctx.chat, request, stopping]);
+  }, [ctx.account, ctx.chat, loadHistory, request, stopping]);
 
   const addImages = async files => {
     if (readingImages) return;
@@ -319,11 +367,11 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
     finally { setReadingImages(false); }
   };
 
-  const runtime = useExternalStoreRuntime({messages, onNew, onCancel: stopTurn, convertMessage: message => message, isRunning: running, isSendDisabled: !ctx.chat || loading || running});
+  const runtime = useExternalStoreRuntime({messages, onNew, onCancel: stopTurn, convertMessage: message => message, isRunning: running, isSendDisabled: !ctx.chat || loading || running || failedTurn?.uncertain});
   const lastAnswer = [...messages].reverse().find(message => message.role === 'assistant');
   const lastReply = lastAnswer?.status?.type === 'incomplete' ? '' : lastAnswer?.content[0]?.text || '';
   const retryTurn = () => {
-    if (!failedTurn || submittingRef.current || running) return;
+    if (!failedTurn?.retryable || submittingRef.current || running) return;
     submittingRef.current = true;
     void ask(failedTurn.text, failedTurn.options).catch(() => {}).finally(() => { submittingRef.current = false; });
   };
@@ -369,7 +417,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
             <summary>Actividad del agente ({activityLog.length})</summary>
             <ol>{activityLog.map((entry, index) => <li key={index}>{entry.label}{entry.tool && <code> {entry.tool}</code>}<small>{entry.status || ({tool_done: 'Completado', tool_error: 'Error', tool: 'En curso', thinking: 'Preparando respuesta'}[entry.phase] || '')}</small></li>)}</ol>
           </details>}
-          {problem && <div className="ai-error" role="alert"><p>{problem}</p>{failedTurn && !running && <button type="button" onClick={retryTurn}>Reintentar</button>}</div>}
+          {problem && <div className="ai-error" role="alert"><p>{problem}</p>{failedTurn?.retryable && !running && <button type="button" onClick={retryTurn}>Reintentar</button>}</div>}
           {lastReply && !running && !failedTurn && <button id="ai-use-draft" type="button" disabled={!ctx.chat} onClick={() => useDraft(lastReply, ctx)}>Usar como borrador</button>}
         </ThreadPrimitive.Viewport>
         {proposals.length > 0 && <section className="ai-proposals" aria-label="Propuestas pendientes">
@@ -392,7 +440,7 @@ function PrivateChat({ctx, request, useDraft, active, api, draftPrompt, draftLab
             const files = Array.from(event.clipboardData?.files || []);
             if (files.length) { event.preventDefault(); void addImages(files); }
           }} placeholder="Escribe un mensaje" rows="1" disabled={!ctx.chat || loading} />
-          {running ? <button id="ai-stop" className="ai-send ai-stop" type="button" disabled={stopping} onClick={stopTurn} aria-label="Detener respuesta">{stopping ? '…' : '■'}</button> : <button id="ai-send" className="ai-send" type="submit" disabled={!ctx.chat || loading || running || readingImages || (!prompt.trim() && !images.length)} aria-label="Enviar mensaje"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d={SEND_PATH}/></svg></button>}
+          {running || failedTurn?.uncertain ? <button id="ai-stop" className="ai-send ai-stop" type="button" disabled={stopping} onClick={stopTurn} aria-label="Detener respuesta">{stopping ? '…' : '■'}</button> : <button id="ai-send" className="ai-send" type="submit" disabled={!ctx.chat || loading || running || readingImages || (!prompt.trim() && !images.length)} aria-label="Enviar mensaje"><svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d={SEND_PATH}/></svg></button>}
         </form>
       </ThreadPrimitive.Root>
     </div>
