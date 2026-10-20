@@ -157,7 +157,7 @@ async function fixture(t) {
     }
     return { rows: [] };
   };
-  const app = await createApp({ env: { DATA_DIR: dir, APP_PUBLIC_URL: 'https://wa.example',
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']}, env: { DATA_DIR: dir, APP_PUBLIC_URL: 'https://wa.example',
     UI_AUTH_USERNAME: 'contract', UI_AUTH_PASSWORD: 'fixture', APP_ENABLE_SENDING: 'true',
     PERSONAL_SECRET: SECRET }, db: { query }, registry: [{ channel: 'whatsapp', accountId: 'personal',
       secretEnv: 'PERSONAL_SECRET', connectorUrl: connectorBase }],

@@ -12,7 +12,7 @@ const basic = `Basic ${Buffer.from('tester:fixture').toString('base64')}`;
 async function start({ answer, rows = [], env = {} }) {
   const calls = [];
   const statements = [];
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: {
       DATA_DIR: await mkdtemp(join(tmpdir(), 'wa-blocked-test-')),
       UI_AUTH_USERNAME: 'tester', UI_AUTH_PASSWORD: 'fixture',

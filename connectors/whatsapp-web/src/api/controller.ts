@@ -3379,6 +3379,7 @@ export function createRouter(
   router.post('/messages/read/:chatId', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {
+        if (!sendingAllowed(res)) return;
         await client.markAsRead(req.params.chatId);
         res.json({ markedAsRead: true });
       } catch (e) {
@@ -3468,6 +3469,7 @@ export function createRouter(
             }>)
           : [];
         const value = body.value ?? body.enabled ?? body.durationMs;
+        if (!sendingAllowed(res)) return;
         const result = await client.modifyCapabilityChat(req.params.chatId, action, value, ids);
         res.json({ ok: true, data: result });
       } catch (error) {
@@ -3668,6 +3670,7 @@ export function createRouter(
           const expiration = (req.body || {}).expiration;
           if (typeof expiration !== 'number' && typeof expiration !== 'boolean')
             throw new CapabilityError('INVALID_CAPABILITY_INPUT', 'expiration is required');
+          if (!sendingAllowed(res)) return;
           res.json({ ok: true, data: await client.setDisappearing(req.params.chatId, expiration) });
         } catch (error) {
           capabilityErrorResponse(res, error);

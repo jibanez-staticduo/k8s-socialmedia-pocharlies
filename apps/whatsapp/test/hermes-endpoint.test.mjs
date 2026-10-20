@@ -21,7 +21,7 @@ async function fixture(t, upstream, {lock, revoke, runs = false} = {}) {
     HERMES_RUNS_ENABLED: runs ? 'true' : 'false', HERMES_API_URL: 'http://hermes/p/socialmedia/v1', HERMES_API_KEY: 'test-key', HERMES_DEFAULT_MODEL: 'gpt-6-luna', HERMES_PROVIDER: 'existing-provider',
     PERSONAL_SECRET: 'test-secret', HERMES_CHAT_TOOL_SECRET: 'test-tool-secret', HERMES_CHAT_TOOL_INTERNAL_URL: 'http://internal',
     HERMES_CHAT_ALLOW_DIRECT_SEND: 'true', HERMES_CHAT_ALLOW_PROPOSALS: 'true'};
-  const app = await createApp({env, registry: [{channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://connector'}],
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},env, registry: [{channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://connector'}],
     db: {query: async (sql, args) => ({rows: /FROM conversations/.test(sql) && args?.[0] === 'personal' && args?.[1] === 'contact' ? [{id: 'contact', name: 'Test contact'}] : []})},
     fetchImpl: async (url, options) => {
       if (url.startsWith('http://internal/')) {

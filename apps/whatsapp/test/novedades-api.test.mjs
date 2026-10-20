@@ -12,7 +12,7 @@ async function fixture(t, { dbQuery, connectorResponse, env: envOverrides = {} }
     DATA_DIR: dir, APP_PUBLIC_URL: 'https://wa.example', UI_AUTH_USERNAME: 'owner', UI_AUTH_PASSWORD: 'fixture',
     PERSONAL_SECRET: 'first', SECONDARY_SECRET: 'second', ...envOverrides,
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env,
     db: { query: dbQuery || (async () => ({ rows: [] })) },
     registry: ['personal', 'secondary'].map(accountId => ({ channel: 'whatsapp', accountId, secretEnv: `${accountId.toUpperCase()}_SECRET`, connectorUrl: `http://${accountId}` })),

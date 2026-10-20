@@ -25,7 +25,7 @@ test('stored link preview and thumbnail stay scoped to the authenticated account
     }
     return { rows: [] };
   } };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: { DATA_DIR: dir, UI_AUTH_USERNAME: 'operator', UI_AUTH_PASSWORD: 'password', APP_PUBLIC_URL: 'https://wa.example' },
     db, registry: [{ channel: 'whatsapp', accountId: 'personal', connectorUrl: 'http://connector' }],
   });

@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
-import { MESSAGE_VISIBLE_SQL, readableChatName } from './chat-names.mjs';
+import { MESSAGE_RETAINED_SQL, MESSAGE_VISIBLE_SQL, readableChatName } from './chat-names.mjs';
 import { fail } from './security.mjs';
+import { getDatabaseSchema, validDatabaseId } from './database-schema.mjs';
+
+function validId(value, type) {
+  return typeof value === 'string' && validDatabaseId(value, type);
+}
 
 function choice(params, key, fallback, values) {
   const value = params.get(key) || fallback;
@@ -29,8 +34,8 @@ export function mediaLibraryOptions(account, params) {
       if (!raw || raw.length > 2048) throw new Error();
       cursor = JSON.parse(Buffer.from(raw, 'base64url').toString());
       if (cursor.scope !== scope || typeof cursor.timestamp !== 'string' || !Number.isFinite(Date.parse(cursor.timestamp)) ||
-          typeof cursor.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(cursor.id) ||
-          typeof cursor.attachment !== 'string' || (cursor.attachment && !/^[a-f0-9-]{36}$/i.test(cursor.attachment)) ||
+          !(validId(cursor.id, 'uuid') || validId(cursor.id, 'bigint')) ||
+          typeof cursor.attachment !== 'string' || (cursor.attachment && !(validId(cursor.attachment, 'uuid') || validId(cursor.attachment, 'bigint'))) ||
           (order === 'longest' && (!Number.isSafeInteger(cursor.duration) || cursor.duration < -1 || cursor.duration > 2147483647))) throw new Error();
     } catch { throw fail(400, 'Invalid media cursor'); }
   }
@@ -52,12 +57,22 @@ export function publicLinks(value) {
 
 export async function readMediaLibrary({ account, params, query }) {
   const options = mediaLibraryOptions(account, params);
+  const schema = await getDatabaseSchema(query);
+  if (options.cursor && (!validId(options.cursor.id, schema.messageIdType) ||
+      (options.cursor.attachment && !validId(options.cursor.attachment, schema.attachmentIdType)))) {
+    throw fail(400, 'Invalid media cursor');
+  }
   const args = [account];
-  const where = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_VISIBLE_SQL];
+  const where = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_RETAINED_SQL, MESSAGE_VISIBLE_SQL];
   const isLinks = options.kind === 'links';
   const durationOrder = options.order === 'longest';
-  const attachmentKey = isLinks ? "''::text" : "COALESCE(a.id::text, '')";
-  const durationKey = isLinks ? '-1' : 'COALESCE(NULLIF(a.duration_seconds, 0), NULLIF(a.duration, 0), -1)';
+  const attachmentId = isLinks ? "''::text" : "COALESCE(a.id::text, '')";
+  const emptyAttachment = schema.attachmentIdType === 'uuid' ? '00000000-0000-0000-0000-000000000000' : '0';
+  const attachmentKey = isLinks ? "''::text" : `COALESCE(a.id, '${emptyAttachment}'::${schema.attachmentIdType})`;
+  // Only columns discovered from the allowlisted schema are referenced in SQL.
+  const durationColumns = ['duration_seconds', 'duration'].filter(column => schema.attachmentDurationColumns.includes(column));
+  const durationKey = isLinks || !durationColumns.length ? '(-1)::int' : `COALESCE(${durationColumns.map(column =>
+    `CASE WHEN a.${column} BETWEEN 1 AND 2147483647 THEN a.${column} END`).join(', ')}, -1)`;
   if (isLinks) where.push("m.content ~* 'https?://[^[:space:]]+'");
   else if (options.kind === 'documents') where.push("m.message_type='DOCUMENT'");
   else if (options.kind === 'all') where.push("(m.message_type IN ('IMAGE','VIDEO','AUDIO','STICKER','DOCUMENT') OR m.content ~* 'https?://[^[:space:]]+')");
@@ -71,22 +86,22 @@ export async function readMediaLibrary({ account, params, query }) {
   const direction = options.order === 'oldest' ? 'ASC' : 'DESC';
   if (options.cursor) {
     if (durationOrder) args.push(options.cursor.duration);
-    args.push(options.cursor.timestamp, options.cursor.id, options.cursor.attachment);
+    args.push(options.cursor.timestamp, options.cursor.id, isLinks ? '' : options.cursor.attachment || emptyAttachment);
     const end = args.length;
     where.push(durationOrder
-      ? `(${durationKey}, m.wa_timestamp, m.id::text, ${attachmentKey}) < ($${end - 3}::int, $${end - 2}::timestamptz, $${end - 1}::text, $${end}::text)`
-      : `(m.wa_timestamp, m.id::text, ${attachmentKey}) ${direction === 'DESC' ? '<' : '>'} ($${end - 2}::timestamptz, $${end - 1}::text, $${end}::text)`);
+      ? `(${durationKey}, m.wa_timestamp, m.id, ${attachmentKey}) < ($${end - 3}::int, $${end - 2}::timestamptz, $${end - 1}::${schema.messageIdType}, $${end}::${isLinks ? 'text' : schema.attachmentIdType})`
+      : `(m.wa_timestamp, m.id, ${attachmentKey}) ${direction === 'DESC' ? '<' : '>'} ($${end - 2}::timestamptz, $${end - 1}::${schema.messageIdType}, $${end}::${isLinks ? 'text' : schema.attachmentIdType})`);
   }
   args.push(options.limit + 1);
-  const rows = await query(`SELECT m.id, m.wa_message_id, m.conversation_id, m.content,
+  const rows = await query(`SELECT m.id::text AS id, m.wa_message_id, m.conversation_id, m.content,
       m.direction, m.message_type, m.wa_timestamp, m.wa_timestamp::text AS cursor_timestamp,
-      c.name AS chat_name, ${attachmentKey} AS attachment_id
-      ${isLinks ? '' : ', a.mime_type, a.file_name, a.file_size, a.duration_seconds, a.duration'}
+      c.name AS chat_name, ${attachmentId} AS attachment_id
+      ${isLinks ? '' : `, a.mime_type, a.file_name, a.file_size${durationColumns.map(column => `, a.${column}`).join('')}`}
     FROM messages m JOIN conversations c ON c.id=m.conversation_id AND c.account=m.account
     ${options.q ? 'LEFT JOIN participants sender ON sender.id=m.sender_wa_id AND sender.account=m.account' : ''}
     ${isLinks ? '' : 'LEFT JOIN attachments a ON a.message_id=m.id'}
     WHERE ${where.join(' AND ')}
-    ORDER BY ${durationOrder ? `${durationKey} DESC, ` : ''}m.wa_timestamp ${direction}, m.id::text ${direction}, ${attachmentKey} ${direction}
+    ORDER BY ${durationOrder ? `${durationKey} DESC, ` : ''}m.wa_timestamp ${direction}, m.id ${direction}, ${attachmentKey} ${direction}
     LIMIT $${args.length}`, args);
   const page = rows.slice(0, options.limit);
   const items = page.map(row => {
@@ -109,8 +124,8 @@ export async function readMediaLibrary({ account, params, query }) {
   const last = page.at(-1);
   const nextCursor = rows.length > options.limit && last ? Buffer.from(JSON.stringify({
     scope: options.scope, timestamp: last.cursor_timestamp || new Date(last.wa_timestamp).toISOString(),
-    id: last.id, attachment: last.attachment_id || '',
-    ...(durationOrder ? { duration: storedDuration(last) ?? -1 } : {}),
+    id: String(last.id), attachment: String(last.attachment_id || ''),
+    ...(durationOrder ? { duration: isLinks ? -1 : storedDuration(last) ?? -1 } : {}),
   })).toString('base64url') : null;
   return { account, items, nextCursor };
 }

@@ -68,6 +68,21 @@ jobs:
 
   whatsapp-app:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: socialmedia_shared_qa
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d socialmedia_shared_qa"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      WHATSAPP_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/socialmedia_shared_qa
+      MEDIA_LIBRARY_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/socialmedia_shared_qa
     defaults:
       run:
         working-directory: apps/whatsapp
@@ -93,6 +108,16 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - name: Verify portable deletion and published migration compatibility
+        working-directory: .
+        env:
+          SHARED_DB_AUDIT_DISPOSABLE: "1"
+          DATABASE_URL: postgresql://postgres@127.0.0.1:5432/socialmedia_shared_qa
+        run: |
+          git fetch --no-tags https://github.com/pocharlies-org/k8s-socialmedia-pocharlies.git 1470fa85ec529cafb7090baa9f22429812a34236
+          pnpm exec tsx connectors/whatsapp-web/src/message-deletion.postgres.mjs
+          pnpm exec tsx --test scripts/shared-db-migration-compat.postgres.ts
+          WHATSAPP_TEST_DATABASE_URL="$DATABASE_URL" node --test apps/whatsapp/test/chat-names-bounded.postgres.mjs apps/whatsapp/test/deleted-at.postgres.mjs
 
   s3-tests:
     if: ${{ !contains(github.event.head_commit.message || '', '[skip ci]') }}

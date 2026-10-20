@@ -804,11 +804,16 @@ export async function setMessageStatus(waMessageId: string, status: string): Pro
     // A failure cannot erase delivery/read evidence or a deletion.
     await pool.query(
       status === 'deleted'
-        ? `UPDATE messages SET status = $2, is_deleted = TRUE, deleted_at = COALESCE(deleted_at, now()), status_at = now() WHERE wa_message_id = $1`
+        ? `UPDATE messages SET status = $2, is_deleted = TRUE, status_at = now(),
+             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+               'deleted_at', COALESCE(NULLIF(metadata->>'deleted_at', ''),
+                 to_jsonb(messages)->>'deleted_at', now()::text),
+               'deleted_source', COALESCE(metadata->>'deleted_source', 'whatsapp'))
+           WHERE wa_message_id = $1 AND account = $3 AND platform = 'whatsapp'`
         : `UPDATE messages SET status = $2, status_at = now() WHERE wa_message_id = $1
              AND NOT COALESCE(is_deleted,FALSE)
              AND (status IS NULL OR status NOT IN ('deleted','delivered','read'))`,
-      [wamId, status]
+      status === 'deleted' ? [wamId, status, connectorAccount()] : [wamId, status]
     );
   }
 }

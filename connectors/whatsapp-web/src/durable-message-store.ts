@@ -468,8 +468,12 @@ export async function markMessageEdited(
 export async function markMessageDeleted(messageId: string): Promise<void> {
   await pool().query(
     `UPDATE messages
-        SET is_deleted = TRUE, deleted_at = COALESCE(deleted_at, now()), status = 'deleted', status_at = now(), updated_at = now()
-      WHERE wa_message_id = $1 AND account = $2`,
+        SET is_deleted = TRUE, status = 'deleted', status_at = now(), updated_at = now(),
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+              'deleted_at', COALESCE(NULLIF(metadata->>'deleted_at', ''),
+                to_jsonb(messages)->>'deleted_at', now()::text),
+              'deleted_source', COALESCE(metadata->>'deleted_source', 'whatsapp'))
+      WHERE wa_message_id = $1 AND account = $2 AND platform = 'whatsapp'`,
     [accountKey(messageId), connectorAccount()]
   );
 }
@@ -477,11 +481,13 @@ export async function markMessageDeleted(messageId: string): Promise<void> {
 export async function markMessageDeletedForMe(messageId: string, chatId: string): Promise<void> {
   await pool().query(
     `UPDATE messages
-        SET is_deleted = TRUE, deleted_at = COALESCE(deleted_at, now()), updated_at = now(),
+        SET updated_at = now(),
             metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
               'deleted_for_me', TRUE, 'deleted_for_me_at', now(),
               'deleted_for_me_source', 'connector')
-      WHERE wa_message_id = $1 AND account = $2 AND conversation_id = $3`,
+      WHERE wa_message_id = $1 AND account = $2 AND conversation_id = $3
+        AND platform = 'whatsapp'
+        AND (metadata->>'deleted_for_me') IS DISTINCT FROM 'true'`,
     [
       accountKey(messageId),
       connectorAccount(),

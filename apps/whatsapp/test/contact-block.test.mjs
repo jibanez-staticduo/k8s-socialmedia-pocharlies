@@ -7,7 +7,7 @@ import { createApp } from '../server.mjs';
 
 test('block uses authenticated account/chat scope and confirms provider state without local deletion', async t => {
   const calls=[];let confirmed=true;
-  const app=await createApp({
+  const app=await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env:{DATA_DIR:await mkdtemp(join(tmpdir(),'wa-block-test-')),UI_AUTH_USERNAME:'tester',UI_AUTH_PASSWORD:'fixture',
       APP_PUBLIC_URL:'https://wa.example',APP_ENABLE_SENDING:'true',A_SECRET:'a',B_SECRET:'b'},
     registry:['a','b'].map(accountId=>({channel:'whatsapp',accountId,secretEnv:`${accountId.toUpperCase()}_SECRET`,connectorUrl:`http://connector-${accountId}`})),

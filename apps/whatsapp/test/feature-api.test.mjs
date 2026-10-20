@@ -278,7 +278,7 @@ function fixtureDatabase(calls) {
         .filter(row => conversations[row.conversation_id]?.account === args[0]
           && (`${row.conversation_id}:${row.id}` === args[1] || `${row.conversation_id}:${row.wa_message_id}` === args[1]))
         .map(row => ({ ...row, chat_name: conversations[row.conversation_id]?.name })) };
-      if (/SELECT m\.id, m\.wa_timestamp FROM messages m/.test(sql)) return { rows: (Array.isArray(args[1]) ? args[1] : [args[1]])
+      if (/SELECT m\.id, m\.wa_timestamp(?:, m\.wa_timestamp::text AS cursor_timestamp)? FROM messages m/.test(sql)) return { rows: (Array.isArray(args[1]) ? args[1] : [args[1]])
         .flatMap(id => messages[id] || [])
         .filter(row => row.id === args[2] || row.wa_message_id === args[2])
         .map(row => ({ id: row.id, wa_timestamp: row.wa_timestamp })) };
@@ -292,11 +292,12 @@ function fixtureDatabase(calls) {
         if (/m\.message_type IN \('IMAGE','VIDEO'\)/.test(sql)) rows = rows.filter(row => ['IMAGE', 'VIDEO'].includes(row.message_type));
         if (/m\.message_type='DOCUMENT'/.test(sql)) rows = rows.filter(row => row.message_type === 'DOCUMENT');
         if (/m\.content ~\* 'https\?/.test(sql)) rows = rows.filter(row => /https?:\/\/\S+/i.test(row.content || ''));
-        const keyset = sql.match(/\(m\.wa_timestamp, m\.id::text, COALESCE\(a\.id::text, ''\)\) < \(\$(\d+)::timestamptz, \$(\d+)::text, \$(\d+)::text\)/);
+        const keyset = sql.match(/\(m\.wa_timestamp, m\.id\) < \(\$(\d+)::timestamptz, \$(\d+)::(?:uuid|bigint)\)/);
         if (keyset) {
-          const [ts, messageId, attachmentId] = [Number(keyset[1]), Number(keyset[2]), Number(keyset[3])].map(n => args[n - 1]);
+          const [ts, messageId] = [Number(keyset[1]), Number(keyset[2])].map(n => args[n - 1]);
+          const attachmentId = /a\.id < \$/.test(sql) ? args[Number(keyset[2])] : null;
           rows = rows.filter(row => row.wa_timestamp < ts || (row.wa_timestamp === ts
-            && (row.id < messageId || (row.id === messageId && row.attKey < attachmentId))));
+            && (row.id < messageId || (row.id === messageId && attachmentId && row.attKey < attachmentId))));
         } else {
           const before = sql.match(/m\.wa_timestamp < \$(\d+)::timestamptz/);
           if (before) rows = rows.filter(row => row.wa_timestamp < args[Number(before[1]) - 1]);
@@ -306,9 +307,9 @@ function fixtureDatabase(calls) {
         if (limit) rows = rows.slice(0, args[Number(limit[1]) - 1]);
         return { rows };
       }
-      if (/FROM messages m/.test(sql) && /m\.id,\s*m\.wa_message_id/.test(sql)) {
+      if (/FROM messages m/.test(sql) && /m\.id,\s*(?:m\.wa_timestamp::text AS cursor_timestamp,\s*)?m\.wa_message_id/.test(sql)) {
         let rows = (Array.isArray(args[1]) ? args[1] : [args[1]]).flatMap(id => messages[id] || []);
-        if (/AND \(m\.wa_timestamp, m\.id::text\)/.test(sql)) {
+        if (/AND \(m\.wa_timestamp, m\.id\)/.test(sql)) {
           rows = rows.filter(row => (row.wa_timestamp < args[2] || (row.wa_timestamp === args[2] && row.id <= args[3])) === sql.includes(' <= '))
             .sort((a, b) => sql.includes('ORDER BY m.wa_timestamp ASC')
               ? a.wa_timestamp.localeCompare(b.wa_timestamp) : b.wa_timestamp.localeCompare(a.wa_timestamp));
@@ -342,7 +343,7 @@ async function fixture(t, { fetchImpl, env = {}, db } = {}) {
     MEDIA_ALLOWED_ORIGINS: 'https://media.example',
     ...env,
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: runtimeEnv,
     db: database,
     registry: [
@@ -535,7 +536,7 @@ test('search cursor pages tied timestamps without duplicates and stays bound to 
     assert.ok(sql.includes(MESSAGE_VISIBLE_SQL), 'search must use the same visible-chat filter as the timeline');
     let rows = stored.filter(row => row.content.includes(String(args[1]).slice(1, -1)));
     if (Array.isArray(args[2])) rows = rows.filter(row => args[2].includes(row.conversation_id));
-    if (/\(m\.wa_timestamp, m\.id::text\) < /.test(sql)) {
+    if (/\(m\.wa_timestamp, m\.id\) < /.test(sql)) {
       const timestamp = args.at(-3);
       const id = args.at(-2);
       rows = rows.filter(row => row.wa_timestamp < timestamp || (row.wa_timestamp === timestamp && row.id < id));

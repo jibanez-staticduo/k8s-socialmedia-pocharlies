@@ -228,7 +228,9 @@ contracts:
     DB is_deleted = true, status = ''deleted'', metadata.deleted_at, CONTENT KEPT; NATS MessageUpdated
     DELETED. forMe true = delete for me: WhatsApp app-state deleteForMe with the key and the original
     timestamp from the durable copies (media on the phone left alone); DB metadata.deleted_for_me = true
-    (+ _at), is_deleted untouched; NOT published on NATS (a view flag of this account). Answers 200 {deleted:
+    (+ _at), is_deleted untouched; NOT published on NATS (a view flag of this account). Revocation
+    timestamps persist in metadata, preserving the first recorded instant and working on both
+    UUID/column and BIGINT/metadata-only schemas without requiring messages.deleted_at. Answers 200 {deleted:
     true, scope: "everyone" | "me", messageId, deletedAt}. Errors {error, failureClass}: 403 disabled_sending,
     400 invalid_request, 503 disconnected, 404 message_unavailable (unknown message, or no timestamp for
     delete for me), 422 not_own_message / rejected_by_whatsapp (with `code`). The older DELETE /api/v1/messages/:chatId/:msgId
@@ -291,7 +293,9 @@ contracts:
   - connectors/whatsapp-web/src/api/controller.ts
   status: active
   note: 'POST /api/v1/chats/modify of the house WhatsApp connectors (fase 3 / PR-5), consumed by dgx-messages
-    (/messages → Archivar, Fijar, Silenciar, Marcar como no leído / leído). HMAC-signed (same scheme as
+    (/messages → Archivar, Fijar, Silenciar, Marcar como no leído / leído). Parameterized modify,
+    disappearing and legacy read aliases enforce the same sending/emergency policy after input
+    validation and HMAC authentication, retaining star/unstar support. HMAC-signed (same scheme as
     every connector route), ids inside the signed body: {conversationId, action, durationMs?, muteUntil?,
     actor?} (`chatId` accepted for conversationId, bare jid or account-namespaced conversation id; action
     one of archive, unarchive, pin, unpin, mute, unmute, markRead, markUnread — `mark-read`, `mark_unread`,

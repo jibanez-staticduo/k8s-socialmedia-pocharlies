@@ -224,24 +224,33 @@ LEFT JOIN LATERAL (
   LIMIT 1
 ) last_message ON true
 LEFT JOIN LATERAL (
-  SELECT p.id AS sender_id, p.name AS sender_name, p.push_name
-  FROM messages m
+  SELECT recent.sender_wa_id AS sender_id, p.name AS sender_name, p.push_name
+  -- Rank names only after each conversation's indexed recent-message lookup.
+  FROM unnest(array_prepend(c.id, COALESCE(pn_alias.ids, ARRAY[]::text[]))) AS aid(id)
+  JOIN LATERAL (
+    SELECT m.sender_wa_id, m.account, m.wa_timestamp, m.id
+    FROM messages m
+    WHERE m.conversation_id = aid.id
+      AND m.account = $1
+      AND m.platform = 'whatsapp'
+      AND ${MESSAGE_RETAINED_SQL}
+      AND ${MESSAGE_VISIBLE_SQL}
+      AND m.direction = 'INBOUND'
+    ORDER BY m.wa_timestamp DESC, m.id DESC
+    LIMIT 10
+  ) recent ON true
   LEFT JOIN participants p
-    ON p.id = m.sender_wa_id
-   AND p.account = m.account
-  WHERE m.conversation_id = ANY(array_prepend(c.id, COALESCE(pn_alias.ids, ARRAY[]::text[])))
-    AND m.account = $1
-    AND m.platform = 'whatsapp'
-    AND ${MESSAGE_RETAINED_SQL}
-    AND ${MESSAGE_VISIBLE_SQL}
-    AND m.direction = 'INBOUND'
+    ON p.id = recent.sender_wa_id
+   AND p.account = recent.account
   ORDER BY (
     (p.name IS NOT NULL AND BTRIM(p.name) <> ''
+      AND BTRIM(p.name) <> p.id AND BTRIM(p.name) <> regexp_replace(p.id, '^[^:]+:', '')
       AND p.name !~ '@(lid|c\\.us|s\\.whatsapp\\.net|g\\.us|broadcast|newsletter)$')
     OR (p.push_name IS NOT NULL AND BTRIM(p.push_name) <> ''
+      AND BTRIM(p.push_name) <> p.id AND BTRIM(p.push_name) <> regexp_replace(p.id, '^[^:]+:', '')
       AND p.push_name !~ '@(lid|c\\.us|s\\.whatsapp\\.net|g\\.us|broadcast|newsletter)$')
-  ) DESC,
-  m.wa_timestamp DESC
+  ) DESC NULLS LAST,
+  recent.wa_timestamp DESC, recent.id DESC
   LIMIT 1
 ) inbound ON true
 WHERE c.account = $1
@@ -268,16 +277,27 @@ export const CHAT_LIST_ARCHIVED_SQL = `${CHAT_LIST_BASE_SQL}
 AND (COALESCE(c.archived, false) OR COALESCE(pn_alias.archived, false)) = true
 ${CHAT_LIST_ORDER_SQL}`;
 
-// Legacy NAS dates are UTC without a zone; other deployments use timestamptz.
-export const DELETED_AT_SQL = `CASE WHEN m.deleted_at IS NULL THEN NULL
-  WHEN pg_typeof(m.deleted_at) = 'timestamp without time zone'::regtype
-    THEN to_char(m.deleted_at::timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z'
-  ELSE to_char(m.deleted_at::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z'
-END`;
+// Metadata preserves the first revocation. The optional NAS column is read via
+// JSON so schemas without it still parse; unzoned legacy dates represent UTC.
+export const DELETED_AT_SQL = `(SELECT normalized
+  FROM (VALUES (m.metadata->>'deleted_at', 0), (to_jsonb(m)->>'deleted_at', 1)) candidate(value, priority)
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)?$'
+        AND pg_input_is_valid(value, 'timestamp with time zone')
+      THEN to_char(
+        (CASE WHEN value ~ '(Z|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN value ELSE value || 'Z' END)::timestamptz
+          AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z'
+    END AS normalized
+  ) valid
+  WHERE normalized IS NOT NULL
+  ORDER BY priority
+  LIMIT 1)`;
 
 /** Query used by the app server before it maps attachment rows. */
 export const MESSAGE_LIST_BASE_SQL = `
 SELECT m.id,
+       m.wa_timestamp::text AS cursor_timestamp,
        m.wa_message_id AS "waMessageId",
        m.content AS text,
        m.message_type AS type,

@@ -59,7 +59,7 @@ async function fixture(t, { handler, env = {} } = {}) {
     SECONDARY_SECRET: 'secondary-secret',
     ...env,
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: runtimeEnv,
     db: { query: async () => ({ rows: [] }) },
     registry: [

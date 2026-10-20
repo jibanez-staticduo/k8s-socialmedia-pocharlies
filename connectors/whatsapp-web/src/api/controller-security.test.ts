@@ -72,6 +72,65 @@ test('emergency sending lock blocks forward and delete before provider mutation'
   }
 });
 
+test('parameterized chat mutations validate input and enforce both sending locks', async () => {
+  const previousEnabled = process.env.ENABLE_SENDING;
+  const previousEmergency = process.env.EMERGENCY_DISABLE_SENDING;
+  const calls: Array<{ method: string; args: unknown[] }> = [];
+  const app = await startApp({
+    modifyCapabilityChat: async (...args: unknown[]) => {
+      calls.push({ method: 'modify', args });
+      return { applied: true };
+    },
+    setDisappearing: async (...args: unknown[]) => {
+      calls.push({ method: 'disappearing', args });
+      return { expiration: args[1] };
+    },
+    markAsRead: async (...args: unknown[]) => { calls.push({ method: 'read', args }); },
+  });
+  const post = (path: string, body: unknown, signedBody = body) => fetch(`${app.base}/api/v1${path}`, {
+    method: 'POST', headers: signedHeaders(signedBody), body: JSON.stringify(body),
+  });
+  const chat = '34600123456@c.us';
+  const modify = `/chats/${encodeURIComponent(chat)}/modify`;
+  const disappearing = `/chats/${encodeURIComponent(chat)}/disappearing`;
+  try {
+    for (const [enabled, emergency] of [['false', 'false'], ['true', 'true']]) {
+      process.env.ENABLE_SENDING = enabled;
+      process.env.EMERGENCY_DISABLE_SENDING = emergency;
+      assert.equal((await post(modify, {})).status, 400);
+      assert.equal((await post(disappearing, {})).status, 400);
+      assert.equal((await post(modify, { action: 'archive' })).status, 403);
+      assert.equal((await post(modify, {
+        action: 'star', value: true, messageIds: [{ id: 'S1', fromMe: true }],
+      })).status, 403);
+      assert.equal((await post(disappearing, { expiration: 86400 })).status, 403);
+      assert.equal((await post(`/messages/read/${encodeURIComponent(chat)}`, {})).status, 403);
+      assert.equal(calls.length, 0);
+    }
+    process.env.ENABLE_SENDING = 'true';
+    process.env.EMERGENCY_DISABLE_SENDING = 'false';
+    const star = { action: 'star', value: true, messageIds: [{ id: 'S1', fromMe: true }] };
+    assert.equal((await post(modify, star, {})).status, 401);
+    assert.equal(calls.length, 0);
+    assert.equal((await post(modify, star)).status, 200);
+    assert.equal((await post(modify, { ...star, action: 'unstar', value: false })).status, 200);
+    assert.equal((await post(disappearing, { expiration: 86400 })).status, 200);
+    assert.equal((await post(`/messages/read/${encodeURIComponent(chat)}`, {})).status, 200);
+    assert.deepEqual(calls, [
+      { method: 'modify', args: [chat, 'star', true, [{ id: 'S1', fromMe: true }]] },
+      { method: 'modify', args: [chat, 'unstar', false, [{ id: 'S1', fromMe: true }]] },
+      { method: 'disappearing', args: [chat, 86400] },
+      { method: 'read', args: [chat] },
+    ]);
+  } finally {
+    await app.close();
+    if (previousEnabled === undefined) delete process.env.ENABLE_SENDING;
+    else process.env.ENABLE_SENDING = previousEnabled;
+    if (previousEmergency === undefined) delete process.env.EMERGENCY_DISABLE_SENDING;
+    else process.env.EMERGENCY_DISABLE_SENDING = previousEmergency;
+  }
+});
+
 test('photo lookup timeout returns 504 rather than a false missing-photo 404', async () => {
   const app = await startApp({
     getProfilePictureBytes: async () => { throw new ProfilePictureTimeoutError(); },
