@@ -359,7 +359,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   const auth = new AppAuth({ env, fetchImpl, ...(oidc ? { oidc } : {}), ...(now ? { now } : {}) });
   const accounts = (registry || JSON.parse(await readFile(env.SOCIAL_ACCOUNTS_FILE, 'utf8'))).filter(a => a.channel === 'whatsapp' && a.enabled !== false);
   if (new Set(accounts.map(a => a.accountId)).size !== accounts.length) throw Error('Duplicate account');
-  const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 10000, types: utcDatabaseTypes() });
+  // 30 s, no 10: con la caché de Postgres evacuada (pod compartido, 885k mensajes)
+  // la primera pasada del listado de chats medía 21-126 s y el arranque de la app
+  // era una moneda (57014, medido 20-10). Caliente, el mismo query entra en 2 s.
+  const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 30000, types: utcDatabaseTypes() });
   // Change hints arrive over one dedicated LISTEN connection per process, not
   // per browser tab. APP_REALTIME_ENABLED=false disables it and every client
   // keeps its existing polling fallback.
@@ -1568,9 +1571,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           ...safeChat,
           name: readableChatName(chat),
           // Never return a provider/storage URL to the browser; avatars always
-          // flow through the authenticated account-scoped proxy.
-          // The proxy also performs provider lookup when no stored photo exists.
-          avatarUrl: `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
+          // flow through the authenticated account-scoped proxy. Pero solo cuando
+          // hay foto guardada: forzar la URL en los ~500 chats del listado
+          // disparaba 985 peticiones al abrir (931×404 + 54×502 del conector,
+          // medido 20-10). Sin foto: iniciales, como WhatsApp; la búsqueda al
+          // proveedor queda para la cabecera del chat abierto.
+          avatarUrl: (chat.avatarUrl || chat.avatar_url)
+            ? `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}` : null,
           archived: chat.archived === true,
           unread: chat.unread ?? 0,
           };
@@ -1590,7 +1597,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         let chats = await query(CHAT_LIST_ARCHIVED_SQL, [a.accountId]);
         chats = await fillMediaPreviews(chats.filter(chat => chat.archived === true).map(chat => {
           const { avatar_url: _avatarUrl, avatarUrl: _storedAvatarUrl, _sortTimestamp, ...safeChat } = chat;
-          return { ...safeChat, name: readableChatName(chat), avatarUrl: `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}`, archived: true };
+          return { ...safeChat, name: readableChatName(chat), avatarUrl: (chat.avatarUrl || chat.avatar_url) ? `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}` : null, archived: true };
         }), a.accountId);
         return json(200, { chats, archived: true });
       }
@@ -1620,7 +1627,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
         const id = path.slice('/api/media/link-thumb/'.length);
-        if (!/^[a-f0-9-]{36}$/.test(id)) throw fail(404, 'Media not found');
+        if (!/^(?:\d{1,19}|[a-f0-9-]{36})$/.test(id)) throw fail(404, 'Media not found');
         const rows = await query(
           `SELECT m.content, p.message_payload->'extendedTextMessage' AS preview_payload
              FROM messages m JOIN whatsapp_message_payloads p
@@ -1644,7 +1651,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const chat = required(url.searchParams.get('chat'), 'chat');
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
         const id = path.slice('/api/media/thumb/'.length);
-        if (!/^[a-f0-9-]{36}$/.test(id)) throw fail(404, 'Media not found');
+        if (!/^(?:\d{1,19}|[a-f0-9-]{36})$/.test(id)) throw fail(404, 'Media not found');
         const rows = await query(
           `SELECT p.message_payload->'imageMessage'->'jpegThumbnail' AS thumbnail
              FROM messages m JOIN whatsapp_message_payloads p
@@ -1664,7 +1671,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (req.method === 'GET' && path.startsWith('/api/media/')) {
         const a = accountFor(url.searchParams.get('account')); const chat = required(url.searchParams.get('chat'), 'chat');
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
-        const id = path.slice('/api/media/'.length); if (!/^[a-f0-9-]{36}$/.test(id)) throw fail(404, 'Media not found');
+        const id = path.slice('/api/media/'.length); if (!/^(?:\d{1,19}|[a-f0-9-]{36})$/.test(id)) throw fail(404, 'Media not found');
         const rows = await query(`SELECT COALESCE(a.file_url,a.storage_key) AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}`, [id, a.accountId, readIds]);
         if (!rows.length) throw fail(404, 'Media not found');
         const media = rows[0]; const upstream = mediaRequest(media.ref, env);
@@ -1721,12 +1728,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           const infoById = new Map(infoParticipants.map(item => [item.id || item.jid, item]));
           const participantIds = participants.map(item => item.id || item.jid).filter(Boolean);
           const known = participantIds.length ? await query(
-            `SELECT id, wa_user_id, name, push_name FROM participants
-              WHERE account=$1 AND (id=ANY($2::text[]) OR wa_user_id=ANY($2::text[]))`,
+            `SELECT id, name, push_name FROM participants
+              WHERE account=$1 AND id=ANY($2::text[])`,
             [a.accountId, participantIds.flatMap(id => [id, `${a.accountId}:${id}`])]
           ) : [];
-          const knownById = new Map(known.flatMap(item => [item.id, item.wa_user_id]
-            .filter(Boolean).flatMap(id => [[id, item], [id.startsWith(`${a.accountId}:`) ? id.slice(a.accountId.length + 1) : id, item]])));
+          // La casa no tiene wa_user_id (esquema del desplegador original); el ANY
+          // ya lleva el id con y sin prefijo de cuenta (42703, medido 20-10).
+          const knownById = new Map(known.flatMap(item => {
+            const bare = item.id.startsWith(`${a.accountId}:`) ? item.id.slice(a.accountId.length + 1) : item.id;
+            return [[item.id, item], [bare, item]];
+          }));
           const capabilities = {
             manageMembers: info?.capabilities?.manageMembers === true,
             editInfo: info?.capabilities?.editInfo === true,
@@ -1743,7 +1754,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           })) });
         }
         const rows = await query(
-          `SELECT p.id, p.wa_user_id, p.phone, p.name, p.push_name, p.profile_pic_url
+          `SELECT p.id, p.phone, p.name, p.push_name, p.profile_pic_url
              FROM participants p
             WHERE p.account=$1 AND EXISTS (
               SELECT 1 FROM conversation_participants cp
@@ -1754,10 +1765,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         );
         const contact = rows[0] || {};
         return json(200, { ...result, contact: {
-          id: contact.wa_user_id || contact.id || conversation.id,
+          id: contact.id || conversation.id,
           phone: contact.phone || null,
           name: contact.name || contact.push_name || conversation.name || null,
-          avatarUrl: `/api/contacts/${encodeURIComponent(contact.wa_user_id || contact.id || conversation.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
+          avatarUrl: `/api/contacts/${encodeURIComponent(contact.id || conversation.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
           presence: { state: 'unknown', lastSeen: null, available: false },
         } });
       }
@@ -1883,7 +1894,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           messageId: item.wa_message_id || item.id,
           chat: item.chat_id || item.conversation_id,
           chatId: item.chat_id || item.conversation_id,
-          chatName: item.chat_name || item.conversation_id,
+          // Nombre legible igual que el listado: c.name suele ser el jid crudo
+          // y pintar eso en el resultado es la queja de la QA #10.
+          chatName: readableChatName({
+            id: item.chat_id || item.conversation_id,
+            name: item.chat_name,
+            isGroup: String(item.chat_id || item.conversation_id || '').endsWith('@g.us'),
+          }) || item.conversation_id,
           text: item.content || '',
           fromMe: item.direction === 'OUTBOUND',
           type: item.message_type,
@@ -1900,8 +1917,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(url.searchParams.get('account'));
         const contactId = required(decodeURIComponent(path.slice('/api/contacts/'.length, -'/avatar'.length)), 'contact', 512);
         const rows = await query(
-          `SELECT p.id,p.wa_user_id,p.profile_pic_url FROM participants p
-            WHERE p.account=$1 AND (p.id=$2 OR p.wa_user_id=$2) LIMIT 1`,
+          `SELECT p.id,p.profile_pic_url FROM participants p
+            WHERE p.account=$1 AND p.id=$2 LIMIT 1`,
           [a.accountId, contactId]
         );
         if (!rows.length) throw fail(404, 'Contact not found');
@@ -1914,7 +1931,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             if (error?.status && ![403, 404, 502].includes(error.status)) throw error;
           }
         }
-        const providerContact = participant.wa_user_id || participant.id;
+        const providerContact = participant.id;
         const result = await featureConnector(a, `/chats/${encodeURIComponent(providerContact)}/photo`, { method: 'GET' });
         const data = typeof result.data === 'string' ? result.data : '';
         if (!data || data.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 8 || !isValidBase64(data)) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this contact');
