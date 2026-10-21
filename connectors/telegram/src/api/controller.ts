@@ -4,6 +4,7 @@ import {
   TelegramMessageEdit,
   isTelegramDownloadTimeout,
   telegramRetryAfter,
+  telegramDownloadRetryAfter,
 } from '../telegram-client';
 import { MessageMutationError, classifyEditError, sendingDisabledReason } from '../message-edit';
 import { generateHMACSignature } from '@mcp-socialmedia/shared';
@@ -44,6 +45,12 @@ function downloadRoute(
         });
       } catch (error) {
         if (respondRateLimit(res, error)) return;
+        const retryAfter = telegramDownloadRetryAfter(error);
+        if (retryAfter !== null) {
+          res.set('Retry-After', String(retryAfter));
+          res.status(503).json({ error: 'Telegram media temporarily unavailable', retryAfter });
+          return;
+        }
         res.status(isTelegramDownloadTimeout(error) ? 504 : 502).json({ error: String(error) });
       }
     })();
@@ -702,6 +709,7 @@ export function createRouter(
         const messages = await client.getMessages(chatId, limit, offsetId);
         res.json({ messages });
       } catch (error) {
+        if (respondRateLimit(res, error)) return;
         logger.error(`Error getting messages: ${String(error)}`);
         res.status(500).json({ error: 'Failed to get messages' });
       }
@@ -709,8 +717,7 @@ export function createRouter(
   });
 
   /**
-   * GET /messages/single/:chatId/:msgId - Fetch the exact message when repairing
-   * a previously failed media download (telegram-sync media recovery).
+   * Fetch the exact message when repairing a previously failed media download.
    */
   // CONTRACT: http.telegram-connector.messages-single.v1
   router.get('/messages/single/:chatId/:msgId', (req: Request, res: Response): void => {
@@ -1144,14 +1151,10 @@ export function createRouter(
    */
   // CONTRACT: http.telegram-connector.messages-read.v1
   router.post('/messages/read/:chatId', (req: Request, res: Response): void => {
-    void (async () => {
-      try {
-        await client.markAsRead(req.params.chatId);
-        res.json({ markedAsRead: true });
-      } catch (e) {
-        res.status(500).json({ error: String(e) });
-      }
-    })();
+    client
+      .markAsRead(req.params.chatId)
+      .then(() => res.json({ markedAsRead: true }))
+      .catch(error => res.status(500).json({ error: String(error) }));
   });
 
   /**
@@ -1166,10 +1169,7 @@ export function createRouter(
     )
   );
 
-  /**
-   * GET /peers/:id/photo - Download a peer's profile photo (big size).
-   * Returns {data: base64, size, contentType: 'image/jpeg'} or 404 if no photo.
-   */
+  /** GET /peers/:id/photo - Download a peer's profile photo. */
   // CONTRACT: http.telegram-connector.peers-photo.v1
   router.get('/peers/:id/photo', (req: Request, res: Response): void => {
     if (!client.isClientConnected()) {

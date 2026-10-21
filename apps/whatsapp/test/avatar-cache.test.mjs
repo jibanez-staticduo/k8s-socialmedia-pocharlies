@@ -56,7 +56,7 @@ async function fixture(t, { env = {}, fetchImpl, conversations } = {}) {
     SECONDARY_SECRET: 'secondary-secret',
     ...env,
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: runtimeEnv,
     db: databaseFor(conversations || [
       { account: 'personal', id: 'same-chat', wa_chat_id: 'same-wa', avatar_url: null },
@@ -159,7 +159,7 @@ test('avatar source changes bypass a cached photo', async t => {
   const conversations = [{ account: 'personal', id: 'same-chat', wa_chat_id: 'first-wa', avatar_url: null }];
   const db = databaseFor(conversations);
   const dir = await mkdtemp(join(tmpdir(), 'whatsapp-avatar-cache-source-test-'));
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: { DATA_DIR: dir, UI_AUTH_USERNAME: 'operator', UI_AUTH_PASSWORD: 'password', APP_PUBLIC_URL: 'https://wa.example', PERSONAL_SECRET: 'personal-secret' },
     db,
     registry: [{ channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://personal-connector' }],

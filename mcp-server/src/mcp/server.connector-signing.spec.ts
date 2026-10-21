@@ -11,10 +11,11 @@ import { MCPServer } from './server';
 import { connector, TEST_CONNECTOR_SECRET as SECRET } from './test-connector';
 
 function serverWithSecret(connectorUrl: string, secret = SECRET) {
-  useTestAccounts({ whatsapp: { personal: connectorUrl } });
+  process.env.TEST_CONNECTOR_SECRET = secret;
+  useTestAccounts({ whatsapp: { personal: connectorUrl }, secretEnv: 'TEST_CONNECTOR_SECRET' });
   const server = Object.create(MCPServer.prototype) as MCPServer;
   Object.assign(server as unknown as Record<string, unknown>, {
-    connectorSecret: secret,
+    connectorSecret: 'unused-constructor-secret',
     logger: { error: jest.fn() },
   });
   return server as unknown as Record<string, (...a: unknown[]) => Promise<any>>;
@@ -111,7 +112,10 @@ describe('the inline signers use the constructed secret, never an empty one from
           markAsSent: async () => undefined,
         },
       });
-      await server.handleSendApprovedReply({ sendToken: 'send-d1-1700000000', account: 'personal' });
+      await server.handleSendApprovedReply({
+        sendToken: 'send-d1-1700000000',
+        account: 'personal',
+      });
       expect(wa.seen.map(s => [s.method, s.url, s.signatureOk])).toEqual([
         ['POST', '/api/v1/messages/send', true],
       ]);

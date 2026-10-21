@@ -37,7 +37,7 @@ async function fixture(t, extra = {}) {
     if (extra.fetchImpl) return extra.fetchImpl(url, options);
     throw Error('Unexpected upstream request');
   };
-  const app = await createApp({ env, db, registry: [{ channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://connector' }], fetchImpl });
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']}, env, db, registry: [{ channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://connector' }], fetchImpl });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -170,8 +170,11 @@ test('presence stream is authenticated, chat-scoped and forwards provider events
 });
 test('closing a presence stream aborts its upstream connector request', async t => {
   let signal;
+  let resolveAborted;
+  const upstreamAborted = new Promise(resolve => { resolveAborted = resolve; });
   const { app } = await fixture(t, { fetchImpl: async (_url, options) => {
     signal = options.signal;
+    signal.addEventListener('abort', resolveAborted, {once:true});
     return new Response(new ReadableStream({
       start(controller) { controller.enqueue(new TextEncoder().encode('event: presence\ndata: {"status":"available"}\n\n')); },
     }), {headers: {'content-type': 'text/event-stream'}});
@@ -184,7 +187,10 @@ test('closing a presence stream aborts its upstream connector request', async t 
   assert.equal(response.status, 200);
   assert.match(new TextDecoder().decode((await response.body.getReader().read()).value), /available/);
   abort.abort();
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await Promise.race([upstreamAborted, new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(Error('Upstream presence did not abort')), 2000);
+    timer.unref();
+  })]);
   assert.equal(signal.aborted, true);
 });
 test('connector requests are signed; success requires provider message ID', async t => {

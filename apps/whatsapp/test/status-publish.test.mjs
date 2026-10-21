@@ -34,7 +34,7 @@ async function fixture(t, { fetchImpl, env = {} } = {}) {
     SECONDARY_SECRET: 'secondary-secret',
     ...env,
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: runtimeEnv,
     db,
     registry: [

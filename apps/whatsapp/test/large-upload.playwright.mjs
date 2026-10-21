@@ -32,7 +32,7 @@ const providerGate = new Promise(resolve => { release = resolve; });
 const dir = await mkdtemp(path.join(tmpdir(), 'whatsapp-large-upload-'));
 const env = { DATA_DIR: dir, HERMES_RUNS_ENABLED: 'false', APP_PUBLIC_URL: 'http://127.0.0.1',
   UI_AUTH_USERNAME: 'qa', UI_AUTH_PASSWORD: 'synthetic-password', APP_ENABLE_SENDING: 'true', PERSONAL_SECRET: 'synthetic-secret' };
-const app = await createApp({ env,
+const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']}, env,
   registry: [{ channel: 'whatsapp', accountId: 'personal', secretEnv: 'PERSONAL_SECRET', connectorUrl: 'http://fixture-connector' }],
   db: { query: async (sql, args) => ({ rows: /FROM conversations c/.test(sql)
     && args[0] === 'personal' && (args[1] === chat.id || typeof args[1] === 'boolean') ? [chat] : [] }) },

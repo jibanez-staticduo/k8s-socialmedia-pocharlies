@@ -23,7 +23,7 @@ test('16:9 GIF compose converts to even yuv420p dimensions before provider send'
       return { rows: [] };
     },
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: {
       DATA_DIR: directory,
       UI_AUTH_USERNAME: 'operator',

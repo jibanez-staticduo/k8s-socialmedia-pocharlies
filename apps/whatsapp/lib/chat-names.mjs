@@ -365,14 +365,27 @@ export const CHAT_LIST_ARCHIVED_SQL = chatListDecorated(`${CHAT_LIST_BASE_SQL}
 AND (COALESCE(c.archived, false) OR COALESCE(pn_alias.archived, false)) = true
 ${CHAT_LIST_ORDER_SQL}`);
 
-// La casa guarda la revocación en metadata (backfill 015 y el conector,
-// message-mutations.ts): ISO-UTC texto; la columna deleted_at no existe en
-// esta BD (la consulta daba 42703 → 500 al abrir cualquier conversación).
-export const DELETED_AT_SQL = `m.metadata->>'deleted_at'`;
+// Metadata preserves the first revocation. The optional NAS column is read via
+// JSON so schemas without it still parse; unzoned legacy dates represent UTC.
+export const DELETED_AT_SQL = `(SELECT normalized
+  FROM (VALUES (m.metadata->>'deleted_at', 0), (to_jsonb(m)->>'deleted_at', 1)) candidate(value, priority)
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)?$'
+        AND pg_input_is_valid(value, 'timestamp with time zone')
+      THEN to_char(
+        (CASE WHEN value ~ '(Z|[+-][0-9]{2}(:?[0-9]{2})?)$' THEN value ELSE value || 'Z' END)::timestamptz
+          AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z'
+    END AS normalized
+  ) valid
+  WHERE normalized IS NOT NULL
+  ORDER BY priority
+  LIMIT 1)`;
 
 /** Query used by the app server before it maps attachment rows. */
 export const MESSAGE_LIST_BASE_SQL = `
 SELECT m.id,
+       m.wa_timestamp::text AS cursor_timestamp,
        m.wa_message_id AS "waMessageId",
        m.content AS text,
        m.message_type AS type,

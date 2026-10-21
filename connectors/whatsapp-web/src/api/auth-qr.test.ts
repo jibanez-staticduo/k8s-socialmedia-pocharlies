@@ -2,7 +2,7 @@
  * SKIRM-103 (F3, C2/C3): the QR of the connector, v1 and v2.
  *
  * v1 — http.whatsapp-connector.auth-qr, deprecated but still served: GET
- * /api/v1/auth/qr answers without any credential, 200 {qrCode, expiresAt} or
+ * /api/v1/auth/qr answers through connector access (Basic or HMAC), 200 {qrCode, expiresAt} or
  * 404 {"error":"No QR code available"}. That half was written before the v2
  * route existed and must stay green through the change.
  *
@@ -37,10 +37,17 @@ async function serve(qrHandler: QRHandler) {
   return { base, close };
 }
 
-test('v1 /api/v1/auth/qr sin QR → 404 {error} sin pedir credenciales', async () => {
+function v1Signed(ts = Math.floor(Date.now() / 1000)): Record<string, string> {
+  return {
+    'x-connector-timestamp': String(ts),
+    'x-connector-signature': generateHMACSignature({}, ts, SECRET),
+  };
+}
+
+test('v1 /api/v1/auth/qr sin QR → 404 {error} con firma del conector', async () => {
   const { base, close } = await serve(new QRHandler());
   try {
-    const r = await fetch(`${base}/api/v1/auth/qr`);
+    const r = await fetch(`${base}/api/v1/auth/qr`, { headers: v1Signed() });
     assert.equal(r.status, 404);
     assert.deepEqual(await r.json(), { error: 'No QR code available' });
   } finally {
@@ -48,12 +55,12 @@ test('v1 /api/v1/auth/qr sin QR → 404 {error} sin pedir credenciales', async (
   }
 });
 
-test('v1 /api/v1/auth/qr con QR → 200 {qrCode, expiresAt} sin pedir credenciales', async () => {
+test('v1 /api/v1/auth/qr con QR → 200 {qrCode, expiresAt} con firma del conector', async () => {
   const qr = new QRHandler();
   await qr.generateQR('2@characterisation-qr-string');
   const { base, close } = await serve(qr);
   try {
-    const r = await fetch(`${base}/api/v1/auth/qr`);
+    const r = await fetch(`${base}/api/v1/auth/qr`, { headers: v1Signed() });
     assert.equal(r.status, 200);
     const body = (await r.json()) as { qrCode: string; expiresAt: string };
     assert.deepEqual(Object.keys(body).sort(), ['expiresAt', 'qrCode']);
@@ -117,7 +124,7 @@ test('v2 firmado → exactamente la carga útil de v1 (200 con QR, 404 sin QR)',
   for (const handler of [empty, withQr]) {
     const { base, close } = await serve(handler);
     try {
-      const v1 = await fetch(`${base}/api/v1/auth/qr`);
+      const v1 = await fetch(`${base}/api/v1/auth/qr`, { headers: v1Signed() });
       const v2 = await fetch(`${base}/api/v2/auth/qr`, { headers: signed() });
       assert.equal(v2.status, v1.status);
       assert.deepEqual(await v2.json(), await v1.json());

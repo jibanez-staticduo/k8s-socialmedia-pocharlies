@@ -10,6 +10,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import pg from 'pg';
 import { utcDatabaseTypes } from './lib/database-time.mjs';
+import { getDatabaseSchema, useDatabaseSchema, validDatabaseId } from './lib/database-schema.mjs';
 import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, isValidBase64, fail } from './lib/security.mjs';
 import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo, unauthorizedHtml } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
@@ -267,7 +268,7 @@ function safeImageType(value) {
 }
 
 function encodeMessageCursor(row) {
-  const timestamp = row?.timestamp instanceof Date ? row.timestamp.toISOString() : String(row?.timestamp || '');
+  const timestamp = row?.cursor_timestamp || (row?.timestamp instanceof Date ? row.timestamp.toISOString() : String(row?.timestamp || ''));
   if (!timestamp || !row?.id) return null;
   return Buffer.from(JSON.stringify({ timestamp, id: String(row.id) })).toString('base64url');
 }
@@ -277,12 +278,12 @@ function encodeSearchCursor(row, scope) {
   return Buffer.from(JSON.stringify({ ...scope, timestamp, id: String(row.id) })).toString('base64url');
 }
 
-function decodeSearchCursor(value, scope) {
+function decodeSearchCursor(value, scope, schema) {
   if (typeof value !== 'string' || !value || value.length > 2048) throw fail(400, 'Invalid cursor');
   try {
     const decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
     if (decoded.account === scope.account && decoded.chat === scope.chat && decoded.queryHash === scope.queryHash
-      && decoded.searchScope === scope.searchScope && typeof decoded.id === 'string' && decoded.id.length <= 128
+      && decoded.searchScope === scope.searchScope && typeof decoded.id === 'string' && validDatabaseId(decoded.id, schema.messageIdType)
       && typeof decoded.timestamp === 'string' && Number.isFinite(Date.parse(decoded.timestamp))) return decoded;
   } catch { /* Reject malformed or mismatched search cursors uniformly. */ }
   throw fail(400, 'Invalid cursor');
@@ -303,15 +304,14 @@ function decodeMessageCursor(value) {
 // attachments can emit several rows per message, so the message id alone is not a unique
 // page position. Versioned v1 cursors are bound to their account/chat/kind scope; a bare
 // timestamp stays accepted through `before` for legacy clients (strict `<`, tie-skipping).
-function decodeMediaPageCursor(value, scope, name) {
+function decodeMediaPageCursor(value, scope, name, schema) {
   if (typeof value !== 'string' || !value || value.length > 2048) throw fail(400, `Invalid ${name}`);
   let decoded = null;
   try { decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); } catch { decoded = null; }
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (decoded !== null && typeof decoded === 'object') {
     if (decoded.v === 1 && decoded.scope === scope && typeof decoded.timestamp === 'string' && Number.isFinite(Date.parse(decoded.timestamp))
-      && typeof decoded.id === 'string' && uuid.test(decoded.id)
-      && typeof decoded.attachment === 'string' && (decoded.attachment === '' || uuid.test(decoded.attachment))) {
+      && typeof decoded.id === 'string' && validDatabaseId(decoded.id, schema.messageIdType)
+      && typeof decoded.attachment === 'string' && (decoded.attachment === '' || validDatabaseId(decoded.attachment, schema.attachmentIdType))) {
       return { keyset: true, timestamp: decoded.timestamp, id: decoded.id, attachment: decoded.attachment };
     }
     throw fail(400, `Invalid ${name}`);
@@ -355,7 +355,7 @@ async function gifBytes(bytes) {
     throw fail(400, 'GIF could not be converted');
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
-export async function createApp({ env = process.env, db, fetchImpl = fetch, registry, oidc, now, realtime } = {}) {
+export async function createApp({ env = process.env, db, fetchImpl = fetch, registry, oidc, now, realtime, databaseSchema } = {}) {
   const auth = new AppAuth({ env, fetchImpl, ...(oidc ? { oidc } : {}), ...(now ? { now } : {}) });
   const accounts = (registry || JSON.parse(await readFile(env.SOCIAL_ACCOUNTS_FILE, 'utf8'))).filter(a => a.channel === 'whatsapp' && a.enabled !== false);
   if (new Set(accounts.map(a => a.accountId)).size !== accounts.length) throw Error('Duplicate account');
@@ -428,6 +428,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   };
   const accountFor = id => { const a = accounts.find(a => a.accountId === id); if (!a) throw fail(404, 'Account not found'); return a; };
   const query = async (sql, args) => (await pool.query(sql, args)).rows;
+  if (databaseSchema) useDatabaseSchema(query, databaseSchema);
   const accountParam = value => accountFor(required(value, 'account', 128));
   const safeChatId = value => required(value, 'chat', 1024);
   async function conversationFor(account, chat) {
@@ -644,22 +645,23 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const conversation = await conversationFor(account, chat);
     const readIds = await conversationReadIds(account, conversation);
     const size = boundedInteger(limit, 'limit', { max: MAX_PAGE_SIZE, fallback: 200 });
+    const { messageIdType } = await getDatabaseSchema(query);
     let rows;
     if (around) {
       const target = (await query(
-        `SELECT m.id, m.wa_timestamp FROM messages m
+        `SELECT m.id, m.wa_timestamp, m.wa_timestamp::text AS cursor_timestamp FROM messages m
           WHERE m.account=$1 AND m.conversation_id=ANY($2::text[])
             AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL} AND ${MESSAGE_VISIBLE_SQL}
-            AND (m.id::text=$3 OR m.wa_message_id=$3) LIMIT 1`,
-        [account.accountId, readIds, required(around, 'messageId', 512)]
+            AND (${validDatabaseId(around, messageIdType) ? `m.id=$3::${messageIdType} OR m.wa_message_id=$4` : 'm.wa_message_id=$3'}) LIMIT 1`,
+        [account.accountId, readIds, required(around, 'messageId', 512), ...(validDatabaseId(around, messageIdType) ? [around] : [])]
       ))[0];
       if (!target) throw fail(404, 'Message not found');
-      const bounds = [account.accountId, readIds, target.wa_timestamp, target.id];
+      const bounds = [account.accountId, readIds, target.cursor_timestamp || target.wa_timestamp, target.id];
       const older = await query(`${MESSAGE_LIST_BASE_SQL}
-        AND (m.wa_timestamp, m.id::text) <= ($3::timestamptz, $4::text)
+        AND (m.wa_timestamp, m.id) <= ($3::timestamptz, $4::${messageIdType})
         ORDER BY m.wa_timestamp DESC, m.id DESC LIMIT 51`, bounds);
       const newer = await query(`${MESSAGE_LIST_BASE_SQL}
-        AND (m.wa_timestamp, m.id::text) > ($3::timestamptz, $4::text)
+        AND (m.wa_timestamp, m.id) > ($3::timestamptz, $4::${messageIdType})
         ORDER BY m.wa_timestamp ASC, m.id ASC LIMIT 50`, bounds);
       rows = [...newer.reverse(), ...older];
     } else if (before) {
@@ -668,24 +670,25 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       let cursorClause;
       let cursorArgs;
       if (cursor.timestamp && cursor.id) {
-        cursorClause = `(m.wa_timestamp, m.id::text) < ($3::timestamptz, $4::text)`;
+        if (!Number.isFinite(Date.parse(cursor.timestamp)) || !validDatabaseId(cursor.id, messageIdType)) throw fail(400, 'Invalid before');
+        cursorClause = `(m.wa_timestamp, m.id) < ($3::timestamptz, $4::${messageIdType})`;
         cursorArgs = [account.accountId, readIds, cursor.timestamp, cursor.id];
       } else if (cursor.timestamp) {
         cursorClause = '(m.wa_timestamp < $3::timestamptz)';
         cursorArgs = [account.accountId, readIds, cursor.timestamp];
       } else {
-        cursorClause = `(m.wa_timestamp, m.id::text) < (
-          SELECT target.wa_timestamp, target.id::text FROM messages target
+        cursorClause = `(m.wa_timestamp, m.id) < (
+          SELECT target.wa_timestamp, target.id FROM messages target
            WHERE target.account=$1 AND target.conversation_id=ANY($2::text[]) AND target.platform='whatsapp'
              AND ${MESSAGE_VISIBLE_SQL.replaceAll('m.', 'target.')}
-             AND (target.id::text=$3 OR target.wa_message_id=$3) LIMIT 1
+             AND (${validDatabaseId(cursor.id, messageIdType) ? `target.id=$3::${messageIdType} OR target.wa_message_id=$4` : 'target.wa_message_id=$3'}) LIMIT 1
         )`;
-        cursorArgs = [account.accountId, readIds, cursor.id];
+        cursorArgs = [account.accountId, readIds, cursor.id, ...(validDatabaseId(cursor.id, messageIdType) ? [cursor.id] : [])];
       }
       const limitParam = `$${cursorArgs.length + 1}`;
       rows = await query(
         `SELECT m.id, m.wa_message_id AS "waMessageId", m.content AS text, m.direction = 'OUTBOUND' AS "fromMe",
-                m.wa_timestamp AS timestamp, m.message_type AS type, m.metadata,
+                m.wa_timestamp AS timestamp, m.wa_timestamp::text AS cursor_timestamp, m.message_type AS type, m.metadata,
                 m.reply_to_message_id AS "replyToMessageId", COALESCE(m.is_edited, false) AS "isEdited",
                 COALESCE(m.is_deleted, false) AS "isDeleted", ${DELETED_AT_SQL} AS "deletedAt", m.status AS "deliveryStatus",
                 ${MESSAGE_REPLY_SELECT_SQL},
@@ -718,18 +721,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         if (error?.code !== '42P01') throw error;
       }
     }
-    // shortcut: con ids numéricos (la casa, bigint) compara m.id directo y usa el
-    // índice; el cast m.id::text sobre 80k filas de un grupo no usa la PK y en frío
-    // pasaba de los 10 s del statement_timeout (57014, medido 20-10). Con ids uuid
-    // (el desplegador original) sigue la comparación por texto (42883).
-    const idAny = (param, list) => (list.every((id) => /^\d+$/.test(String(id)))
-      ? `m.id = ANY(${param}::bigint[])`
-      : `m.id::text = ANY(${param}::text[])`);
     const attachments = ids.length ? await query(
       `SELECT a.id,a.message_id,a.mime_type,a.file_name,a.file_type,a.file_size,a.file_url,a.caption
          FROM attachments a JOIN messages m ON m.id=a.message_id
         WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp'
-          AND ${MESSAGE_RETAINED_SQL} AND ${idAny('$3', ids)}`,
+          AND ${MESSAGE_RETAINED_SQL} AND m.id=ANY($3::${messageIdType}[])`,
       [account.accountId, readIds, ids]
     ) : [];
     const attachedIds = new Set(attachments.map(item => item.message_id));
@@ -737,7 +733,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const thumbnails = missingImages.length ? await query(
       `SELECT m.id FROM messages m JOIN whatsapp_message_payloads p
          ON p.wa_message_id=m.wa_message_id AND p.account=m.account
-        WHERE ${idAny('$1', missingImages)} AND m.account=$2 AND m.conversation_id=ANY($3::text[])
+        WHERE m.id=ANY($1::${messageIdType}[]) AND m.account=$2 AND m.conversation_id=ANY($3::text[])
           AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}
           AND jsonb_typeof(p.message_payload->'imageMessage'->'jpegThumbnail') IN ('string','object')
           AND pg_column_size(p.message_payload->'imageMessage'->'jpegThumbnail') <= 300000`,
@@ -749,7 +745,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       `SELECT m.id, p.message_payload->'extendedTextMessage' AS preview_payload
          FROM messages m JOIN whatsapp_message_payloads p
            ON p.wa_message_id=m.wa_message_id AND p.account=m.account
-        WHERE ${idAny('$1', textIds)} AND m.account=$2 AND m.conversation_id=ANY($3::text[])
+        WHERE m.id=ANY($1::${messageIdType}[]) AND m.account=$2 AND m.conversation_id=ANY($3::text[])
           AND m.platform='whatsapp' AND m.message_type='TEXT' AND ${MESSAGE_RETAINED_SQL}
           AND pg_column_size(p.message_payload->'extendedTextMessage') <= 300000`,
       [textIds, account.accountId, readIds]
@@ -770,8 +766,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       } catch { /* The chat remains readable when poll results are unavailable. */ }
     }
     const local = appState.get(account.accountId);
-    const messages = rows.slice().reverse().map(({ metadata, replyType, replyText, replySenderName, replyAvailable, replyLocallyDeleted, ...row }) => ({
+    const messages = rows.slice().reverse().map(({ metadata, cursor_timestamp, replyType, replyText, replySenderName, replyAvailable, replyLocallyDeleted, ...row }) => ({
       ...row,
+      id: String(row.id),
       ...(row.type === 'TEXT' && row.text ? {
         linkPreview: (() => {
           const preview = linkPreviewFromPayload(row.text, previewPayloads.get(row.id));
@@ -797,7 +794,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       })),
       starred: local.starred.includes(stateItemKey(chat, row.wa_message_id || row.id)),
       attachments: attachments.filter(item => item.message_id === row.id).map(item => ({
-        id: item.id,
+        id: String(item.id),
         url: `/api/media/${encodeURIComponent(item.id)}?account=${encodeURIComponent(account.accountId)}&chat=${encodeURIComponent(chat)}`,
         mimeType: item.mime_type || 'application/octet-stream',
         name: item.file_name || 'attachment',
@@ -805,7 +802,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         size: item.file_size || null,
         caption: item.caption || null,
       })).concat(thumbnailIds.has(row.id) ? [{
-        id: row.id,
+        id: String(row.id),
         url: `/api/media/thumb/${encodeURIComponent(row.id)}?account=${encodeURIComponent(account.accountId)}&chat=${encodeURIComponent(chat)}`,
         mimeType: 'image/jpeg', name: 'image-preview.jpg', type: 'IMAGE', previewOnly: true,
       }] : []),
@@ -927,7 +924,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         `SELECT m.id,m.conversation_id,m.wa_message_id,m.content,m.direction,m.message_type,m.wa_timestamp,c.name AS chat_name
            FROM messages m
            JOIN conversations c ON c.id=m.conversation_id AND c.account=m.account
-          WHERE m.account=$1 AND m.platform='whatsapp' AND NOT m.is_deleted
+          WHERE m.account=$1 AND m.platform='whatsapp' AND NOT m.is_deleted AND ${MESSAGE_RETAINED_SQL}
             AND (m.conversation_id || ':' || m.id::text=$2 OR m.conversation_id || ':' || m.wa_message_id=$2)
           LIMIT 1`,
         [account.accountId, key]
@@ -1445,6 +1442,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         return json(401, { error: 'Authentication required', ...(auth.oidcEnabled ? { code: 'AUTH_REQUIRED', loginUrl: '/auth/login' } : {}) });
       }
       if (req.method === 'POST') checkOrigin(req, env);
+      // CONTRACT: http.whatsapp-app.logout.v1
       if (path === '/auth/logout' && req.method === 'POST') {
         const result = await auth.logout(req); res.setHeader('set-cookie', result.setCookie ? [result.setCookie] : []);
         // logoutUrl: sin redirigir al IdP el SSO retoma la sesión sola (QA #12).
@@ -1636,7 +1634,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
         const id = path.slice('/api/media/link-thumb/'.length);
-        if (!/^(?:\d{1,19}|[a-f0-9-]{36})$/.test(id)) throw fail(404, 'Media not found');
+        const schema = await getDatabaseSchema(query);
+        if (!validDatabaseId(id, schema.messageIdType)) throw fail(404, 'Media not found');
         const rows = await query(
           `SELECT m.content, p.message_payload->'extendedTextMessage' AS preview_payload
              FROM messages m JOIN whatsapp_message_payloads p
@@ -1660,7 +1659,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const chat = required(url.searchParams.get('chat'), 'chat');
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
         const id = path.slice('/api/media/thumb/'.length);
-        if (!/^(?:\d{1,19}|[a-f0-9-]{36})$/.test(id)) throw fail(404, 'Media not found');
+        const schema = await getDatabaseSchema(query);
+        if (!validDatabaseId(id, schema.messageIdType)) throw fail(404, 'Media not found');
         const rows = await query(
           `SELECT p.message_payload->'imageMessage'->'jpegThumbnail' AS thumbnail
              FROM messages m JOIN whatsapp_message_payloads p
@@ -1677,13 +1677,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         res.end(bytes);
         return;
       }
+      // CONTRACT: http.whatsapp-app.media.v1
       if (req.method === 'GET' && path.startsWith('/api/media/')) {
         const a = accountFor(url.searchParams.get('account')); const chat = required(url.searchParams.get('chat'), 'chat');
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
-        const id = path.slice('/api/media/'.length); if (!/^(?:\d{1,19}|[a-f0-9-]{36})$/.test(id)) throw fail(404, 'Media not found');
-        // attachments no tiene storage_key en la casa (42703, QA #12): la ref
-        // real (s3:// o http) vive solo en file_url.
-        const rows = await query(`SELECT a.file_url AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}`, [id, a.accountId, readIds]);
+        const id = path.slice('/api/media/'.length);
+        const schema = await getDatabaseSchema(query);
+        if (!validDatabaseId(id, schema.attachmentIdType)) throw fail(404, 'Media not found');
+        const rows = await query(`SELECT COALESCE(a.file_url,to_jsonb(a)->>'storage_key') AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}`, [id, a.accountId, readIds]);
         if (!rows.length) throw fail(404, 'Media not found');
         const media = rows[0]; const upstream = mediaRequest(media.ref, env);
         const range = req.headers.range;
@@ -1707,6 +1708,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         else res.end();
         return;
       }
+      // CONTRACT: http.whatsapp-app.chat-details.v1
       if (req.method === 'GET' && (path === '/api/chat-details' || path === '/api/contact-details' || path === '/api/group-details' || /^\/api\/chats\/[^/]+\/(?:group|contact)$/.test(path) || /^\/api\/groups\/[^/]+\/(?:info|participants)$/.test(path))) {
         const a = accountParam(url.searchParams.get('account'));
         const pathChat = path.match(/^\/api\/(?:chats|groups)\/([^/]+)\/(?:group|contact|info|participants)$/)?.[1];
@@ -1794,12 +1796,19 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const limit = boundedInteger(url.searchParams.get('limit'), 'limit', { max: MAX_PAGE_SIZE, fallback: 50 });
         const scope = createHash('sha256').update(JSON.stringify(['media-v1', a.accountId, conversation.id, kind])).digest('hex');
         const rawCursor = url.searchParams.get('cursor') ?? url.searchParams.get('before');
-        const pageCursor = rawCursor ? decodeMediaPageCursor(rawCursor, scope, url.searchParams.has('cursor') ? 'cursor' : 'before') : null;
+        const schema = await getDatabaseSchema(query);
+        const pageCursor = rawCursor ? decodeMediaPageCursor(rawCursor, scope, url.searchParams.has('cursor') ? 'cursor' : 'before', schema) : null;
         const args = [a.accountId, readIds];
-        const clauses = ["m.account=$1", "m.conversation_id=ANY($2::text[])", "m.platform='whatsapp'", 'NOT m.is_deleted'];
+        const clauses = ["m.account=$1", "m.conversation_id=ANY($2::text[])", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_RETAINED_SQL];
         if (pageCursor?.keyset) {
-          args.push(pageCursor.timestamp, pageCursor.id, pageCursor.attachment);
-          clauses.push(`(m.wa_timestamp, m.id::text, COALESCE(a.id::text, '')) < ($${args.length - 2}::timestamptz, $${args.length - 1}::text, $${args.length}::text)`);
+          args.push(pageCursor.timestamp, pageCursor.id);
+          const position = `($${args.length - 1}::timestamptz, $${args.length}::${schema.messageIdType})`;
+          let boundary = `(m.wa_timestamp, m.id) < ${position}`;
+          if (pageCursor.attachment) {
+            args.push(pageCursor.attachment);
+            boundary = `(${boundary} OR ((m.wa_timestamp, m.id) = ${position} AND a.id < $${args.length}::${schema.attachmentIdType}))`;
+          }
+          clauses.push(boundary);
         } else if (pageCursor) {
           args.push(pageCursor.timestamp);
           clauses.push(`m.wa_timestamp < $${args.length}::timestamptz`);
@@ -1815,7 +1824,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
                   a.id AS attachment_id,a.mime_type,a.file_name,a.file_size,a.file_url,a.caption
              FROM messages m LEFT JOIN attachments a ON a.message_id=m.id
             WHERE ${clauses.join(' AND ')}
-            ORDER BY m.wa_timestamp DESC, m.id::text DESC, COALESCE(a.id::text, '') DESC
+            ORDER BY m.wa_timestamp DESC, m.id DESC, a.id DESC NULLS LAST
             LIMIT $${args.length}`,
           args
         );
@@ -1831,8 +1840,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             ? item.content?.match(/https?:\/\/[^\s<]+/i)?.[0]?.replace(/[),.!?;:]+$/, '') || null
             : null;
           return {
-            id: item.attachment_id || item.id,
-            messageId: item.wa_message_id || item.id,
+            id: String(item.attachment_id || item.id),
+            messageId: String(item.wa_message_id || item.id),
             type: item.message_type,
             kind: itemKind,
             text: item.content || '',
@@ -1855,6 +1864,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         [a.accountId, await conversationReadIds(a, conversation), range.start, range.end]);
         return json(200, {account: a.accountId, chat: conversation.id, messageId: rows[0]?.wa_message_id || rows[0]?.id || null});
       }
+      // CONTRACT: http.whatsapp-app.search.v1
       if (req.method === 'GET' && (path === '/api/search' || path === '/api/messages/search' || /^\/api\/chats\/[^/]+\/search$/.test(path))) {
         const a = accountParam(url.searchParams.get('account'));
         const pathChat = path.match(/^\/api\/chats\/([^/]+)\/search$/)?.[1];
@@ -1866,13 +1876,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const chat = conversation?.id || null;
         const limit = boundedInteger(url.searchParams.get('limit'), 'limit', { max: MAX_PAGE_SIZE, fallback: 50 });
         const cursorScope = { account: a.accountId, chat, queryHash: createHash('sha256').update(q).digest('hex'), searchScope };
-        const cursor = url.searchParams.has('cursor') ? decodeSearchCursor(url.searchParams.get('cursor'), cursorScope) : null;
+        const schema = await getDatabaseSchema(query);
+        const cursor = url.searchParams.has('cursor') ? decodeSearchCursor(url.searchParams.get('cursor'), cursorScope, schema) : null;
         const args = [a.accountId, `%${q}%`];
-        const clauses = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_VISIBLE_SQL, 'm.content ILIKE $2'];
+        const clauses = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_RETAINED_SQL, MESSAGE_VISIBLE_SQL, 'm.content ILIKE $2'];
         if (conversation) { args.push(await conversationReadIds(a, conversation)); clauses.push(`m.conversation_id=ANY($${args.length}::text[])`); }
         if (cursor) {
           args.push(cursor.timestamp, cursor.id);
-          clauses.push(`(m.wa_timestamp, m.id::text) < ($${args.length - 1}::timestamptz, $${args.length}::text)`);
+          clauses.push(`(m.wa_timestamp, m.id) < ($${args.length - 1}::timestamptz, $${args.length}::${schema.messageIdType})`);
         }
         args.push(limit + 1);
         const rows = await query(
@@ -2336,9 +2347,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (!['me', 'everyone'].includes(body.scope)) throw fail(400, 'Invalid delete scope');
           const suffix = body.scope === 'me' ? '/for-me' : '';
           result = await featureConnector(a, `/messages/${encodeURIComponent(target.providerChat)}/${encodeURIComponent(messageId)}${suffix}`, { method: 'DELETE', body: {}, requireSending: true });
-          // La casa no tiene columna deleted_at: la revocación vive en metadata->>'deleted_at'
-          // (mismo linaje que DELETED_AT_SQL y el conector). Borrar para mí no toca is_deleted.
-          await query("UPDATE messages SET updated_at=now(), is_deleted = is_deleted OR NOT $4::boolean, status = CASE WHEN $4::boolean THEN status ELSE 'deleted' END, metadata = COALESCE(metadata,'{}'::jsonb) || CASE WHEN $4::boolean THEN jsonb_build_object('deleted_for_me', true) ELSE jsonb_build_object('deleted_at', now()::text) END WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, body.scope === 'me']);
+          await query("UPDATE messages SET is_deleted=CASE WHEN $4::boolean THEN is_deleted ELSE true END, status=CASE WHEN $4::boolean THEN status ELSE 'deleted' END, updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('deleted_for_me',$4::boolean) || CASE WHEN $4::boolean THEN '{}'::jsonb ELSE jsonb_build_object('deleted_at', COALESCE(metadata->>'deleted_at', to_jsonb(messages)->>'deleted_at', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') || 'Z')) END WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, body.scope === 'me']);
         }
         return json(200, { account: a.accountId, chat, action, confirmed: true, ...result });
       }
@@ -2909,7 +2918,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           }
           if (lock !== 'none') await sessions.save(session);
           let context = [];
-          context = await query(`SELECT m.content, m.direction, m.wa_timestamp, COALESCE(NULLIF(p.name, ''), NULLIF(p.push_name, ''), m.sender_wa_id) AS sender FROM messages m LEFT JOIN participants p ON p.account=m.account AND p.id=m.sender_wa_id WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp' AND NOT m.is_deleted AND ${MESSAGE_VISIBLE_SQL} ORDER BY m.wa_timestamp DESC LIMIT 60`, [a.accountId, await conversationReadIds(a, conversation)]);
+          context = await query(`SELECT m.content, m.direction, m.wa_timestamp, COALESCE(NULLIF(p.name, ''), NULLIF(p.push_name, ''), m.sender_wa_id) AS sender FROM messages m LEFT JOIN participants p ON p.account=m.account AND p.id=m.sender_wa_id WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp' AND NOT m.is_deleted AND ${MESSAGE_RETAINED_SQL} AND ${MESSAGE_VISIBLE_SQL} ORDER BY m.wa_timestamp DESC LIMIT 60`, [a.accountId, await conversationReadIds(a, conversation)]);
           const turn = randomUUID();
           const marker = `[SocialMedia turn ${turn}]`;
           const capability = chatToolCapability(env.HERMES_CHAT_TOOL_SECRET, a.accountId, chat, turn, body.allowPropose === true, allowSend, requestId);

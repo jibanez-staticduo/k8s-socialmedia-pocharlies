@@ -9,15 +9,22 @@
  */
 import { runWithRequestActor } from '@mcp-socialmedia/shared';
 import { MCPServer } from './server';
+import { useTestAccounts } from '../domain/test-accounts';
 import { connector as stub, TEST_CONNECTOR_SECRET as SECRET } from './test-connector';
 
 const connector = (mode: 'gated' | 'open') => stub(mode, '{"id":"1"}');
 
 function serverFor(instagramUrl: string, secret = SECRET) {
+  process.env.TEST_CONNECTOR_SECRET = secret;
+  useTestAccounts({
+    whatsapp: { personal: 'http://wa-personal' },
+    instagram: { skirmshop: instagramUrl },
+    secretEnv: 'TEST_CONNECTOR_SECRET',
+  });
   const server = Object.create(MCPServer.prototype) as MCPServer;
   Object.assign(server as unknown as Record<string, unknown>, {
     instagramUrl,
-    connectorSecret: secret,
+    connectorSecret: 'unused-constructor-secret',
     logger: { error: jest.fn() },
   });
   return server as unknown as Record<string, (...a: unknown[]) => Promise<any>>;

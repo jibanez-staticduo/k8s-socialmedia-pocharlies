@@ -57,7 +57,7 @@ async function fixture(t, { subject = 'owner-sub', now = () => Date.now(), ttl =
     }
     throw Error(`Unexpected upstream request: ${url}`);
   };
-  const app = await createApp({ env, db: { query: async () => ({ rows: [] }) }, registry: [], fetchImpl, now });
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']}, env, db: { query: async () => ({ rows: [] }) }, registry: [], fetchImpl, now });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${app.server.address().port}`;

@@ -45,7 +45,7 @@ async function fixture(t) {
     APP_ENABLE_SENDING: 'false',
     APP_REALTIME_HEARTBEAT_MS: '100',
   };
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env,
     db,
     realtime,
@@ -73,13 +73,18 @@ async function fixture(t) {
 async function nextFrame(reader, pending = '') {
   let buffer = pending;
   const decoder = new TextDecoder();
-  while (!buffer.includes('\n\n')) {
-    const { value, done } = await reader.read();
-    assert.equal(done, false, 'SSE closed before its next frame');
-    buffer += decoder.decode(value, { stream: true });
+  for (;;) {
+    while (!buffer.includes('\n\n')) {
+      const { value, done } = await reader.read();
+      assert.equal(done, false, 'SSE closed before its next frame');
+      buffer += decoder.decode(value, { stream: true });
+    }
+    const end = buffer.indexOf('\n\n');
+    const frame = buffer.slice(0, end);
+    buffer = buffer.slice(end + 2);
+    // Heartbeats may arrive between any two events under a busy test runner.
+    if (!frame.startsWith(':')) return { frame, rest: buffer };
   }
-  const end = buffer.indexOf('\n\n');
-  return { frame: buffer.slice(0, end), rest: buffer.slice(end + 2) };
 }
 
 test('GET /api/events requires a session and a configured account', async t => {

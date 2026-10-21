@@ -1,17 +1,5 @@
-/**
- * Instagram Connector — Multi-account Express server with webhook + NATS publisher + API proxy.
- * Part of the mcpservers-lab monorepo.
- *
- * Accounts are configured via env vars:
- *   INSTAGRAM_ACCOUNTS=skirmshop,barbelpapis
- *   INSTAGRAM_SKIRMSHOP_ACCESS_TOKEN=...
- *   INSTAGRAM_SKIRMSHOP_BUSINESS_ACCOUNT_ID=...
- *   INSTAGRAM_BARBELPAPIS_ACCESS_TOKEN=...
- *   INSTAGRAM_BARBELPAPIS_BUSINESS_ACCOUNT_ID=...
- *
- * Backwards-compatible: if INSTAGRAM_ACCOUNTS is not set, falls back to
- * single-account mode using INSTAGRAM_ACCESS_TOKEN / INSTAGRAM_BUSINESS_ACCOUNT_ID.
- */
+import { instagramMeUrl } from './url-config';
+/** Instagram connector with explicit registry accounts and isolated API authentication. */
 
 import express, { Express, Request, Response } from 'express';
 import pino from 'pino';
@@ -23,6 +11,8 @@ import {
 import { connectorApiGate } from './api-gate';
 import { discoverFacebookInstagramAccount, InstagramAPI, InstagramConfig } from './instagram-api';
 import { WebhookEvent, WebhookLog, createWebhookRouter } from './webhook';
+import { webhookAuthorization } from './webhook-access';
+import { loadConfiguredAccounts, accountAuthorization, secretMatches } from './account-access';
 import { InstagramEventPublisher } from './publisher';
 import {
   IG_PAIRING_SCOPES,
@@ -51,6 +41,7 @@ export interface AccountEntry {
   name: string;
   api: InstagramAPI;
   config: InstagramConfig;
+  ready?: boolean;
 }
 
 export interface LoadAccountsOptions {
@@ -91,6 +82,18 @@ export function loadAccounts(
     });
   const info = opts.info ?? ((message: string) => logger.info(message));
   const accounts = new Map<string, AccountEntry>();
+  if (env.SOCIAL_ACCOUNTS_FILE) {
+    for (const [name, entry] of loadConfiguredAccounts(env)) {
+      accounts.set(name, { ...entry, api: new InstagramAPI(entry.config) });
+    }
+    if (accounts.size) return accounts;
+    if (storeEnabled) {
+      info('No registry accounts configured. 0 legacy account(s), credential-store ENABLED');
+      return accounts;
+    }
+    die('No registry accounts configured. Set INSTAGRAM_ACCOUNTS.');
+    return accounts;
+  }
   const accountList = env.INSTAGRAM_ACCOUNTS;
   const fbAppId = env.FACEBOOK_APP_ID || '';
   const fbAppSecret = env.FACEBOOK_APP_SECRET || '';
@@ -193,6 +196,8 @@ export function metaAppSecrets(
   return [...new Set(secrets.filter((secret): secret is string => !!secret))];
 }
 
+
+
 /**
  * Build a reverse lookup: accountId → account name (for webhook routing).
  * We register BOTH id formats because Meta uses different IDs depending on API version:
@@ -204,12 +209,13 @@ async function registerInstagramIds(
 ): Promise<Map<string, string>> {
   const bizIdToAccount = new Map<string, string>();
   for (const [name, entry] of accounts) {
+    if (entry.ready === false) continue;
     if (entry.config.businessAccountId) {
       bizIdToAccount.set(entry.config.businessAccountId, name);
     }
     // Fetch the Instagram User ID (user_id) from /me and register it too
     try {
-      const meUrl = `https://graph.instagram.com/v21.0/me?fields=id,user_id&access_token=${entry.config.accessToken}`;
+      const meUrl = instagramMeUrl(entry.config.accessToken);
       const res = await fetch(meUrl);
       if (res.ok) {
         const data = (await res.json()) as { id?: string; user_id?: string };
@@ -270,6 +276,7 @@ async function registerInstagramIds(
 export async function createInstagramApp(opts: InstagramAppOptions): Promise<Express> {
   const env = opts.env ?? process.env;
   const { accounts, credentialStore, publisher } = opts;
+  const configured = env.SOCIAL_ACCOUNTS_FILE ? loadConfiguredAccounts(env) : undefined;
   const pairingConfig = instagramLoginConfigFromEnv(env);
   const PAIRING_STATE_TTL_SEC = Math.max(
     60,
@@ -280,31 +287,33 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
   const bizIdToAccount = await registerInstagramIds(accounts);
 
   const app = express();
-  // rawBody: Meta signs the original bytes, not the parsed JSON (webhookSignatureGuard).
-  app.use(
-    express.json({
-      verify: (req, _res, buffer) => {
-        (req as Request & { rawBody?: Buffer }).rawBody = buffer;
-      },
-    })
-  );
+  app.use(express.json({ verify: (req, _res, buffer) => {
+    (req as typeof req & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+  } }));
+  const verifyToken = configured ? env.WEBHOOK_VERIFY_TOKEN || '' : WEBHOOK_VERIFY_TOKEN;
+  // CONTRACT: http.instagram-connector.webhook.v1 — raw-body signature required in every account mode.
+  // Meta signs webhooks in both registry and legacy environment account modes.
+  const webhookAccounts = configured ?? new Map([...accounts].map(([name, entry]) => [name, {
+    ready: entry.ready ?? Boolean(entry.config.accessToken),
+    config: entry.config,
+  }]));
+  if (configured) app.use('/webhook', webhookAuthorization(webhookAccounts, bizIdToAccount, verifyToken));
 
   // Webhook routes — shared endpoint, routes by business account ID in payload
   app.use(
     '/',
-    createWebhookRouter(
-      WEBHOOK_VERIFY_TOKEN,
-      bizIdToAccount,
-      (account, event) => {
-        publisher.publish(account, event);
-      },
-      { secrets: metaAppSecrets(env, accounts), log: opts.log }
-    )
+    createWebhookRouter(verifyToken, bizIdToAccount, (account, event) => {
+      publisher.publish(account, event);
+    }, { secrets: metaAppSecrets(env, accounts), log: opts.log })
   );
 
   // Health check — all accounts
   // CONTRACT: http.instagram-connector.health.v1
   app.get('/health', async (req, res) => {
+    if (configured && !(credentialStore && actorFromHeaders(req.headers).sub)) {
+      res.json({ status: 'alive' });
+      return;
+    }
     // SC-1256: flag ON + verified sub → per-actor view (never the house accounts).
     const perActor = await resolveHealthForActor({
       headers: req.headers as Record<string, string | string[] | undefined>,
@@ -333,13 +342,20 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
     res.json({ status: 'ok', platform: 'instagram', accounts: results });
   });
 
-  // SKIRM-112: everything under /api/v1 needs the connector signature. Mounted after /health, the
-  // webhook and before every route below; the pairing callback lives at /oauth/instagram/callback.
   // CONTRACT: http.instagram-connector.api-v1.v1
   app.use('/api/v1', connectorApiGate(env, opts.log ?? logger));
 
   // List available accounts
-  app.get('/api/v1/accounts', (_req, res) => {
+  app.get('/api/v1/accounts', (req, res) => {
+    if (configured) {
+      const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
+      const list = [...configured.values()].filter(entry => secretMatches(token, entry.secret))
+        .map(entry => ({ name: entry.name, status: entry.ready ? 'configured' : 'setup-required' }));
+      if (!list.length) { res.status(401).json({ error: 'Authentication required' }); return; }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ accounts: list });
+      return;
+    }
     const list = [...accounts.entries()].map(([name, entry]) => ({
       name,
       businessAccountId: entry.config.businessAccountId,
@@ -347,12 +363,10 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
     res.json({ accounts: list });
   });
 
-  // Helper to resolve account from route param
   function getAccount(name: string): AccountEntry | undefined {
-    return (
-      accounts.get(name.toLowerCase()) ||
-      (accounts.size === 1 ? accounts.values().next().value : undefined)
-    );
+    if (configured) return accounts.get(name);
+    return accounts.get(name.toLowerCase()) ||
+      (accounts.size === 1 ? accounts.values().next().value : undefined);
   }
 
   // === SC-1194 P1: Instagram Login pairing (per-sub) ===
@@ -470,6 +484,13 @@ export async function createInstagramApp(opts: InstagramAppOptions): Promise<Exp
   });
 
   // === Per-account credential resolution (SC-1194 P1) ===
+  if (configured) {
+    const authorize = accountAuthorization(configured);
+    app.use('/api/v1/:account', (req, res, next) => {
+      if (credentialStore && actorFromHeaders(req.headers).sub) { next(); return; }
+      authorize(req, res, next);
+    });
+  }
   // With the store flag OFF (or an anonymous caller) this hands back the exact
   // env account the legacy routes used. With flag ON + a verified sub it
   // serves that sub's own row — never another user's account.

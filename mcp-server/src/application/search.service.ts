@@ -1,8 +1,20 @@
 import { Pool } from 'pg';
-import pino from 'pino';
-import { accountKey, stripAccount, type Account } from '../domain/account';
-import { accountNamespaces, brainInstanceForNamespace } from '../domain/account-registry';
+import type pino from 'pino';
+import { createServiceLogger } from './service-logger';
+import { accountKey, normalizeAccount, stripAccount, type Account } from '../domain/account';
+import { getAccounts, brainInstanceForNamespace } from '../domain/account-registry';
 import { mediaTypePredicate, messageTypesFor, type MediaType } from './media-type-filter';
+import {
+  HindsightClient,
+  hindsightConfigFromEnv,
+  isSocialmediaConversationDocumentId,
+  messageIdFromHindsightDocumentId,
+  semanticProviderFromEnv,
+  socialmediaChatTag,
+  socialmediaConversationDocumentId,
+  socialmediaScopeTag,
+  type HindsightRecallHit,
+} from '../infrastructure/hindsight-client';
 
 export interface SearchResult {
   messageId: string;
@@ -139,71 +151,129 @@ export interface SearchOutcome {
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
 
+interface ConversationDocumentMapping {
+  document_id: string;
+  platform: string;
+  namespace: string;
+  provider_account: string;
+  conversation_id: string;
+  topic_id: string;
+  message_ids: string[];
+  legacy_message_ids: string[];
+  confirmed: unknown;
+}
+
+function transcriptMessageIds(text: string): string[] {
+  // JSONL chunks can start/end inside a line; escaped content is never an ID field.
+  const pattern =
+    /(?:^|[,{]\s*)"message_id"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/gim;
+  return [...new Set([...text.matchAll(pattern)].map(match => match[1].toLowerCase()))].slice(
+    0,
+    MAX_SEARCH_LIMIT
+  );
+}
+
+const QUERY_STOP_WORDS = new Set(
+  'que para por una uno unos unas los las del con como donde cuando quien what where when which the and for from this that about'.split(
+    ' '
+  )
+);
+
 export class SearchService {
   private dbClient: Pool;
   private logger: pino.Logger;
   private readonly brain: BrainSearchConfig | null;
   private readonly fetchImpl: FetchLike;
+  private readonly hindsight: HindsightClient | null;
 
   constructor(
     dbClient: Pool,
-    brain: BrainSearchConfig | null = brainSearchConfigFromEnv(),
-    fetchImpl: FetchLike = (url, init) => fetch(url, init)
+    brain: BrainSearchConfig | null = semanticProviderFromEnv() === 'brain'
+      ? brainSearchConfigFromEnv()
+      : null,
+    fetchImpl: FetchLike = (url, init) => fetch(url, init),
+    hindsight: HindsightClient | null = semanticProviderFromEnv() === 'hindsight'
+      ? new HindsightClient(hindsightConfigFromEnv(), (url, init) =>
+          fetchImpl(String(url), init ?? {})
+        )
+      : null
   ) {
     this.dbClient = dbClient;
     this.brain = brain;
     this.fetchImpl = fetchImpl;
-    this.logger = pino({
-      transport: {
-        target: 'pino-pretty',
-        options: { colorize: true },
-      },
-    });
+    this.hindsight = hindsight;
+    this.logger = createServiceLogger();
     this.logger.info(
-      brain
-        ? `SearchService: búsqueda semántica en el brain ${brain.url} (corte ${brain.minScore})`
-        : 'SearchService: BRAIN_SEARCH_URL o BRAIN_MESSAGING_SEARCH_KEY sin configurar, solo búsqueda de texto'
+      hindsight
+        ? 'SearchService: busqueda semantica en Hindsight (banco dedicado de SocialMedia)'
+        : brain
+          ? `SearchService: búsqueda semántica en el brain ${brain.url} (corte ${brain.minScore})`
+          : 'SearchService: BRAIN_SEARCH_URL o BRAIN_MESSAGING_SEARCH_KEY sin configurar, solo búsqueda de texto'
+    );
+  }
+
+  /** Resolve enabled provider accounts before querying either search backend. */
+  private searchScopes(options: SearchOptions): ReturnType<typeof getAccounts> {
+    // The argument may be an account id or the namespace it files rows under.
+    const requested = options.account
+      ? normalizeAccount(options.account, options.platform)
+      : undefined;
+    return getAccounts(options.platform).filter(
+      a => !requested || (options.platform ? a.accountId === requested : a.namespace === requested)
     );
   }
 
   /**
-   * Performs keyword search using PostgreSQL Full Text Search
+   * Storage keys for a raw conversation/sender id across the selected accounts.
+   * An id already namespaced to a different account is dropped (fail closed).
+   * WhatsApp/Telegram rows are keyed by their account namespace; Instagram rows
+   * are keyed by the Instagram accountId (ig_<account>_...) while they are
+   * FILTERED by the namespace the registry declares for that account.
    */
-  async keywordSearch(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
+  private indexKeys(
+    scopes: ReturnType<typeof getAccounts>,
+    id: string,
+    kind: 'thread' | 'sender'
+  ): string[] {
+    return [
+      ...new Set(
+        scopes.flatMap(scope => {
+          if (scope.channel === 'instagram') {
+            const prefix = `ig_${scope.accountId}_`;
+            if (id.startsWith(prefix)) return [id];
+            if (id.startsWith('ig_')) return [];
+            return [`${prefix}${kind === 'thread' ? 'thread_' : ''}${id}`];
+          }
+          const parsed = stripAccount(id);
+          if (parsed.id !== id && parsed.account !== scope.namespace) return [];
+          return [accountKey(scope.namespace, id)];
+        })
+      ),
+    ];
+  }
+
+  /** Appends the identical account and message filters for both search strategies. */
+  private appendSearchFilters(sql: string, params: unknown[], options: SearchOptions) {
     const { chatId, from, to, sender } = options;
-    const limit = searchLimit(options.limit);
-
-    let sql = `
-      SELECT 
-        m.id as message_id,
-        m.conversation_id,
-        m.content,
-        m.sender_wa_id,
-        m.wa_timestamp,
-        m.platform,
-        m.account,
-        m.message_type,
-        ts_rank(to_tsvector('english', m.content), plainto_tsquery('english', $1)) as rank
-      FROM messages m
-      WHERE to_tsvector('english', m.content) @@ plainto_tsquery('english', $1)
-        AND (m.is_deleted IS NULL OR m.is_deleted = false)
-    `;
-
-    const params: unknown[] = [query];
-    let paramIndex = 2;
+    // A stale semantic index must never resurrect a message hidden locally.
+    sql += " AND m.metadata->>'deleted_for_me' IS DISTINCT FROM 'true'";
+    let paramIndex = params.length + 1;
+    const scopes = this.searchScopes(options);
+    // Instagram accounts may share a storage namespace; the ingested provider
+    // account is authoritative for their search boundary.
+    sql += ` AND (m.platform || ':' || CASE WHEN m.platform = 'instagram'
+      THEN m.metadata->>'instagram_account' ELSE m.account END) = ANY($${paramIndex++}::text[])`;
+    params.push(
+      scopes.map(a => `${a.channel}:${a.channel === 'instagram' ? a.accountId : a.namespace}`)
+    );
 
     if (chatId) {
-      if (options.rawIds) {
-        sql += ` AND m.conversation_id = $${paramIndex}`;
-        params.push(chatId);
-      } else if (options.account) {
-        sql += ` AND m.conversation_id = $${paramIndex}`;
-        params.push(accountKey(options.account, chatId));
-      } else {
-        sql += ` AND m.conversation_id = ANY($${paramIndex}::text[])`;
-        params.push(inEveryNamespace(chatId));
-      }
-      paramIndex++;
+      sql += ` AND m.conversation_id = ANY($${paramIndex++}::text[])`;
+      params.push(
+        options.rawIds && options.platform !== 'instagram'
+          ? [chatId]
+          : this.indexKeys(scopes, chatId, 'thread')
+      );
     }
 
     if (from) {
@@ -219,22 +289,19 @@ export class SearchService {
     }
 
     if (sender) {
-      if (options.rawIds) {
-        sql += ` AND m.sender_wa_id = $${paramIndex}`;
-        params.push(sender);
-      } else if (options.account) {
-        sql += ` AND m.sender_wa_id = $${paramIndex}`;
-        params.push(accountKey(options.account, sender));
-      } else {
-        sql += ` AND m.sender_wa_id = ANY($${paramIndex}::text[])`;
-        params.push(inEveryNamespace(sender));
-      }
-      paramIndex++;
+      sql += ` AND m.sender_wa_id = ANY($${paramIndex++}::text[])`;
+      params.push(
+        options.rawIds && options.platform !== 'instagram'
+          ? [sender]
+          : this.indexKeys(scopes, sender, 'sender')
+      );
     }
 
     if (options.account) {
-      sql += ` AND m.account = $${paramIndex}`;
-      params.push(options.account);
+      // The stored dimension is the registry namespace, not the tool argument:
+      // an Instagram account argument resolves to the namespace its rows live in.
+      sql += ` AND m.account = ANY($${paramIndex}::text[])`;
+      params.push([...new Set(scopes.map(a => a.namespace))]);
       paramIndex++;
     }
     if (options.platform) {
@@ -242,12 +309,42 @@ export class SearchService {
       params.push(options.platform);
       paramIndex++;
     }
+
     const messageTypes = messageTypesFor(options.mediaType);
     if (messageTypes) {
-      sql += mediaTypePredicate('m', paramIndex);
+      sql += mediaTypePredicate('m', paramIndex++);
       params.push(messageTypes);
-      paramIndex++;
     }
+
+    return { sql, paramIndex };
+  }
+
+  /**
+   * Performs keyword search using PostgreSQL Full Text Search
+   */
+  async keywordSearch(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
+    const limit = searchLimit(options.limit);
+
+    let sql = `
+      SELECT
+        m.id as message_id,
+        m.conversation_id,
+        m.content,
+        m.sender_wa_id,
+        m.wa_timestamp,
+        m.platform,
+        m.account,
+        m.message_type,
+        ts_rank(to_tsvector('english', m.content), plainto_tsquery('english', $1)) as rank
+      FROM messages m
+      WHERE to_tsvector('english', m.content) @@ plainto_tsquery('english', $1)
+        AND (m.is_deleted IS NULL OR m.is_deleted = false)
+    `;
+
+    const params: unknown[] = [query];
+    const filters = this.appendSearchFilters(sql, params, options);
+    sql = filters.sql;
+    const paramIndex = filters.paramIndex;
 
     sql += ` ORDER BY rank DESC, m.wa_timestamp DESC LIMIT $${paramIndex}`;
     params.push(limit);
@@ -281,6 +378,7 @@ export class SearchService {
     query: string,
     options: SearchOptions = {}
   ): Promise<{ results: SearchResult[]; failures: SearchFailure[] }> {
+    if (this.hindsight) return this.hindsightSemanticSearch(query, options);
     if (!this.brain)
       throw new Error('BRAIN_SEARCH_URL o BRAIN_MESSAGING_SEARCH_KEY sin configurar');
     // Instagram does not go through brain-windows: there are no chunks to find.
@@ -343,6 +441,211 @@ export class SearchService {
     return { results, failures };
   }
 
+  private async hindsightSemanticSearch(
+    query: string,
+    options: SearchOptions
+  ): Promise<{ results: SearchResult[]; failures: SearchFailure[] }> {
+    const scopes = this.searchScopes(options);
+    const requests = scopes.flatMap(scope => {
+      const scopeTag = socialmediaScopeTag(scope.channel, scope.namespace, scope.accountId);
+      const chats = options.chatId
+        ? options.rawIds && scope.channel !== 'instagram'
+          ? [options.chatId]
+          : this.indexKeys([scope], options.chatId, 'thread')
+        : [undefined];
+      return chats.map(chat => ({
+        scope,
+        scopeTag,
+        chat,
+        tags: [scopeTag, ...(chat ? [socialmediaChatTag(chat)] : [])],
+      }));
+    });
+    const responses = await Promise.allSettled(
+      requests.map(request =>
+        (this.hindsight as HindsightClient).recall({ query, tags: request.tags })
+      )
+    );
+    const failures: SearchFailure[] = [];
+    const accepted: Array<{ hit: HindsightRecallHit; request: (typeof requests)[number] }> = [];
+    responses.forEach((response, i) => {
+      const request = requests[i];
+      if (response.status === 'rejected') {
+        failures.push({
+          accountId: request.scope.accountId,
+          message: (response.reason as Error)?.message || String(response.reason),
+        });
+        return;
+      }
+      for (const hit of response.value.slice(0, BRAIN_MAX_HITS)) {
+        if (
+          (!messageIdFromHindsightDocumentId(hit.documentId) &&
+            !isSocialmediaConversationDocumentId(hit.documentId)) ||
+          !request.tags.every(tag => hit.tags.includes(tag))
+        )
+          continue;
+        accepted.push({ hit, request });
+      }
+    });
+    if (!accepted.length) return { results: [], failures };
+    const conversationIds = [
+      ...new Set(
+        accepted
+          .filter(({ hit }) => isSocialmediaConversationDocumentId(hit.documentId))
+          .map(({ hit }) => hit.documentId)
+      ),
+    ];
+    const legacyIds = [
+      ...new Set(
+        accepted.flatMap(({ hit }) => {
+          const id = messageIdFromHindsightDocumentId(hit.documentId);
+          return id ? [id] : [];
+        })
+      ),
+    ];
+    const destination = (this.hindsight as HindsightClient).destination;
+    const { rows: mappingRows } = await this.dbClient.query<ConversationDocumentMapping>(
+      `
+      SELECT document_id, platform, namespace, provider_account, conversation_id, topic_id, message_ids, confirmed,
+        legacy.legacy_message_ids
+      FROM hindsight_conversation_documents d
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(array_agg(m.id), '{}'::uuid[]) AS legacy_message_ids FROM messages m
+        WHERE m.id = ANY($3::uuid[]) AND m.platform = d.platform AND m.account = d.namespace
+          AND (CASE WHEN m.platform = 'instagram' THEN m.metadata->>'instagram_account' ELSE m.account END) = d.provider_account
+          AND m.conversation_id = d.conversation_id
+          AND (CASE WHEN m.platform = 'telegram' THEN COALESCE(NULLIF(m.metadata->>'topic_id', ''),
+            NULLIF(m.metadata->>'thread_id', ''), NULLIF(m.metadata->>'telegram_topic_id', ''), '') ELSE '' END) = d.topic_id
+      ) legacy
+      WHERE destination = $1 AND confirmed IS NOT NULL
+      AND (document_id = ANY($2::text[]) OR cardinality(legacy.legacy_message_ids) > 0)`,
+      [destination, conversationIds, legacyIds]
+    );
+    const mappings = mappingRows.filter(
+      mapping =>
+        mapping.confirmed != null &&
+        Array.isArray(mapping.message_ids) &&
+        isSocialmediaConversationDocumentId(mapping.document_id) &&
+        mapping.document_id === socialmediaConversationDocumentId(mapping)
+    );
+    const ranked = new Map<
+      string,
+      { order: number; score?: number; mapping?: ConversationDocumentMapping }
+    >();
+    for (const { hit, request } of accepted) {
+      const scopedMappings = mappings.filter(
+        mapping =>
+          mapping.platform === request.scope.channel &&
+          mapping.namespace === request.scope.namespace &&
+          mapping.provider_account === request.scope.accountId &&
+          (!request.chat || request.chat === mapping.conversation_id)
+      );
+      const legacyId = messageIdFromHindsightDocumentId(hit.documentId);
+      let ids: string[];
+      let mapping: ConversationDocumentMapping | undefined;
+      if (legacyId) {
+        // A confirmed conversation remains migrated after its selection becomes
+        // empty. Match current SQL scope, not only the latest selected UUIDs.
+        if (
+          scopedMappings.some(
+            doc =>
+              Array.isArray(doc.legacy_message_ids) && doc.legacy_message_ids.includes(legacyId)
+          )
+        )
+          continue;
+        ids = [legacyId];
+      } else {
+        mapping = scopedMappings.find(
+          doc =>
+            doc.document_id === hit.documentId &&
+            hit.tags.includes(socialmediaChatTag(doc.conversation_id))
+        );
+        if (!mapping) continue;
+        const remoteIds = transcriptMessageIds(hit.text);
+        ids = remoteIds.filter(id => mapping!.message_ids.includes(id));
+        if (!remoteIds.length) {
+          // No provenance field survived this chunk. Match current local text in
+          // this confirmed document, with a small cap, rather than expanding the chat.
+          const terms = [
+            ...new Set(
+              query
+                .normalize('NFKC')
+                .toLowerCase()
+                .match(/[\p{L}\p{N}]{3,}/gu) || []
+            ),
+          ]
+            .filter(term => !QUERY_STOP_WORDS.has(term))
+            .slice(0, 12);
+          if (!terms.length) continue;
+          let localSql = `SELECT m.id AS message_id FROM messages m WHERE m.id = ANY($1::uuid[])
+            AND (m.is_deleted IS NULL OR m.is_deleted = false)
+            AND m.conversation_id = $2 AND m.content ILIKE ANY($3::text[])`;
+          const localParams: unknown[] = [
+            mapping.message_ids,
+            mapping.conversation_id,
+            terms.map(term => `%${term}%`),
+          ];
+          localSql = this.appendSearchFilters(localSql, localParams, options).sql;
+          localSql += ` ORDER BY m.wa_timestamp DESC, m.id LIMIT $${localParams.length + 1}`;
+          localParams.push(Math.min(searchLimit(options.limit), 20));
+          const local = await this.dbClient.query(localSql, localParams);
+          ids = local.rows
+            .map(row => String(row.message_id))
+            .filter(id => mapping!.message_ids.includes(id));
+        }
+      }
+      for (const id of ids) {
+        const key = `${request.scopeTag}\u0000${id}`;
+        if (!ranked.has(key)) ranked.set(key, { order: ranked.size, score: hit.score, mapping });
+      }
+    }
+    if (!ranked.size) return { results: [], failures };
+    const ids = [...new Set([...ranked.keys()].map(key => key.split('\u0000')[1]))];
+    let sql = `SELECT m.id as message_id, m.conversation_id, m.content,
+      m.sender_wa_id, m.wa_timestamp, m.platform, m.account, m.message_type,
+      m.metadata->>'instagram_account' as instagram_account,
+      CASE WHEN m.platform = 'telegram' THEN COALESCE(NULLIF(m.metadata->>'topic_id', ''),
+        NULLIF(m.metadata->>'thread_id', ''), NULLIF(m.metadata->>'telegram_topic_id', ''), '') ELSE '' END AS topic_id
+      FROM messages m WHERE m.id = ANY($1::uuid[])
+      AND (m.is_deleted IS NULL OR m.is_deleted = false)`;
+    const params: unknown[] = [ids];
+    sql = this.appendSearchFilters(sql, params, options).sql;
+    const { rows } = await this.dbClient.query(sql, params);
+    const results = rows
+      .flatMap(row => {
+        const scope = scopes.find(
+          s =>
+            s.channel === row.platform &&
+            s.namespace === row.account &&
+            (s.channel !== 'instagram' || s.accountId === row.instagram_account)
+        );
+        if (!scope) return [];
+        const tag = socialmediaScopeTag(scope.channel, scope.namespace, scope.accountId);
+        const rank = ranked.get(`${tag}\u0000${row.message_id}`);
+        if (
+          rank?.mapping &&
+          (rank.mapping.conversation_id !== row.conversation_id ||
+            rank.mapping.topic_id !== row.topic_id ||
+            !rank.mapping.message_ids.includes(row.message_id))
+        )
+          return [];
+        return rank ? [{ row, rank }] : [];
+      })
+      .sort((a, b) => a.rank.order - b.rank.order)
+      .slice(0, searchLimit(options.limit))
+      .map(({ row, rank }) => ({
+        messageId: row.message_id,
+        conversationId: row.conversation_id,
+        content: row.content || '',
+        senderWaId: row.sender_wa_id,
+        waTimestamp: row.wa_timestamp,
+        ...(rank.score !== undefined ? { similarity: rank.score } : {}),
+        platform: row.platform,
+        account: row.account,
+        messageType: row.message_type,
+      }));
+    return { results, failures };
+  }
+
   /**
    * One brain query per account in scope: each account's conversations live
    * in its own brain instance (`brainInstance` in the account registry), and
@@ -350,22 +653,22 @@ export class SearchService {
    * account's chunks even if two ever shared an instance.
    */
   private brainScopes(options: SearchOptions): BrainScope[] {
-    const namespaces = options.account ? [options.account] : accountNamespaces();
-    // Account-less and the chat id already carries an account's prefix (`leila:…`,
-    // as the index returns it): only that account's scope can hold it, and
-    // accountKey would refuse it as a cross-account identifier for the others.
-    const own =
-      options.chatId && !options.rawIds && !options.account ? stripAccount(options.chatId) : null;
+    const accounts = this.searchScopes(options).filter(a => a.channel !== 'instagram');
+    const namespaces = [...new Set(accounts.map(a => a.namespace))];
     const scopes: BrainScope[] = [];
     for (const account of namespaces) {
-      if (own && own.id !== options.chatId && own.account !== account) continue;
       const instance = brainInstanceForNamespace(account);
       if (!instance) continue;
       const scope: BrainScope = { instance, account };
       if (options.chatId) {
-        scope.conversationIds = [
-          options.rawIds ? options.chatId : accountKey(account, options.chatId),
-        ];
+        scope.conversationIds = options.rawIds
+          ? [options.chatId]
+          : this.indexKeys(
+              accounts.filter(a => a.namespace === account),
+              options.chatId,
+              'thread'
+            );
+        if (!scope.conversationIds.length) continue;
       }
       scopes.push(scope);
     }
@@ -465,33 +768,9 @@ export class SearchService {
         AND (m.is_deleted IS NULL OR m.is_deleted = false)
     `;
     const params: unknown[] = [waMessageIds];
-    let paramIndex = 2;
-    const add = (clause: string, value: unknown) => {
-      sql += ` AND ${clause.replace('?', `$${paramIndex}`)}`;
-      params.push(value);
-      paramIndex++;
-    };
-    const { chatId, from, to, sender } = options;
-    if (chatId) {
-      if (options.rawIds) add('m.conversation_id = ?', chatId);
-      else if (options.account) add('m.conversation_id = ?', accountKey(options.account, chatId));
-      else add('m.conversation_id = ANY(?::text[])', inEveryNamespace(chatId));
-    }
-    if (from) add('m.wa_timestamp >= ?', from);
-    if (to) add('m.wa_timestamp <= ?', to);
-    if (sender) {
-      if (options.rawIds) add('m.sender_wa_id = ?', sender);
-      else if (options.account) add('m.sender_wa_id = ?', accountKey(options.account, sender));
-      else add('m.sender_wa_id = ANY(?::text[])', inEveryNamespace(sender));
-    }
-    if (options.account) add('m.account = ?', options.account);
-    if (options.platform) add('m.platform = ?', options.platform);
-    const messageTypes = messageTypesFor(options.mediaType);
-    if (messageTypes) {
-      sql += mediaTypePredicate('m', paramIndex);
-      params.push(messageTypes);
-      paramIndex++;
-    }
+    // Only WhatsApp and Telegram are ingested as brain conversation chunks.
+    sql += " AND m.platform IN ('whatsapp', 'telegram')";
+    sql = this.appendSearchFilters(sql, params, options).sql;
     const result = await this.dbClient.query(sql, params);
     return result.rows;
   }
@@ -600,15 +879,4 @@ export async function ensureSearchIndexes(
       await client.end().catch(() => {});
     }
   }
-}
-
-/**
- * Account-less filter: the raw id under every declared namespace (personal = bare).
- * An id that already carries an account's prefix is that account's row as stored:
- * it is looked up as given, never widened to the other accounts (accountKey would
- * refuse it as a cross-account identifier).
- */
-function inEveryNamespace(id: string): string[] {
-  if (stripAccount(id).id !== id) return [id];
-  return [...new Set(accountNamespaces().map(a => accountKey(a, id)))];
 }

@@ -19,6 +19,7 @@
  * cold-starts with its own lookback.
  */
 import { Pool } from 'pg';
+import { semanticProviderFromEnv } from '../infrastructure/hindsight-client';
 import pino from 'pino';
 import { ingestNamespaces, BrainPushConfig } from './brain-ingest-lib';
 import {
@@ -332,6 +333,9 @@ export async function runLlmPhase(
 }
 
 async function main(): Promise<void> {
+  if (semanticProviderFromEnv() === 'hindsight') {
+    throw new Error('Brain windows backfill refused: SEMANTIC_PROVIDER=hindsight');
+  }
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl)
     throw new Error(

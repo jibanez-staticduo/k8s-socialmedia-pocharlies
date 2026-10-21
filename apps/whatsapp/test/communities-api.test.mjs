@@ -15,7 +15,7 @@ const community = {
 async function fixture(t, { upstream = () => ({ ok: true, communities: [community] }), sending = true, query = async () => ({ rows: [] }) } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'wa-communities-test-'));
   const calls = [];
-  const app = await createApp({
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},
     env: { DATA_DIR: dir, UI_AUTH_USERNAME: 'tester', UI_AUTH_PASSWORD: 'fixture', APP_PUBLIC_URL: 'https://wa.example', APP_ENABLE_SENDING: String(sending), A_SECRET: 'test-a', B_SECRET: 'test-b' },
     db: { query },
     registry: [

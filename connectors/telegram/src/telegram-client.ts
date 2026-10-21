@@ -12,13 +12,14 @@ import {
   Chat,
   MtArgumentError,
   MtUnsupportedError,
+  MtTimeoutError,
   tl,
 } from '@mtcute/node';
 import type { ITelegramStorageProvider } from '@mtcute/node';
 import type { CommonSendParams } from '@mtcute/node/methods.js';
 import { EventEmitter } from 'events';
 import pino from 'pino';
-import { notifyDashboard as dashboardNotify } from '@mcp-socialmedia/shared';
+import { notifyDashboard as dashboardNotify } from './dashboard-notifier';
 import { isSessionInvalidatedError } from './credential-session';
 import {
   EditDeduper,
@@ -39,6 +40,12 @@ function mediaDeadlineMs(): number {
 
 export function telegramRetryAfter(error: unknown): number | null {
   if (error && tl.RpcError.is(error, 'FLOOD_WAIT_%d')) return Math.max(1, Math.ceil(error.seconds));
+  return null;
+}
+
+export function telegramDownloadRetryAfter(error: unknown): number | null {
+  if (error instanceof MtTimeoutError || (tl.RpcError.is(error) && Math.abs(error.code) >= 500))
+    return 60;
   return null;
 }
 
@@ -81,13 +88,15 @@ export function telegramReadClient<T extends object>(client: T, signal: AbortSig
     const proxy = new Proxy(target, {
       get(object, property, receiver) {
         if (property === 'call') {
-          // mtcute downloads request infinite flood sleep themselves. Force the
-          // wait to propagate so the durable recovery queue can schedule it.
+          // Download workers override client defaults with infinite retries.
+          // Let the durable queue schedule server outages instead of spinning.
           return (request: unknown, options: object = {}) =>
             object.call(request, {
               ...options,
               abortSignal: signal,
               floodSleepThreshold: 0,
+              maxRetryCount: 2,
+              throw503: true,
             });
         }
         const value = Reflect.get(object, property, receiver);
@@ -266,10 +275,8 @@ function mapChatType(peer: Peer | undefined | null): TelegramMessage['chatType']
  * caller can never click a lossy string by accident; `dataB64` always carries
  * the exact bytes.
  */
-function inlineButtonsOf(
-  markup: unknown
-): InlineKeyboardButton[][] | undefined {
-  const rows = (markup as { type?: string; buttons?: unknown[][] } | null);
+function inlineButtonsOf(markup: unknown): InlineKeyboardButton[][] | undefined {
+  const rows = markup as { type?: string; buttons?: unknown[][] } | null;
   if (!rows || rows.type !== 'inline' || !Array.isArray(rows.buttons)) return undefined;
 
   const out: InlineKeyboardButton[][] = [];
@@ -693,7 +700,14 @@ export class TelegramClientWrapper extends EventEmitter {
     const params: { limit: number; offset?: { id: number; date: number } } = { limit };
     if (offsetId) params.offset = { id: offsetId, date: 0 };
 
-    const messages = await this.client.getHistory(toMtcutePeer(chatId), params);
+    const messages = await withDownloadDeadline(
+      signal =>
+        telegramReadClient(this.client.withParams({ abortSignal: signal }), signal).getHistory(
+          toMtcutePeer(chatId),
+          params
+        ),
+      mediaDeadlineMs()
+    );
     const out: TelegramMessage[] = [];
     for (const m of messages) {
       const p = await this.parseMessage(m);
@@ -1048,11 +1062,9 @@ export class TelegramClientWrapper extends EventEmitter {
     forwardCount: number = 0
   ): Promise<any> {
     if (!this.connected) throw new Error('Not connected');
-    const missing = await this.client.addChatMembers(
-      toMtcutePeer(chatId),
-      members,
-      { forwardCount }
-    );
+    const missing = await this.client.addChatMembers(toMtcutePeer(chatId), members, {
+      forwardCount,
+    });
     return { chatId, membersRequested: members.length, missing };
   }
 
@@ -1301,7 +1313,11 @@ export class TelegramClientWrapper extends EventEmitter {
           const userId: number | undefined = peerObj?.id ?? peerObj?.userId;
           if (typeof userId !== 'number') continue;
           const displayName: string | null =
-            peerObj?.displayName || peerObj?.firstName || peerObj?.username || peerObj?.title || null;
+            peerObj?.displayName ||
+            peerObj?.firstName ||
+            peerObj?.username ||
+            peerObj?.title ||
+            null;
           out.push({ emoji, userId, displayName, mine: meId !== null && userId === meId });
         }
         offset = result?.next;
@@ -1460,11 +1476,7 @@ export class TelegramClientWrapper extends EventEmitter {
     const effectiveReplyTo = options?.replyTo ?? options?.threadId;
     const sendParams: CommonSendParams | undefined =
       effectiveReplyTo !== undefined ? { replyTo: effectiveReplyTo } : undefined;
-    const messages = await this.client.sendMediaGroup(
-      toMtcutePeer(chatId),
-      medias,
-      sendParams
-    );
+    const messages = await this.client.sendMediaGroup(toMtcutePeer(chatId), medias, sendParams);
     return messages.map(message => message.id);
   }
 

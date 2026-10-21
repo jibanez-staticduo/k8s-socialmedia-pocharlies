@@ -8,10 +8,11 @@ import { MCPServer } from './server';
 import { connector, TEST_CONNECTOR_SECRET as SECRET } from './test-connector';
 
 function telegramServer(url: string, secret = SECRET) {
-  useTestAccounts({ telegram: { personal: url } });
+  process.env.TEST_CONNECTOR_SECRET = secret;
+  useTestAccounts({ telegram: { personal: url }, secretEnv: 'TEST_CONNECTOR_SECRET' });
   const server = Object.create(MCPServer.prototype) as MCPServer;
   Object.assign(server as unknown as Record<string, unknown>, {
-    connectorSecret: secret,
+    connectorSecret: 'unused-constructor-secret',
     logger: { error: jest.fn() },
   });
   return server as unknown as Record<string, (...a: unknown[]) => Promise<any>>;

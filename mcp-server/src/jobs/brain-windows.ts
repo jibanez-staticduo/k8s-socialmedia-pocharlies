@@ -22,6 +22,7 @@
  * (missing env, DB unreachable, unreadable config) exit non-zero.
  */
 import { Pool } from 'pg';
+import { semanticProviderFromEnv } from '../infrastructure/hindsight-client';
 import pino from 'pino';
 import { ingestNamespaces } from './brain-ingest-lib';
 import {
@@ -445,6 +446,10 @@ async function accountPass(
 }
 
 async function main(): Promise<void> {
+  if (semanticProviderFromEnv() === 'hindsight') {
+    logger.info('brain-windows skipped: SEMANTIC_PROVIDER=hindsight');
+    return;
+  }
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl)
     throw new Error(
@@ -525,6 +530,7 @@ async function main(): Promise<void> {
  * refused (an alert fires on any > 0 — the cap only stops the damage, a
  * human has to look) and when the pass finished.
  */
+// CONTRACT: metric.brain-windows.refused-deletes.v1
 export function passMetricsText(refusedByAccount: Record<string, number>, nowMs: number): string {
   const lines = Object.entries(refusedByAccount).map(
     ([account, n]) => `brain_windows_refused_deletes{account="${account}"} ${n} ${nowMs}`

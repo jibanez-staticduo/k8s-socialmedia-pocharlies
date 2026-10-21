@@ -28,7 +28,7 @@ async function fixture(t, upstream = async () => Response.json({choices: [{messa
   const calls = [];
   const env = {DATA_DIR: dir, UI_AUTH_USERNAME: 'test', UI_AUTH_PASSWORD: 'test', APP_PUBLIC_URL: 'https://test.example',
     HERMES_RUNS_ENABLED: String(runs), HERMES_API_URL: 'http://hermes/p/socialmedia/v1', HERMES_API_KEY: 'test-key', HERMES_DEFAULT_MODEL: 'gpt-6-luna', HERMES_PROVIDER: 'litellm', ACCOUNT_SECRET: 'test-secret'};
-  const app = await createApp({env, registry: ['personal', 'secondary'].map(accountId => ({channel: 'whatsapp', accountId, secretEnv: 'ACCOUNT_SECRET', connectorUrl: 'http://connector'})),
+  const app = await createApp({ databaseSchema: {messageIdType: 'uuid', attachmentIdType: 'uuid', attachmentDurationColumns: ['duration_seconds', 'duration']},env, registry: ['personal', 'secondary'].map(accountId => ({channel: 'whatsapp', accountId, secretEnv: 'ACCOUNT_SECRET', connectorUrl: 'http://connector'})),
     db: {query: async (sql, args) => ({rows: /FROM conversations/.test(sql) && ['personal', 'secondary'].includes(args?.[0]) && ['contact', 'other'].includes(args?.[1]) ? [{id: args[1], name: 'Contact'}] : []})},
     fetchImpl: async (url, options) => {
       if (url.endsWith('/api/model/options')) return Response.json(inventory);

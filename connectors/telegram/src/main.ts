@@ -1,9 +1,6 @@
 import express from 'express';
-import {
-  PostgresCredentialStore,
-  credentialSessionKeyFromEnv,
-  requireConnectorSecret,
-} from '@mcp-socialmedia/shared';
+import { dashboardUrl } from './dashboard-notifier';
+import { PostgresCredentialStore, credentialSessionKeyFromEnv, requireConnectorSecret } from '@mcp-socialmedia/shared';
 import { TelegramClientWrapper, TelegramMessage, TelegramMessageEdit } from './telegram-client';
 import {
   TelegramEventPublisher,
@@ -28,9 +25,8 @@ const PORT = parseInt(process.env.PORT || '3002', 10);
 const CONNECTOR_ACCOUNT = process.env.CONNECTOR_ACCOUNT || 'personal';
 
 async function main() {
-  // SKIRM-111 (F3-2): no key, no process; the placeholder only with CONNECTOR_SECRET_STRICT unset.
+  dashboardUrl();
   const CONNECTOR_SHARED_SECRET = requireConnectorSecret();
-
   // Validate required configuration
   if (!TELEGRAM_API_ID || !TELEGRAM_API_HASH) {
     console.error('TELEGRAM_API_ID and TELEGRAM_API_HASH are required');
@@ -117,8 +113,6 @@ async function main() {
         eventPublisher.publishMessageEdited(toMessageEditedEvent(CONNECTOR_ACCOUNT, edit)),
     })
   );
-  // SKIRM-111: brain/dashboard/telegram-sync callers sign like /api/v1 (HMAC over "<ts>:<body>").
-  app.use('/api/public', createPublicRouter(client, CONNECTOR_SHARED_SECRET));
 
   // Health check endpoint. INFRA-291 (P4): readiness reports the REAL NATS
   // state (eventPublisher.isConnected()) — the publisher no longer kills the
@@ -177,6 +171,8 @@ async function main() {
   });
 
   // Connect to Telegram
+
+  app.use('/api/public', createPublicRouter(client, CONNECTOR_SHARED_SECRET));
 
   await client.connect();
 

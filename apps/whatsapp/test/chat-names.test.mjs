@@ -72,6 +72,7 @@ test('SQL keeps account predicates and joins participant names by scoped id', ()
   assert.match(CHAT_LIST_SQL, /p\.id = recent\.sender_wa_id/);
   assert.match(CHAT_LIST_SQL, /m\.direction = 'INBOUND'/);
   assert.match(MESSAGE_LIST_SQL, /m\.conversation_id = ANY\(\$2::text\[\]\)/);
+  assert.match(CHAT_LIST_SQL, /p\.account = recent\.account/);
   assert.match(MESSAGE_LIST_SQL, /p\.account = m\.account/);
   assert.match(MESSAGE_LIST_SQL, /senderName/);
 });
