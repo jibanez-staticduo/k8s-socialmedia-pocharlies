@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
+import { generateHMACSignature } from '@mcp-socialmedia/shared';
 import type {
   CredentialChannel,
   CredentialStore,
@@ -153,6 +154,17 @@ async function listen(app: Awaited<ReturnType<typeof createInstagramApp>>): Prom
   return { server, base: `http://127.0.0.1:${port}` };
 }
 
+/** SKIRM-112: /api/v1 needs the connector signature; a GET signs `{}`. */
+const CONNECTOR_KEY = 'boot-test-connector-key';
+function connectorHeaders(extra: Record<string, string>): Record<string, string> {
+  const ts = Math.floor(Date.now() / 1000);
+  return {
+    'x-connector-timestamp': String(ts),
+    'x-connector-signature': generateHMACSignature({}, ts, CONNECTOR_KEY),
+    ...extra,
+  };
+}
+
 test('flag ON + env de cuentas vacío → arranca con 0 legacy y log claro (C1)', () => {
   const infos: string[] = [];
   let fatalCalls = 0;
@@ -257,7 +269,11 @@ test('boot con store ON y 0 cuentas: /health 200 y ruta por actor sirve desde el
     assert.equal(accounts.size, 0);
 
     const app = await createInstagramApp({
-      env: { ...EMPTY_ACCOUNTS_ENV, CREDENTIAL_STORE_ENABLED: 'true' },
+      env: {
+        ...EMPTY_ACCOUNTS_ENV,
+        CREDENTIAL_STORE_ENABLED: 'true',
+        CONNECTOR_SHARED_SECRET: CONNECTOR_KEY,
+      },
       accounts,
       credentialStore: store,
       publisher: { publish: () => {} },
@@ -272,7 +288,7 @@ test('boot con store ON y 0 cuentas: /health 200 y ruta por actor sirve desde el
 
       // Ruta por actor: sin filas legacy, sólo el store puede servirla.
       const profile = await fetch(`${base}/api/v1/mi_cuenta/profile`, {
-        headers: { 'x-user-sub': 'u-123' },
+        headers: connectorHeaders({ 'x-user-sub': 'u-123' }),
       });
       const profileText = await profile.text();
       assert.equal(profile.status, 200, profileText);
@@ -286,7 +302,7 @@ test('boot con store ON y 0 cuentas: /health 200 y ruta por actor sirve desde el
 
       // Un sub sin fila sigue recibiendo el error explícito (SC-1194 criterio 4).
       const denied = await fetch(`${base}/api/v1/mi_cuenta/profile`, {
-        headers: { 'x-user-sub': 'pm-test-sin-fila' },
+        headers: connectorHeaders({ 'x-user-sub': 'pm-test-sin-fila' }),
       });
       assert.equal(denied.status, 400);
       const deniedBody = (await denied.json()) as { error: { code: string } };

@@ -49,6 +49,7 @@ import {
   AnyMessageContent,
   CacheStore,
   MiscMessageGenerationOptions,
+  Chat,
   ChatModification,
   WAPatchCreate,
   GroupMetadata,
@@ -173,12 +174,15 @@ import {
   starPatch,
 } from './message-stars-pins';
 import {
+  channelPostMessageId,
   contactAuthorIds,
   ChannelPostList,
   ChannelPostsQuery,
+  isChannelJid,
   isStatusJid,
   listChannelPosts,
   listStatuses,
+  noteRevokeBeforePost,
   recordStatus,
   STATUS_IMAGE_MAX_BYTES,
   STATUS_IMAGE_MIME_TYPES,
@@ -190,6 +194,7 @@ import {
   StatusPublishRequest,
   statusRecipientJid,
   STATUS_TTL_MS,
+  takeRevokeBeforePost,
 } from './statuses';
 import {
   buildPollContent,
@@ -237,9 +242,10 @@ import {
   muteFromBaileys,
   MuteState,
   hasInboundHistory,
+  hasOutboundHistory,
   pinFromBaileys,
-  recordInboundChatState,
   resolveCanonicalConversation,
+  setCanonicalChatState,
   writeChatState,
 } from './chat-state';
 import {
@@ -299,12 +305,15 @@ import {
   ChannelSubscriptionAction,
   channelView,
   ChannelView,
+  forgetChannel,
   KeyedSerializer,
   knownChannelConversations,
   normalizeChannelJid,
   parseChannelJid,
   parseChannelQuery,
   parseChannelSubscriptionAction,
+  rememberChannel,
+  rememberedChannels,
 } from './channels';
 import { maybeRunRetention } from './retention';
 import {
@@ -441,7 +450,7 @@ import {
   presignExpirySeconds,
 } from './media-storage';
 import { buildAudioAttachmentsBeforeEmit, StoredMediaInfo } from './audio-attachments';
-import { notifyDashboard as dashboardNotify } from './dashboard-notifier';
+import { notifyDashboard as dashboardNotify } from '@mcp-socialmedia/shared';
 
 import { readArchiveSnapshot, readCurrentArchiveSnapshot } from './archive-snapshot';
 import { enrichArchiveGroupNames } from './archive-group-names';
@@ -2059,11 +2068,7 @@ export class BaileysClient extends EventEmitter {
           pinned,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
-          chatNameWrites.push(
-            setConversationName(norm, c.name, {
-              authoritative: isGroup,
-            }).catch(() => {})
-          );
+          chatNameWrites.push(setConversationName(norm, c.name, { authoritative: isGroup }).catch(() => {}));
         }
         this.persistChatSnapshotState(norm, c, pinned);
       }
@@ -2150,10 +2155,11 @@ export class BaileysClient extends EventEmitter {
         // badge alone instead of zeroing it).
         const uc = typeof u.unreadCount === 'number' ? u.unreadCount : prev?.unreadCount;
         const arch = typeof (u as any).archived === 'boolean' ? (u as any).archived : undefined;
-        void setConversationState(norm, uc, arch).catch(() => {});
         // Pin / mute from app-state sync (the phone, or the echo of our own
-        // POST /chats/modify — same values), on the canonical conversation.
-        void recordInboundChatState(norm, {
+        // POST /chats/modify — same values), with the rest, on the canonical conversation.
+        void setCanonicalChatState(norm, {
+          unreadCount: uc,
+          archived: arch,
           pinnedAt: pinFromBaileys(u),
           mute: muteFromBaileys(u, 'sync-action'),
         });
@@ -2179,9 +2185,7 @@ export class BaileysClient extends EventEmitter {
         this.chatStore.set(norm, {
           id: norm,
           rawJid: c.id,
-          name: !isJidGroup(c.id)
-            ? this.savedContactNameFor(c.id, norm) || c.name || c.id
-            : c.name || c.id,
+          name: !isJidGroup(c.id) ? this.savedContactNameFor(c.id, norm) || c.name || c.id : c.name || c.id,
           isGroup: !!isJidGroup(c.id),
           unreadCount: c.unreadCount || 0,
           timestamp: Number(c.conversationTimestamp || 0),
@@ -2189,9 +2193,7 @@ export class BaileysClient extends EventEmitter {
           pinned,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
-          void setConversationName(norm, this.savedContactNameFor(c.id, norm) || c.name, {
-            authoritative: !!isJidGroup(c.id) || !!this.savedContactNameFor(c.id, norm),
-          }).catch(() => {});
+          void setConversationName(norm, this.savedContactNameFor(c.id, norm) || c.name, { authoritative: !!isJidGroup(c.id) || !!this.savedContactNameFor(c.id, norm) }).catch(() => {});
         }
         this.persistChatSnapshotState(norm, c, pinned);
         // Subscribe to presence so we get typing updates for this chat.
@@ -2400,13 +2402,14 @@ export class BaileysClient extends EventEmitter {
   ): void {
     const archived = typeof chat.archived === 'boolean' ? chat.archived : undefined;
     const unreadCount = chat.unreadCount || 0;
-    void setConversationState(normalizedId, unreadCount, archived).catch(() => {});
     void upsertChatState(normalizedId, {
       ...(archived === undefined ? {} : { archived }),
       ...(pinned === undefined ? {} : { pinned }),
       unreadCount,
     }).catch(() => {});
-    void recordInboundChatState(normalizedId, {
+    void setCanonicalChatState(normalizedId, {
+      unreadCount,
+      archived,
       pinnedAt: pinFromBaileys(chat),
       mute: muteFromBaileys(chat, 'snapshot'),
     });
@@ -2697,22 +2700,21 @@ export class BaileysClient extends EventEmitter {
     if (!waMessage) return { inserted: false };
     const normalizedChatId = waMessage.conversationId;
     waMessage.conversationId = await canonicalConversationId(normalizedChatId);
-    // Some PN echoes race the DB alias commit. Baileys may carry the paired
-    // LID directly or in its mapping store; without either, keep the PN.
+    // Preserve a trusted PN/LID alias if its DB update races this message.
     if (waMessage.conversationId === normalizedChatId && pnJidToE164(msg.key.remoteJid)) {
       let lid = lidFromPnMessage(msg);
       if (!lid) {
         try {
-          const mapped = await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(
-            msg.key.remoteJid || ''
-          );
-          if (typeof mapped === 'string' && /^\d+(?::\d+)?@lid$/.test(mapped))
-            lid = jidNormalizedUser(mapped);
+          const mapped = await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(msg.key.remoteJid || '');
+          if (typeof mapped === 'string' && /^\d+(?::\d+)?@lid$/.test(mapped)) lid = jidNormalizedUser(mapped);
         } catch {
-          /* An unavailable Baileys mapping leaves the PN unchanged. */
+          // An unavailable provider mapping leaves the PN unchanged.
         }
       }
       if (lid) waMessage.conversationId = lid;
+    }
+    if (isChannelJid(msg.key.remoteJid)) {
+      waMessage.waMessageId = await channelPostMessageId(waMessage.conversationId, waMessage.waMessageId);
     }
 
     this.rememberKey(waMessage.waMessageId, msg.key, msg.key.remoteJid || '');
@@ -2854,29 +2856,24 @@ export class BaileysClient extends EventEmitter {
       },
     };
     // Persist once before the searchable row is visible, including replays.
-    // Structured history retains its secret even outside the history window.
-    await this.persistDurablePayload(
-      msg,
-      waMessage.conversationId,
-      options.source === 'baileys_history_sync' && !waMessage.structured ? 'history' : 'live'
-    );
+    // A channel's composed row id is not its provider key: never overwrite another post's payload.
+    if (waMessage.waMessageId === msg.key.id) {
+      await this.persistDurablePayload(
+        msg,
+        waMessage.conversationId,
+        options.source === 'baileys_history_sync' && !waMessage.structured ? 'history' : 'live'
+      );
+    }
     const msgId = await storeMessage(data);
     if (msg.key.fromMe && !novedadesKind(msg.key)) {
-      // History proves an outbound message was sent, but never proves today's recipients.
-      // Reapply stored provider state to close the receipt-before-message-row race.
+      // Reapply provider receipts to close the receipt-before-message-row race.
       const status = typeof msg.status === 'number' ? mapWaStatus(msg.status) : null;
-      await recordAggregateStatus(
-        waMessage.conversationId,
-        waMessage.waMessageId,
-        status || 'sent'
-      );
-      for (const receipt of msg.userReceipt || []) {
-        await this.persistParticipantReceipt(
-          waMessage.conversationId,
-          waMessage.waMessageId,
-          receipt
-        );
-      }
+      await recordAggregateStatus(waMessage.conversationId, waMessage.waMessageId, status || 'sent');
+      for (const receipt of msg.userReceipt || []) await this.persistParticipantReceipt(waMessage.conversationId, waMessage.waMessageId, receipt);
+    }
+    if (msgId && msg.key.id && (isChannelJid(rawChatJid) || isStatusJid(rawChatJid)) && takeRevokeBeforePost(waMessage.conversationId, msg.key.id)) {
+      this.logger.info(`Revoke of ${waMessage.conversationId} ${msg.key.id} arrived before its post: applied`);
+      await this.recordInboundRevoke(waMessage.waMessageId);
     }
     // Not for a REACTION: prod folds it into the target's messages.reactions
     // and never writes its row, so the key's FK to messages.wa_message_id can
@@ -4618,12 +4615,12 @@ export class BaileysClient extends EventEmitter {
   // Polls and events (fase 3 / PR-7)
   // ---------------------------------------------------------------------------
 
-  /** Our own user jids for the vote / response crypto (PN from meJid when the socket has no user). */
+  /** Our own user jids for the vote / response crypto (meJid when the socket has no user: a PN or a LID). */
   private async ownIdentity(): Promise<OwnIdentity> {
-    const ids = await this.ownIds();
+    const ids = [...(await this.ownIds()), cryptoUserJid(this.meJid)];
     return {
-      pn: ids.find(id => id.endsWith('@s.whatsapp.net')) || cryptoUserJid(this.meJid),
-      lid: ids.find(id => id.endsWith('@lid')) || null,
+      pn: ids.find(id => id?.endsWith('@s.whatsapp.net')) ?? null,
+      lid: ids.find(id => id?.endsWith('@lid')) ?? null,
     };
   }
 
@@ -4998,7 +4995,11 @@ export class BaileysClient extends EventEmitter {
       });
     }
     const own = await this.ownIdentity();
-    const ownPn = own.pn;
+    // An event response is signed with phone numbers: ours comes from the LID when that is all we know.
+    const ownPn =
+      (await this.withAliases([own.pn, own.lid].filter((jid): jid is string => !!jid))).find(jid =>
+        jid.endsWith('@s.whatsapp.net')
+      ) ?? null;
     const creator = target.key.fromMe
       ? ownPn
       : (await this.withAliases(keyAuthorCandidates(target.key, own))).find(jid =>
@@ -5989,14 +5990,25 @@ export class BaileysClient extends EventEmitter {
     if (!this.ingest || !waMessageId) return;
     const stub = u.update?.messageStubType;
     const isRevoke = stub === proto.WebMessageInfo.StubType.REVOKE || u.update?.message === null;
-    if (isRevoke && !this.isOwnMutation('revoke', waMessageId)) {
-      await this.recordInboundRevoke(waMessageId);
-    }
     // Baileys unwraps MESSAGE_EDIT protocol messages into this shape.
     const editedPayload = (u.update as any)?.message?.editedMessage?.message as
       proto.IMessage | undefined;
+    if (!isRevoke && !editedPayload) return;
+    // A channel's ids are only unique inside it: the row is the one of THIS channel's post.
+    const rowId = isChannelJid(u.key.remoteJid)
+      ? await channelPostMessageId(this.normalizeJid(String(u.key.remoteJid)), waMessageId)
+      : waMessageId;
+    if (isRevoke && !this.isOwnMutation('revoke', waMessageId)) {
+      const flagged = await this.recordInboundRevoke(rowId);
+      // No row to flag: for a channel post or a status its post may still be on its way.
+      if (!flagged && (isChannelJid(u.key.remoteJid) || isStatusJid(u.key.remoteJid))) {
+        const chat = this.normalizeJid(String(u.key.remoteJid));
+        noteRevokeBeforePost(chat, waMessageId);
+        this.logger.info(`Revoke of ${chat} ${waMessageId} found no post: remembered`);
+      }
+    }
     if (editedPayload && !this.isOwnMutation('edit', waMessageId)) {
-      await this.recordInboundEdit(u.key, editedPayload);
+      await this.recordInboundEdit({ ...u.key, id: rowId }, editedPayload);
     }
   }
 
@@ -6066,11 +6078,12 @@ export class BaileysClient extends EventEmitter {
   }
 
   /** A contact (or our phone) revoked a message: flag the row, keep its content. */
-  private async recordInboundRevoke(waMessageId: string): Promise<void> {
-    await markMessageRevoked(waMessageId, { source: 'whatsapp' }).catch(e =>
+  private async recordInboundRevoke(waMessageId: string): Promise<boolean> {
+    const flagged = await markMessageRevoked(waMessageId, { source: 'whatsapp' }).catch(e =>
       this.logger.warn(`revoke persist failed for ${waMessageId}: ${e?.message || e}`)
     );
     this.emit('message-update', { waMessageId, updateType: 'DELETED' });
+    return flagged === true;
   }
 
   /** A contact (or our phone) edited a message: new text, the old one to edit_history. */
@@ -6140,7 +6153,7 @@ export class BaileysClient extends EventEmitter {
     const norm = this.normalizeJid(raw);
     const chat = this.chatStore.get(norm);
     if (chat) chat.unreadCount = 0;
-    await setConversationState(norm, 0);
+    await setCanonicalChatState(norm, { unreadCount: 0 });
     await upsertChatState(norm, { unreadCount: 0 });
   }
 
@@ -7383,7 +7396,7 @@ export class BaileysClient extends EventEmitter {
     const query = parseChannelQuery(channel);
     if (query.type === 'jid') {
       const view = await this.readChannel(query.key);
-      if (view.following) this.seenChannels.add(view.channelId);
+      if (view.following) await this.noteFollowed(view.channelId);
       return view;
     }
     const sock = this.connectedSocket();
@@ -7398,16 +7411,23 @@ export class BaileysClient extends EventEmitter {
       );
     }
     const view = channelView(answer);
-    if (view.following) this.seenChannels.add(view.channelId);
+    if (view.following) await this.noteFollowed(view.channelId);
     return view;
+  }
+
+  /** A channel confirmed as followed: this process remembers it and, with ingest, so does the directory. */
+  private async noteFollowed(jid: string): Promise<void> {
+    this.seenChannels.add(jid);
+    if (this.ingest) await rememberChannel(jid);
   }
 
   /**
    * GET /channels: the channels this account follows among those this
    * connector has seen — chats of the history sync, conversations with
-   * ingested posts (ingest only), lookups and follows of this process — each
-   * confirmed by its own metadata. rc13 cannot ask WhatsApp for the followed
-   * list, so coverage.complete is always false.
+   * ingested posts (ingest only), lookups and follows of this process and the
+   * followed channels it remembered (ingest only) — each confirmed by its own
+   * metadata. rc13 cannot ask WhatsApp for the followed list, so
+   * coverage.complete is always false.
    */
   async listChannels(): Promise<ChannelListResult> {
     this.connectedSocket();
@@ -7417,11 +7437,16 @@ export class BaileysClient extends EventEmitter {
       if (jid) candidates.add(jid);
     }
     for (const jid of this.seenChannels) candidates.add(jid);
+    const remembered = new Set<string>();
     if (this.ingest) {
       for (const jid of await knownChannelConversations().catch((e: any) => {
         this.logger.warn(`known channel conversations unavailable: ${e?.message || e}`);
         return [] as string[];
       })) {
+        candidates.add(jid);
+      }
+      for (const jid of await rememberedChannels()) {
+        remembered.add(jid);
         candidates.add(jid);
       }
     }
@@ -7444,6 +7469,10 @@ export class BaileysClient extends EventEmitter {
           channels.push(view);
         } else {
           this.seenChannels.delete(view.channelId);
+          // Only a row that exists is deleted: a channel seen but never followed has none.
+          if (view.following === false && remembered.has(view.channelId)) {
+            await forgetChannel(view.channelId);
+          }
         }
       }
     }
@@ -7483,9 +7512,15 @@ export class BaileysClient extends EventEmitter {
           'not_following'
         );
       }
-      const result = (changed: boolean, channel: ChannelView): ChannelSubscriptionResult => {
-        if (channel.following) this.seenChannels.add(jid);
-        else if (channel.following === false) this.seenChannels.delete(jid);
+      const result = async (
+        changed: boolean,
+        channel: ChannelView
+      ): Promise<ChannelSubscriptionResult> => {
+        if (channel.following) await this.noteFollowed(jid);
+        else if (channel.following === false) {
+          this.seenChannels.delete(jid);
+          if (this.ingest) await forgetChannel(jid);
+        }
         this.logger.info(
           `Channel ${jid} ${verb}${changed ? '' : ' (already)'}${request.actor ? ` by ${request.actor}` : ''}`
         );
@@ -7896,6 +7931,30 @@ export class BaileysClient extends EventEmitter {
       `Disappearing ${target.raw} ${String(previous)} -> ${seconds}${request.actor ? ` by ${request.actor}` : ''}`
     );
     return { ...base, changed: true, persisted };
+  }
+
+  /**
+   * A chat as WhatsApp reports it whole (history snapshot, chats.upsert): the in-memory store, and
+   * the real unread badge, archive flag, pin / mute (fase 3 / PR-5: only what the snapshot says) and
+   * disappearing timer (PR-8: never over a newer one) on its canonical conversation. Fire-and-forget.
+   */
+  private rememberChatSnapshot(c: Chat): void {
+    const norm = this.normalizeJid(c.id as string);
+    this.chatStore.set(norm, {
+      id: norm,
+      rawJid: c.id as string,
+      name: c.name || (c.id as string),
+      isGroup: !!isJidGroup(c.id as string),
+      unreadCount: c.unreadCount || 0,
+      timestamp: Number(c.conversationTimestamp || 0),
+    });
+    void setCanonicalChatState(norm, {
+      unreadCount: c.unreadCount || 0,
+      archived: !!(c as any).archived,
+      pinnedAt: pinFromBaileys(c),
+      mute: muteFromBaileys(c, 'snapshot'),
+    });
+    void recordInboundEphemeral(norm, ephemeralFromBaileys(c, 'snapshot'));
   }
 
   /**
@@ -9408,11 +9467,13 @@ export class BaileysClient extends EventEmitter {
   /**
    * The one policy for every new 1:1 send (text, file, voice, sticker/GIF,
    * contact cards, poll, event, forward, group-invite card). Someone who
-   * already talks to this account always gets it: Baileys attaches their
+   * already talks to this account, or whose chat the owner already opened
+   * (typed from the main phone), always gets it: Baileys attaches their
    * tctoken when fresh, else a cstoken when the NCT salt exists, else
    * nothing — as WA Web and whatsmeow, which never hold a send back for a
-   * missing or expired tctoken. Only a true first contact goes through the
-   * token preflight, which refuses (account_restricted) when no token can be
+   * missing or expired tctoken. Only a true first contact (no token record,
+   * no INBOUND and no non-failed OUTBOUND message) goes through the token
+   * preflight, which refuses (account_restricted) when no token can be
    * attached: a token-less first message counts as a reach-out.
    */
   private async guardDirectSend(rawJid: string, started = Date.now()): Promise<void> {
@@ -9446,12 +9507,14 @@ export class BaileysClient extends EventEmitter {
    * Why a 1:1 target is not a first contact, or null when it is: a fresh
    * tctoken; any tctoken record (theirs, expired or emptied by Baileys'
    * cleanup, or ours issued after an earlier send to them); an INBOUND
-   * message on the canonical conversation of their PN or LID (ingest only —
+   * message on the canonical conversation of their PN or LID; or an OUTBOUND
+   * one that did not fail — typed by the owner on the main phone, or sent by
+   * the connector after it passed this guard (history is ingest only —
    * tctokens expire in 4 weekly buckets and Baileys prunes the records).
    */
   private async knownDirectContactEvidence(
     rawJid: string
-  ): Promise<'tctoken' | 'token_record' | 'inbound_history' | null> {
+  ): Promise<'tctoken' | 'token_record' | 'inbound_history' | 'outbound_history' | null> {
     const sock = this.sock as any;
     const keys = sock?.authState?.keys;
     const lidMapping = sock?.signalRepository?.lidMapping;
@@ -9475,10 +9538,11 @@ export class BaileysClient extends EventEmitter {
         ? await getPNForLID(rawJid).catch(() => null)
         : await getLIDForPN(rawJid).catch(() => null);
       const ids = [rawJid, ...(twin ? [jidNormalizedUser(twin)] : [])];
-      return (await this.directInboundHistory(ids)) ? 'inbound_history' : null;
+      if (await this.directInboundHistory(ids)) return 'inbound_history';
+      return (await this.directOutboundHistory(ids)) ? 'outbound_history' : null;
     } catch (error) {
       this.logger.warn(
-        `WhatsApp direct send: inbound history lookup failed rawJid=${rawJid}: ${errorMessage(error)}`
+        `WhatsApp direct send: history lookup failed rawJid=${rawJid}: ${errorMessage(error)}`
       );
       return null;
     }
@@ -9487,6 +9551,11 @@ export class BaileysClient extends EventEmitter {
   /** Seam for tests (no DB): see hasInboundHistory. */
   private directInboundHistory(chatIds: string[]): Promise<boolean> {
     return hasInboundHistory(chatIds);
+  }
+
+  /** Seam for tests (no DB): see hasOutboundHistory. */
+  private directOutboundHistory(chatIds: string[]): Promise<boolean> {
+    return hasOutboundHistory(chatIds);
   }
 
   private async prepareDirectPrivacyToken(
@@ -9505,17 +9574,8 @@ export class BaileysClient extends EventEmitter {
     const keys = sock.authState?.keys;
     if (!keys) return;
 
-    const hasValidToken = async (): Promise<{ ok: boolean; storageJid: string }> => {
-      const storageJid = await resolveTcTokenJid(rawJid, getLIDForPN);
-      const tokenData = await keys.get('tctoken', [storageJid]);
-      const entry = tokenData?.[storageJid];
-      const token = entry?.token;
-      const tokenLength = typeof token?.length === 'number' ? token.length : 0;
-      return {
-        ok: tokenLength > 0 && !isTcTokenExpired(entry?.timestamp),
-        storageJid,
-      };
-    };
+    // Never null here: the socket and its key store were checked above.
+    const hasValidToken = async () => (await this.readDirectPrivacyTokenState(rawJid))!;
 
     let tokenState = await hasValidToken();
     if (tokenState.ok) return;

@@ -28,6 +28,7 @@ function fakeRedis() {
 function createServer() {
   const server: any = Object.create(MCPServer.prototype);
   server.redisClient = fakeRedis();
+  server.connectorSecret = 'test-connector-secret'; // SKIRM-103: signs with the constructed secret, not env
   server.logger = { error: jest.fn(), warn: jest.fn(), info: jest.fn() };
   useTestAccounts({
     whatsapp: {
@@ -622,6 +623,53 @@ describe('Socialmedia canonical v2 acceptance gaps', () => {
         replyTo: 22,
         threadId: 77,
       });
+    });
+
+    describe('Telegram attachment mimeType', () => {
+      async function sendTelegramAttachment(attachment: Record<string, unknown>) {
+        const server = createServer();
+        server.handleTelegramSendFile = jest.fn(async (args: unknown) => legacy(args));
+        await server.executeCanonicalTool(definition('social_send_message'), {
+          channel: 'telegram',
+          accountId: 'personal',
+          target: '@studio_bot',
+          attachments: [{ url: 'https://example.test/nota.ogg', ...attachment }],
+        });
+        return server.handleTelegramSendFile as jest.Mock;
+      }
+
+      test('routes an audio/ogg attachment as a voice note', async () => {
+        const sendFile = await sendTelegramAttachment({ mimeType: 'audio/ogg' });
+
+        expect(sendFile).toHaveBeenCalledWith({
+          chatId: '@studio_bot',
+          filePath: 'https://example.test/nota.ogg',
+          caption: undefined,
+          account: 'personal',
+          replyTo: undefined,
+          threadId: undefined,
+          voiceNote: true,
+        });
+      });
+
+      test.each(['audio/ogg; codecs=opus', 'Audio/OGG', ' audio/ogg ;codecs=opus'])(
+        'ignores parameters and case in %p',
+        async mimeType => {
+          const sendFile = await sendTelegramAttachment({ mimeType });
+
+          expect(sendFile.mock.calls[0][0]).toMatchObject({ voiceNote: true });
+        }
+      );
+
+      test.each([['audio/mpeg'], ['audio/opus'], ['application/pdf'], [undefined]])(
+        'keeps mimeType %p as a document, without a voiceNote key',
+        async mimeType => {
+          const sendFile = await sendTelegramAttachment(mimeType ? { mimeType } : {});
+
+          expect(sendFile).toHaveBeenCalledTimes(1);
+          expect(sendFile.mock.calls[0][0]).not.toHaveProperty('voiceNote');
+        }
+      );
     });
 
     test('routes a native Telegram image album as one provider operation', async () => {

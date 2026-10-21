@@ -1,5 +1,7 @@
 import { join } from 'path';
-import { readdirSync, readFileSync } from 'fs';
+import { readdirSync, readFileSync, mkdtempSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { createHash } from 'crypto';
 import { MigrationClient, runMigrations } from './migrate';
 
 /** Fake pg client for the migration ledger and ordering behavior. */
@@ -71,16 +73,35 @@ const MIGRATIONS_DIR = join(__dirname, 'migrations');
 const ALL_FILES = readdirSync(MIGRATIONS_DIR)
   .filter(file => /^\d+.*\.sql$/.test(file))
   .sort();
+const AUTHOR_CHECKSUMS: Record<string, string> = {
+  '021_whatsapp_novedades_channels.sql':
+    '833497ffef1801470dfae72a3d1451984abf12bd2cc4f2588a198fdb3c9cb525',
+  '022_whatsapp_contacts_view.sql':
+    '20ddceb41d9591eb2444ac6b2dc912ecdb53bdb746db7941eb0cf8acb0e8f849',
+  '023_whatsapp_chat_time_index.sql':
+    '25151ce5de2c0be3adf0271058e2ec9e59a5971848bcd826cecd3224b40fb261',
+};
+const COMPAT_FILE = '039_shared_author_compat.sql';
 
 describe('migrate.ts schema_migrations ledger', () => {
-  test('fresh DB applies every file in order and rerun is a no-op', async () => {
+  test('fresh DB bootstraps compatibility before adopting author files and rerun is a no-op', async () => {
     const db = new FakeDb();
     await runMigrations(db, MIGRATIONS_DIR);
     const firstRun = [...db.executed];
     await runMigrations(db, MIGRATIONS_DIR);
 
-    expect(db.ledgerFiles()).toEqual(ALL_FILES);
-    expect(db.ledger.every(row => !row.adopted)).toBe(true);
+    const expectedOrder = ALL_FILES.filter(file => file !== COMPAT_FILE);
+    expectedOrder.splice(expectedOrder.indexOf('021_whatsapp_novedades_channels.sql'), 0, COMPAT_FILE);
+    expect(db.ledgerFiles()).toEqual(expectedOrder);
+    expect(db.ledger.filter(row => row.adopted).map(row => row.file)).toEqual(
+      Object.keys(AUTHOR_CHECKSUMS)
+    );
+    for (const file of Object.keys(AUTHOR_CHECKSUMS))
+      expect(db.executed).not.toContain(readFileSync(join(MIGRATIONS_DIR, file), 'utf8').trim());
+    const compatibility = readFileSync(join(MIGRATIONS_DIR, COMPAT_FILE), 'utf8').trim();
+    const hindsight = readFileSync(join(MIGRATIONS_DIR, '034_hindsight_conversations.sql'), 'utf8').trim();
+    expect(db.executed.indexOf(compatibility)).toBeGreaterThanOrEqual(0);
+    expect(db.executed.indexOf(hindsight)).toBeGreaterThan(db.executed.indexOf(compatibility));
     expect(db.executed).toEqual(firstRun);
     expect(db.commits).toBe(2);
     expect(db.openTx).toBe(false);
@@ -123,11 +144,44 @@ describe('migrate.ts schema_migrations ledger', () => {
   test('migration SQL checksums are derived from the exact file bytes', async () => {
     const db = new FakeDb();
     await runMigrations(db, MIGRATIONS_DIR);
-    const credentialSql = readFileSync(join(MIGRATIONS_DIR, '007_user_channel_credentials.sql'));
-    const { createHash } = await import('crypto');
-    expect(db.ledger.find(row => row.file === '007_user_channel_credentials.sql')?.checksum).toBe(
-      createHash('sha256').update(credentialSql).digest('hex')
-    );
+    for (const file of ALL_FILES)
+      expect(db.ledger.find(row => row.file === file)?.checksum).toBe(
+        createHash('sha256').update(readFileSync(join(MIGRATIONS_DIR, file))).digest('hex')
+      );
+  });
+
+  test.each(Object.entries(AUTHOR_CHECKSUMS))('author source %s retains released bytes and rejects tampering before a transaction', async (file, checksum) => {
+    const body = readFileSync(join(MIGRATIONS_DIR, file));
+    expect(createHash('sha256').update(body).digest('hex')).toBe(checksum);
+    const staged = mkdtempSync(join(tmpdir(), 'migration-author-checksum-'));
+    writeFileSync(join(staged, file), `${body.toString()}\n-- unexpected change\n`);
+    writeFileSync(join(staged, COMPAT_FILE), readFileSync(join(MIGRATIONS_DIR, COMPAT_FILE)));
+    const db = new FakeDb();
+    await expect(runMigrations(db, staged)).rejects.toThrow(`Author migration checksum changed: ${file}`);
+    expect(db.ledger).toEqual([]);
+    expect(db.executed).toEqual([]);
+    expect(db.openTx).toBe(false);
+    expect(db.commits).toBe(0);
+  });
+
+  test('author adoption fails closed when compatibility migration is missing', async () => {
+    const file = '022_whatsapp_contacts_view.sql';
+    const staged = mkdtempSync(join(tmpdir(), 'migration-author-missing-compat-'));
+    writeFileSync(join(staged, file), readFileSync(join(MIGRATIONS_DIR, file)));
+    const db = new FakeDb();
+    await expect(runMigrations(db, staged)).rejects.toThrow(`Author migration ${file} requires ${COMPAT_FILE}`);
+    expect(db.ledger).toEqual([]);
+    expect(db.executed).toEqual([]);
+    expect(db.openTx).toBe(false);
+  });
+
+  test.each(Object.keys(AUTHOR_CHECKSUMS))('changed adopted ledger checksum fails closed for %s', async file => {
+    const db = new FakeDb();
+    await runMigrations(db, MIGRATIONS_DIR);
+    db.ledger.find(row => row.file === file)!.checksum = 'stale';
+    await expect(runMigrations(db, MIGRATIONS_DIR)).rejects.toThrow(`Migration checksum changed: ${file}`);
+    expect(db.openTx).toBe(false);
+    expect(db.rollbacks).toBe(1);
   });
 });
 

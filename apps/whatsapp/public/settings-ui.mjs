@@ -114,7 +114,9 @@ export function createMediaDownloadPolicy(options = {}) {
   const mountObservers = new Map();
   let inFlightBytes = 0;
   const forget = entry => { try { globalThis.URL?.revokeObjectURL?.(entry.objectUrl); } catch {} };
-  const isLive = owner => owner?.isConnected === true;
+  // shortcut: un montaje fuera de pantalla (marcado por el IntersectionObserver de la vista)
+  // no fija su copia: se desaloja y se recarga al volver. Si el observador no existe, todo es vivo.
+  const isLive = owner => owner?.isConnected === true && owner.__mediaOffscreen !== true;
   const hasLiveOwner = entry => {
     for (const owner of entry.owners || []) if (isLive(owner)) return true;
     return false;
@@ -438,7 +440,9 @@ export function initializeSettings(documentRef = document, storage = globalThis.
       });
       if (!response.ok) throw new Error(`No se pudo cerrar la sesión (${response.status}).`);
       try { globalThis.sessionStorage?.removeItem('wa-unconfirmed-outbox-v1'); } catch {}
-      globalThis.location.assign('/auth/login');
+      // Ir a /auth/login a secas reentraba por el SSO vivo: el IdP cierra aquí (QA #12).
+      const body = await response.json().catch(() => ({}));
+      globalThis.location.assign(body?.logoutUrl || '/auth/login');
     } catch (error) {
       logoutError.textContent = error.message || 'No se pudo cerrar la sesión.';
       logoutError.hidden = false;

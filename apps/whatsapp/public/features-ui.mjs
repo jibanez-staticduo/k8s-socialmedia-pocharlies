@@ -468,8 +468,13 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
       retry.textContent = 'Actualizar'; retry.hidden = false;
     } catch (error) {
       if (!current()) return;
-      notice.textContent = error?.message || 'No se pudo cargar la información del mensaje.';
-      retry.textContent = 'Reintentar'; retry.hidden = false;
+      // 501 del conector: el upstream no soporta la operación, reintentar es
+      // inútil (QA #10). Si el conector la gana, esto deja de aplicarse solo.
+      const unsupported = error?.code === 'UNSUPPORTED_UPSTREAM';
+      notice.textContent = unsupported
+        ? 'El proveedor no ofrece esta información para este mensaje.'
+        : error?.message || 'No se pudo cargar la información del mensaje.';
+      retry.textContent = 'Reintentar'; retry.hidden = unsupported;
     } finally {
       if (current()) { retry.disabled = false; container.setAttribute('aria-busy', 'false'); }
     }
@@ -1217,7 +1222,7 @@ export function installFeatureUI({
     if (selected) runtime.selectedMessageIds.add(text(id)); else runtime.selectedMessageIds.delete(text(id));
     enhanceMessages();
     const count = documentRef.getElementById('feature-selection-count');
-    if (count) count.textContent = `${runtime.selectedMessageIds.size} seleccionados`;
+    if (count) count.textContent = `${runtime.selectedMessageIds.size} ${runtime.selectedMessageIds.size === 1 ? 'seleccionado' : 'seleccionados'}`;
   }
 
   async function reactTo(message, emoji) {
@@ -1674,6 +1679,11 @@ export function installFeatureUI({
 
   async function openStarred() {
     const modal = openModal('Mensajes destacados', { wide: true });
+    // El chip «Destacados» abre un diálogo, no filtra la lista (matchesChat('starred') es false),
+    // así que no pasa por setView: se marca activo mientras el diálogo vive y se restaura al cerrar.
+    const paint = active => { for (const chip of documentRef.querySelectorAll('[data-feature-view]')) chip.setAttribute('aria-pressed', String(chip.dataset.featureView === active)); };
+    paint('starred');
+    modal.onClose = () => paint(runtime.currentView);
     const account = runtime.account;
     const loadPage = async before => {
       let result;

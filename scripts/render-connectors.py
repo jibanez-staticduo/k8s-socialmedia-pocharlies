@@ -53,8 +53,7 @@ HEADER = (
 )
 
 WA_IMAGE = (
-    "harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:1357057afaf6"
-    "@sha256:6a0789feb3fe2b268659508bbab259cfdf4a997513f83bc58fa181245aa67aae"
+    "harbor.e-dani.com/homelab/whatsappmcp-whatsapp-connector:v1.3.115@sha256:d6663b64593568f0d6ec35c0e6bad023747d7028e7596134abf51686963b422e"
 )
 TG_CONNECTOR_IMAGE = "harbor.e-dani.com/homelab/whatsappmcp-telegram-connector:latest"
 TG_SYNC_IMAGE = "harbor.e-dani.com/homelab/whatsappmcp-telegram-sync:latest"
@@ -91,6 +90,12 @@ S3_ENV = [
     _env("MINIO_BUCKET", "socialmedia-media"),
 ]
 NATS_ENV = _env("NATS_URL", f"nats://whatsapp-mcp-nats.{SVC}:4222")
+# Control Nexus dashboard: the connectors POST ephemeral events (typing,
+# reaction-snapshot) to its /api/messages/_connector/* endpoints. The compiled
+# default in connectors/telegram/src/dashboard-notifier.ts points at the retired
+# x86 dashboard (100.83.56.98:9002, refused since the dashboard moved to
+# control-nexus), so every event was a failed fetch (INFRA-888).
+DASHBOARD_URL_ENV = _env("DASHBOARD_URL", "http://dgx-dashboard-backend.control-nexus.svc.cluster.local:9002")
 DB_ENV = _env(
     "DATABASE_URL",
     "postgresql://$(DB_USER):$(DB_PASSWORD)@postgres-shared-rw.databases.svc.cluster.local:5432/whatsappmcp",
@@ -151,6 +156,7 @@ def whatsapp_defaults(account_id):
         # F1.7 honest voice: presign voice notes to S3 before the NATS emit.
         "emitAudioAttachments": False,
         "allowWebRenew": False,
+        "connectorMemoryLimit": "512Mi",
         "env": [],  # extra env appended last
     }
 
@@ -218,7 +224,7 @@ def render_whatsapp(account):
                     "envFrom": SECRETS_ENV_FROM,
                     "resources": {
                         "requests": {"cpu": "50m", "memory": "128Mi"},
-                        "limits": {"memory": "512Mi"},
+                        "limits": {"memory": d["connectorMemoryLimit"]},
                     },
                     "readinessProbe": {
                         "httpGet": {"path": "/api/v1/health", "port": 3001},
@@ -250,16 +256,21 @@ def render_whatsapp(account):
                     "middlewares": [{"name": "connector-public-api-deny", "namespace": NAMESPACE}],
                     "services": backend,
                 },
-                # QR page / image / renew button pair the session: Keycloak
-                # login also on the LAN. The rest of the host (HMAC-signed
-                # /api/v1 used by synapse, /status) stays reachable.
+                # Keycloak login also on the LAN, for the QR page (pairs the
+                # session) and for the rest of the host (/api/v1, /status;
+                # SKIRM-110). Machine clients use the in-cluster Service.
                 {
                     "match": f"Host(`{host}`) && PathPrefix(`/qr`)",
                     "kind": "Rule",
                     "middlewares": [{"name": "sso-chain", "namespace": "keycloak"}],
                     "services": copy.deepcopy(backend),
                 },
-                {"match": f"Host(`{host}`)", "kind": "Rule", "services": copy.deepcopy(backend)},
+                {
+                    "match": f"Host(`{host}`)",
+                    "kind": "Rule",
+                    "middlewares": [{"name": "sso-chain", "namespace": "keycloak"}],
+                    "services": copy.deepcopy(backend),
+                },
             ],
             "tls": {"store": {"name": "default", "namespace": "traefik-lan"}},
         },
@@ -277,7 +288,14 @@ def telegram_defaults(account_id):
         # Secret key holding this account's gramjs session; None → the
         # TELEGRAM_SESSION_STRING already loaded by envFrom (personal).
         "sessionSecretKey": f"TELEGRAM_SESSION_STRING_{account_id.upper().replace('-', '_')}",
-        "connectorMemoryLimit": "768Mi",
+        # INFRA-888 puso 1.5Gi y sigue OOMKilling: medido 17-10 (journalctl
+        # kernel, nodo ubuntu) el node del conector personal llegó a 1531 MB
+        # de anon-rss en el kill (3 OOM en 21:33/21:42/21:48, cada uno ~5 min
+        # tras el arranque: pico del backfill, no fuga — la instancia estable
+        # se queda en ~300 MiB). 3Gi es el techo que ya lleva el telegram-sync.
+        # Si con 3Gi OOMKillea estando estable, es fuga del conector: ticket
+        # del whatsappmcp, no tamaño.
+        "connectorMemoryLimit": "3Gi",
         "syncMemoryLimit": "3Gi",
         "connectorNodeSelector": {"topology": "lan", "kubernetes.io/arch": "amd64"},
         # telegram-sync is SESSION-LESS (ingests via NATS + the connector HTTP
@@ -294,7 +312,7 @@ def render_telegram(account):
     d = {**telegram_defaults(aid), **account.get("deploy", {})}
     cname, sname = d["connectorName"], d["syncName"]
 
-    c_env = [NATS_ENV]
+    c_env = [NATS_ENV, DASHBOARD_URL_ENV]
     if d["connectorAccountEnv"]:
         c_env.append(_env("CONNECTOR_ACCOUNT", aid))
     if d["sessionSecretKey"]:

@@ -121,6 +121,9 @@ Writes pass through the connector's `ENABLE_SENDING` /
   message to each; members are reported, not messaged. Per-person `results`
   with `reason` `invited | already_participant | send_failed |
 invite_link_unavailable`; nobody invited → `invite_not_sent`.
+- `social_get_reactions` (Telegram, read-only): `total` (Telegram's own count)
+  and `byEmoji` for one `messageId`, or for every message of a forum topic
+  (`topicId`, or target `<chat>_<topic>`) sorted by total — the photo-contest tally.
 - `social_send_poll`, `social_vote_poll` (`options: []` retracts),
   `social_get_poll_results`, `social_send_event`, `social_respond_event`,
   `social_get_event_results`.
@@ -185,8 +188,10 @@ invite_link_unavailable`; nobody invited → `invite_not_sent`.
   channel search exists.
 - `social_list_channels` (read, `meta.source.completeness: partial`): the
   followed channels among those the connector has seen (history-sync chats,
-  channels whose posts it received, look-ups and follows); WhatsApp's own
-  followed list is not readable with Baileys rc13 (`data.coverage`).
+  channels whose posts it received, look-ups and follows, and the followed
+  channels it remembered in `whatsapp_novedades_channels`, migration 021, so a
+  followed channel without posts survives a restart); WhatsApp's own followed
+  list is not readable with Baileys rc13 (`data.coverage`).
 - `social_manage_channel_subscription` (`target` = `…@newsletter`, `action`
   `follow | unfollow | mute | unmute`; muting needs a followed channel): proven
   by the channel's own metadata, `changed: false` when already so.

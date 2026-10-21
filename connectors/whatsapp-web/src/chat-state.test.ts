@@ -582,24 +582,17 @@ test('chats.update from the phone: pin / mute on the canonical row, marked-unrea
     assert.deepEqual(writes[0].params.slice(2), [new Date(1727510400000)]);
     assert.deepEqual(writes[1].params.slice(2), [true, null]); // muted, forever
     assert.deepEqual(writes[2].params.slice(2), [false, null]); // unmuted
-    // archived / unread stay on setConversationState (the /chats/resync-state path).
+    // archived / unread go through setConversationState, on the canonical row like the pin
+    // above: 34600@c.us is a tombstone, its state would never be listed.
     const legacy = legacyStateWrites(calls);
     assert.equal(legacy.length, 2);
-    assert.match(
-      legacy[0].sql,
-      /WHEN id = \$1 THEN CASE WHEN \$2 < 0 THEN GREATEST\(unread_count, 1\) ELSE \$2 END/
-    );
-    assert.equal(legacy[0].params[1], -1);
+    assert.match(legacy[0].sql, /unread_count = GREATEST\(unread_count, 1\)/);
+    assert.equal(legacy[0].params[0], 'professional:111@lid');
     // An archive-only delta of a chat not cached here leaves the badge alone.
-    assert.match(legacy[1].sql, /WHEN \$2::integer IS NULL THEN unread_count/);
-    assert.deepEqual(legacy[1].params, [
-      'professional:34600@c.us',
-      null,
-      true,
-      'professional',
-      ['professional:34600@c.us', 'professional:34600@s.whatsapp.net'],
-    ]);
-    assert.match(legacy[1].sql, /archived = COALESCE\(\$3::boolean, archived\)/);
+    assert.doesNotMatch(legacy[1].sql, /unread_count/);
+    assert.deepEqual(legacy[1].params, ['professional:111@lid', true]);
+    assert.match(legacy[1].sql, /^UPDATE conversations SET archived = \$2, updated_at = now\(\) WHERE id = \$1$/);
+
   } finally {
     restore();
   }
@@ -633,6 +626,120 @@ test('history / chats.upsert snapshots record only the pins and mutes they carry
   } finally {
     restore();
   }
+});
+
+test('chats.upsert archive / unread: canonical row; a chat with no conversation writes nothing', async () => {
+  useAccount('professional');
+  const known = stubPool(canonicalDb());
+  try {
+    const { client, handlers } = makeClient();
+    priv(client).bindSocketEvents(async () => {});
+    await handlers['chats.upsert']([
+      { id: '34600@s.whatsapp.net', archived: true, unreadCount: 2 },
+    ]);
+    await settle();
+    const writes = legacyStateWrites(known.calls);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0].params, ['professional:111@lid', 2, true]);
+  } finally {
+    known.restore();
+  }
+  // No conversation for this chat in the account yet: nothing to write, not even on its own id
+  // (which could be a tombstone the resolution missed).
+  const unknown = stubPool();
+  try {
+    const { client, handlers } = makeClient();
+    priv(client).bindSocketEvents(async () => {});
+    await handlers['chats.upsert']([{ id: '34611@s.whatsapp.net', archived: true }]);
+    await settle();
+    assert.deepEqual(legacyStateWrites(unknown.calls), []);
+  } finally {
+    unknown.restore();
+  }
+});
+
+test('one chat event resolves the canonical conversation once and writes archive, unread, pin and mute there', async () => {
+  useAccount('professional');
+  const { calls, restore } = stubPool(canonicalDb());
+  try {
+    const { client, handlers } = makeClient();
+    priv(client).bindSocketEvents(async () => {});
+    await handlers['chats.update']([
+      {
+        id: '34600@s.whatsapp.net',
+        archived: true,
+        unreadCount: 3,
+        pinned: 1727510400000,
+        muteEndTime: 0,
+      },
+    ]);
+    await settle();
+    assert.equal(calls.filter(c => isResolve(c.sql)).length, 1);
+    const [legacy] = legacyStateWrites(calls);
+    assert.deepEqual(legacy.params, ['professional:111@lid', 3, true]);
+    const [write] = chatStateWrites(calls);
+    assert.equal(write.params[0], 'professional:111@lid');
+    assert.match(write.sql, /pinned_at = \$3::timestamptz, muted = \$4, mute_until = \$5/);
+  } finally {
+    restore();
+  }
+});
+
+test('markAsRead clears the badge on the canonical conversation, never on the jid’s own tombstone', async () => {
+  useAccount('professional');
+  const unreadKey = (sql: string): Rows | undefined =>
+    /WITH conv AS/.test(sql)
+      ? [{ wa_message_id: 'professional:LAST1', remote_jid: '111@lid', from_me: false, participant_jid: null }]
+      : undefined;
+  const known = stubPool(canonicalDb(unreadKey));
+  try {
+    const { client, calls: sock } = makeClient();
+    await client.markAsRead('34600@c.us');
+    assert.equal(sock.read.length, 1);
+    const writes = legacyStateWrites(known.calls);
+    assert.equal(writes.length, 1);
+    assert.match(writes[0].sql, /unread_count = \$2/);
+    assert.deepEqual(writes[0].params, ['professional:111@lid', 0]);
+    assert.equal(known.calls.filter(c => isResolve(c.sql)).length, 1);
+  } finally {
+    known.restore();
+  }
+  // A chat the account has no conversation for: receipts go out, no row is touched.
+  const unknown = stubPool(sql => unreadKey(sql) ?? []);
+  try {
+    const { client, calls: sock } = makeClient();
+    await client.markAsRead('34611@c.us');
+    assert.equal(sock.read.length, 1);
+    assert.deepEqual(legacyStateWrites(unknown.calls), []);
+  } finally {
+    unknown.restore();
+  }
+});
+
+test('archive / unread of one account never reach the row of the other (same jid, shared DB)', async () => {
+  // Both accounts hold a conversation for the same chat; each resolves only its own.
+  const sharedDb = (sql: string, params: unknown[]): Rows => {
+    if (!isResolve(sql)) return [];
+    const account = String(params[0]).replace(/^whatsapp:/, '');
+    const id = account === 'personal' ? '111@lid' : `${account}:111@lid`;
+    return [{ id, external_id: '111@lid' }];
+  };
+  const written: Record<string, unknown[]> = {};
+  for (const account of ['personal', 'professional']) {
+    useAccount(account);
+    const { calls, restore } = stubPool(sharedDb);
+    try {
+      const { client, handlers } = makeClient();
+      priv(client).bindSocketEvents(async () => {});
+      await handlers['chats.update']([{ id: '34600@s.whatsapp.net', archived: true }]);
+      await settle();
+      written[account] = legacyStateWrites(calls).map(c => c.params[0]);
+      assert.ok(calls.filter(c => isResolve(c.sql)).every(c => c.params[0] === `whatsapp:${account}`));
+    } finally {
+      restore();
+    }
+  }
+  assert.deepEqual(written, { personal: ['111@lid'], professional: ['professional:111@lid'] });
 });
 
 test('ingest off binds no chat handlers at all', () => {

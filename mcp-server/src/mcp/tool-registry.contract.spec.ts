@@ -33,6 +33,7 @@ const EXPECTED_TOOL_NAMES = [
   'social_get_presence',
   'social_get_privacy',
   'social_get_profile',
+  'social_get_reactions',
   'social_invite_to_group',
   'social_list_accounts',
   'social_list_blocked',
@@ -112,6 +113,7 @@ const EXPECTED_EFFECTS: Record<(typeof EXPECTED_TOOL_NAMES)[number], SocialEffec
   social_get_presence: 'read',
   social_get_privacy: 'read',
   social_get_profile: 'read',
+  social_get_reactions: 'read',
   social_invite_to_group: 'externalWrite',
   social_list_accounts: 'read',
   social_list_blocked: 'read',
@@ -310,6 +312,12 @@ const EXPECTED_ANNOTATIONS: Record<
     openWorldHint: true,
   },
   social_get_profile: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
+  social_get_reactions: {
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,
@@ -726,11 +734,11 @@ describe('Socialmedia v2 tool contract', () => {
   const manifestPath = resolve(__dirname, '../../../contracts/socialmedia-tools.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ContractManifest;
 
-  it('contains exactly the 76 canonical tools in deterministic order', () => {
+  it('contains exactly the 77 canonical tools in deterministic order', () => {
     const names = SOCIAL_TOOL_REGISTRY.map(tool => tool.name);
 
     expect(names).toEqual(EXPECTED_TOOL_NAMES);
-    expect(new Set(names).size).toBe(76);
+    expect(new Set(names).size).toBe(77);
     expect(manifest.tools.map(tool => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
   });
 

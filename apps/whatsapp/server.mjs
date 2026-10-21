@@ -12,7 +12,7 @@ import pg from 'pg';
 import { utcDatabaseTypes } from './lib/database-time.mjs';
 import { getDatabaseSchema, useDatabaseSchema, validDatabaseId } from './lib/database-schema.mjs';
 import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, isValidBase64, fail } from './lib/security.mjs';
-import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo } from './lib/auth.mjs';
+import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo, unauthorizedHtml } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
 import { readMediaLibrary } from './lib/media-library.mjs';
 import { readChatDirectory } from './lib/chat-directory.mjs';
@@ -359,7 +359,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   const auth = new AppAuth({ env, fetchImpl, ...(oidc ? { oidc } : {}), ...(now ? { now } : {}) });
   const accounts = (registry || JSON.parse(await readFile(env.SOCIAL_ACCOUNTS_FILE, 'utf8'))).filter(a => a.channel === 'whatsapp' && a.enabled !== false);
   if (new Set(accounts.map(a => a.accountId)).size !== accounts.length) throw Error('Duplicate account');
-  const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 10000, types: utcDatabaseTypes() });
+  // 30 s, no 10: con la caché de Postgres evacuada (pod compartido, 885k mensajes)
+  // la primera pasada del listado de chats medía 21-126 s y el arranque de la app
+  // era una moneda (57014, medido 20-10). Caliente, el mismo query entra en 2 s.
+  const pool = db || new pg.Pool({ connectionString: env.DATABASE_URL, max: 5, statement_timeout: 30000, types: utcDatabaseTypes() });
   // Change hints arrive over one dedicated LISTEN connection per process, not
   // per browser tab. APP_REALTIME_ENABLED=false disables it and every client
   // keeps its existing polling fallback.
@@ -1375,6 +1378,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (setCookie) headers['set-cookie'] = Array.isArray(setCookie) ? setCookie : [setCookie];
       res.writeHead(302, headers); res.end();
     };
+    // QA #77: sin log de acceso no se puede saber si alguien entró (#61) ni qué ruta falló.
+    // Sin query para no loguear el code/token del callback; fuera /health para no ahogar el log con las sondas.
+    const startedAt = Date.now();
+    const accessPath = req.url.split('?')[0];
+    res.on('finish', () => { if (accessPath !== '/health') console.log(`${req.method} ${accessPath} ${res.statusCode} ${Date.now() - startedAt}ms`); });
     res.setHeader('cache-control', 'no-store'); res.setHeader('x-content-type-options', 'nosniff');
     res.setHeader('referrer-policy', 'no-referrer'); res.setHeader('x-frame-options', 'DENY');
     res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'");
@@ -1402,12 +1410,25 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const result = await auth.beginLogin(url.searchParams.get('returnTo') || '/');
         return redirect(result.location, result.setCookie);
       }
+      // CONTRACT: http.whatsapp-app.auth-callback.v1
       if (auth.oidcEnabled && path === '/auth/callback' && req.method === 'GET') {
         const configuredCallback = new URL(auth.callbackUrl);
         if (url.pathname !== configuredCallback.pathname) throw fail(404, 'Not found');
         const callbackUrl = new URL(configuredCallback);
         callbackUrl.search = url.search;
-        const result = await auth.finishLogin(callbackUrl, parseCookie(req.headers.cookie, TRANSACTION_COOKIE));
+        let result;
+        try {
+          result = await auth.finishLogin(callbackUrl, parseCookie(req.headers.cookie, TRANSACTION_COOKIE));
+        } catch (error) {
+          // Un 403 en el callback es navegable: se contesta en HTML con la salida
+          // (cerrar sesión Keycloak), no con JSON que deja la sesión SSO colgada.
+          if (error?.status === 403) {
+            res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+            return res.end(unauthorizedHtml(auth.publicUrl, auth.issuer));
+          }
+          throw error;
+        }
+        console.log('[auth] login');
         return redirect(result.location, result.setCookie);
       }
       const principal = auth.isAuthenticated(req);
@@ -1422,7 +1443,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       }
       if (req.method === 'POST') checkOrigin(req, env);
       if (path === '/auth/logout' && req.method === 'POST') {
-        const result = await auth.logout(req); res.setHeader('set-cookie', result.setCookie ? [result.setCookie] : []); res.writeHead(204); return res.end();
+        const result = await auth.logout(req); res.setHeader('set-cookie', result.setCookie ? [result.setCookie] : []);
+        // logoutUrl: sin redirigir al IdP el SSO retoma la sesión sola (QA #12).
+        console.log('[auth] logout');
+        return json(200, { logoutUrl: result.logoutUrl || null });
       }
       if (path === '/auth/logout' && req.method === 'GET') {
         res.setHeader('allow', 'POST'); return json(405, { error: 'Use POST to log out' });
@@ -1553,9 +1577,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           ...safeChat,
           name: readableChatName(chat),
           // Never return a provider/storage URL to the browser; avatars always
-          // flow through the authenticated account-scoped proxy.
-          // The proxy also performs provider lookup when no stored photo exists.
-          avatarUrl: `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
+          // flow through the authenticated account-scoped proxy. Pero solo cuando
+          // hay foto guardada: forzar la URL en los ~500 chats del listado
+          // disparaba 985 peticiones al abrir (931×404 + 54×502 del conector,
+          // medido 20-10). Sin foto: iniciales, como WhatsApp; la búsqueda al
+          // proveedor queda para la cabecera del chat abierto.
+          avatarUrl: (chat.avatarUrl || chat.avatar_url)
+            ? `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}` : null,
           archived: chat.archived === true,
           unread: chat.unread ?? 0,
           };
@@ -1575,10 +1603,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         let chats = await query(CHAT_LIST_ARCHIVED_SQL, [a.accountId]);
         chats = await fillMediaPreviews(chats.filter(chat => chat.archived === true).map(chat => {
           const { avatar_url: _avatarUrl, avatarUrl: _storedAvatarUrl, _sortTimestamp, ...safeChat } = chat;
-          return { ...safeChat, name: readableChatName(chat), avatarUrl: `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}`, archived: true };
+          return { ...safeChat, name: readableChatName(chat), avatarUrl: (chat.avatarUrl || chat.avatar_url) ? `/api/chats/${encodeURIComponent(chat.id)}/avatar?account=${encodeURIComponent(a.accountId)}` : null, archived: true };
         }), a.accountId);
         return json(200, { chats, archived: true });
       }
+      // CONTRACT: http.whatsapp-app.messages-list.v1
       if (req.method === 'GET' && path === '/api/messages') {
         const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
         const result = await readMessageRows(a, chat, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') });
@@ -1653,7 +1682,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const id = path.slice('/api/media/'.length);
         const schema = await getDatabaseSchema(query);
         if (!validDatabaseId(id, schema.attachmentIdType)) throw fail(404, 'Media not found');
-        const rows = await query(`SELECT COALESCE(a.file_url,a.storage_key) AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}`, [id, a.accountId, readIds]);
+        const rows = await query(`SELECT COALESCE(a.file_url,to_jsonb(a)->>'storage_key') AS ref,a.mime_type,a.file_name FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[]) AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}`, [id, a.accountId, readIds]);
         if (!rows.length) throw fail(404, 'Media not found');
         const media = rows[0]; const upstream = mediaRequest(media.ref, env);
         const range = req.headers.range;
@@ -1709,12 +1738,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           const infoById = new Map(infoParticipants.map(item => [item.id || item.jid, item]));
           const participantIds = participants.map(item => item.id || item.jid).filter(Boolean);
           const known = participantIds.length ? await query(
-            `SELECT id, wa_user_id, name, push_name FROM participants
-              WHERE account=$1 AND (id=ANY($2::text[]) OR wa_user_id=ANY($2::text[]))`,
+            `SELECT id, name, push_name FROM participants
+              WHERE account=$1 AND id=ANY($2::text[])`,
             [a.accountId, participantIds.flatMap(id => [id, `${a.accountId}:${id}`])]
           ) : [];
-          const knownById = new Map(known.flatMap(item => [item.id, item.wa_user_id]
-            .filter(Boolean).flatMap(id => [[id, item], [id.startsWith(`${a.accountId}:`) ? id.slice(a.accountId.length + 1) : id, item]])));
+          // La casa no tiene wa_user_id (esquema del desplegador original); el ANY
+          // ya lleva el id con y sin prefijo de cuenta (42703, medido 20-10).
+          const knownById = new Map(known.flatMap(item => {
+            const bare = item.id.startsWith(`${a.accountId}:`) ? item.id.slice(a.accountId.length + 1) : item.id;
+            return [[item.id, item], [bare, item]];
+          }));
           const capabilities = {
             manageMembers: info?.capabilities?.manageMembers === true,
             editInfo: info?.capabilities?.editInfo === true,
@@ -1731,7 +1764,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           })) });
         }
         const rows = await query(
-          `SELECT p.id, p.wa_user_id, p.phone, p.name, p.push_name, p.profile_pic_url
+          `SELECT p.id, p.phone, p.name, p.push_name, p.profile_pic_url
              FROM participants p
             WHERE p.account=$1 AND EXISTS (
               SELECT 1 FROM conversation_participants cp
@@ -1742,10 +1775,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         );
         const contact = rows[0] || {};
         return json(200, { ...result, contact: {
-          id: contact.wa_user_id || contact.id || conversation.id,
+          id: contact.id || conversation.id,
           phone: contact.phone || null,
           name: contact.name || contact.push_name || conversation.name || null,
-          avatarUrl: `/api/contacts/${encodeURIComponent(contact.wa_user_id || contact.id || conversation.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
+          avatarUrl: `/api/contacts/${encodeURIComponent(contact.id || conversation.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
           presence: { state: 'unknown', lastSeen: null, available: false },
         } });
       }
@@ -1879,7 +1912,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           messageId: item.wa_message_id || item.id,
           chat: item.chat_id || item.conversation_id,
           chatId: item.chat_id || item.conversation_id,
-          chatName: item.chat_name || item.conversation_id,
+          // Nombre legible igual que el listado: c.name suele ser el jid crudo
+          // y pintar eso en el resultado es la queja de la QA #10.
+          chatName: readableChatName({
+            id: item.chat_id || item.conversation_id,
+            name: item.chat_name,
+            isGroup: String(item.chat_id || item.conversation_id || '').endsWith('@g.us'),
+          }) || item.conversation_id,
           text: item.content || '',
           fromMe: item.direction === 'OUTBOUND',
           type: item.message_type,
@@ -1896,8 +1935,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(url.searchParams.get('account'));
         const contactId = required(decodeURIComponent(path.slice('/api/contacts/'.length, -'/avatar'.length)), 'contact', 512);
         const rows = await query(
-          `SELECT p.id,p.wa_user_id,p.profile_pic_url FROM participants p
-            WHERE p.account=$1 AND (p.id=$2 OR p.wa_user_id=$2) LIMIT 1`,
+          `SELECT p.id,p.profile_pic_url FROM participants p
+            WHERE p.account=$1 AND p.id=$2 LIMIT 1`,
           [a.accountId, contactId]
         );
         if (!rows.length) throw fail(404, 'Contact not found');
@@ -1910,7 +1949,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             if (error?.status && ![403, 404, 502].includes(error.status)) throw error;
           }
         }
-        const providerContact = participant.wa_user_id || participant.id;
+        const providerContact = participant.id;
         const result = await featureConnector(a, `/chats/${encodeURIComponent(providerContact)}/photo`, { method: 'GET' });
         const data = typeof result.data === 'string' ? result.data : '';
         if (!data || data.length > Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 8 || !isValidBase64(data)) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this contact');
@@ -2264,6 +2303,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         if (result.ok !== true || result.sent !== true) throw featureError(502, 'UPSTREAM_INVALID', 'Connector did not report a sent poll vote');
         return json(200, { account: a.accountId, chat, confirmed: true, messageId: result.messageId || null });
       }
+      // CONTRACT: http.whatsapp-app.messages-delete.v1
       if (req.method === 'POST' && (path === '/api/messages/reply' || path === '/api/messages/react' || path === '/api/messages/forward' || path === '/api/messages/edit' || path === '/api/messages/delete' || path === '/api/message-actions' || path === '/api/messages/action' || path === '/api/messages/actions')) {
         const body = await bodyJSON(req);
         const a = accountParam(body.account); const chat = safeChatId(body.chat || body.chatId);

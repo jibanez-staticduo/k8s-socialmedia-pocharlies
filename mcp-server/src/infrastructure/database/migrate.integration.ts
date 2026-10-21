@@ -20,7 +20,12 @@ const legacyMigrationFiles = (): string[] =>
 
 /** Everything an already-running installation holds before 012 exists. */
 const preOwnReasonMigrationFiles = (): string[] =>
-  migrationFiles().filter(file => Number(file.slice(0, 3)) < 26 || file.startsWith('030_'));
+  migrationFiles().filter(file =>
+    (Number(file.slice(0, 3)) < 26 || file.startsWith('030_')) && !isAuthorSource(file)
+  );
+
+const isAuthorSource = (file: string): boolean =>
+  ['021_whatsapp_novedades_channels.sql', '022_whatsapp_contacts_view.sql', '023_whatsapp_chat_time_index.sql'].includes(file);
 
 async function database(label: string): Promise<{ client: Client; url: string }> {
   assert.ok(process.env.DATABASE_URL, 'Use a disposable PostgreSQL DATABASE_URL');
@@ -181,6 +186,37 @@ test('partial legacy schema fails without recording migrations', async () => {
     assert.equal(
       (await client.query("SELECT to_regclass('schema_migrations') AS ledger")).rows[0].ledger,
       null
+    );
+  } finally {
+    await client.end();
+  }
+});
+
+test('039 materializes an existing author contacts view without losing rows', async () => {
+  const { client } = await database('author_view');
+  try {
+    await client.query('CREATE TABLE social_accounts(id text PRIMARY KEY)');
+    await client.query(
+      'CREATE TABLE messages(account text, conversation_id text, wa_timestamp timestamptz, platform text)'
+    );
+    await client.query(
+      "CREATE TABLE participants(id text PRIMARY KEY, account text NOT NULL, name text, push_name text)"
+    );
+    await client.query(
+      "INSERT INTO participants(id,account,name,push_name) VALUES('personal:legacy-peer','personal','Saved peer','Push peer')"
+    );
+    await client.query(
+      "CREATE VIEW whatsapp_contacts AS SELECT account, split_part(id, ':', 2) AS jid, name, push_name, NULL::timestamptz AS updated_at FROM participants"
+    );
+    await client.query(readFileSync(join(dir, '039_shared_author_compat.sql'), 'utf8'));
+    assert.equal(
+      (await client.query("SELECT relkind FROM pg_class WHERE oid='whatsapp_contacts'::regclass"))
+        .rows[0].relkind,
+      'r'
+    );
+    assert.deepEqual(
+      (await client.query('SELECT account,jid,name FROM whatsapp_contacts')).rows,
+      [{ account: 'personal', jid: 'legacy-peer', name: 'Saved peer' }]
     );
   } finally {
     await client.end();
@@ -703,8 +739,9 @@ test('012 widens a reaction table that 011 installed without reopening its check
 async function stageProduction(client: Client, bigintIds = false): Promise<void> {
   const staged = mkdtempSync(join(tmpdir(), 'social-prod-baseline-'));
   const files = migrationFiles().filter(
-    file => Number(file.slice(0, 3)) <= 22 || file.startsWith('030_')
+    file => (Number(file.slice(0, 3)) <= 22 || file.startsWith('030_')) && !isAuthorSource(file)
   );
+  files.push('039_shared_author_compat.sql');
   for (const file of files) {
     let sql = readFileSync(join(dir, file), 'utf8');
     if (file.startsWith('001_') && bigintIds) {
@@ -741,8 +778,9 @@ for (const bigintIds of [false, true]) {
     try {
       await stageProduction(client, bigintIds);
       const beforeFix = mkdtempSync(join(tmpdir(), 'social-response-before-'));
-      for (const file of migrationFiles().filter(file => Number(file.slice(0, 3)) < 35))
+      for (const file of migrationFiles().filter(file => Number(file.slice(0, 3)) < 35 && !isAuthorSource(file)))
         writeFileSync(join(beforeFix, file), readFileSync(join(dir, file)));
+      writeFileSync(join(beforeFix, '039_shared_author_compat.sql'), readFileSync(join(dir, '039_shared_author_compat.sql')));
       await runMigrations(client, beforeFix);
       await client.query(`INSERT INTO conversations(id,account,name) VALUES
         ('personal:target','personal','Target'), ('personal:other','personal','Other'),

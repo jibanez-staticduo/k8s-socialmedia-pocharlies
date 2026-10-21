@@ -327,7 +327,7 @@ WHERE m.platform = 'telegram' AND m.account = $1
   AND lower(m.message_type) = ANY($2::text[])
   AND NOT EXISTS (
     SELECT 1 FROM attachments a WHERE a.message_id = m.id
-      AND COALESCE(NULLIF(BTRIM(a.file_url), ''), NULLIF(BTRIM(a.storage_key), '')) IS NOT NULL
+      AND COALESCE(NULLIF(BTRIM(a.file_url), ''), NULLIF(BTRIM(to_jsonb(a)->>'storage_key'), '')) IS NOT NULL
   )
 """
 
@@ -350,22 +350,24 @@ async def media_transaction(pool: asyncpg.Pool, message_id: MessageId):
             yield conn
 
 
+MEDIA_MAX_ATTEMPTS = int(os.environ.get('MEDIA_RECOVERY_MAX_ATTEMPTS', '8'))
+
 async def media_result(conn, message_id: MessageId, status: str,
-                       delay: float = 0) -> None:
+                       delay: float = 0, counted: bool = True) -> None:
     await conn.execute(
         "UPDATE messages SET metadata = metadata || jsonb_build_object("
-        "'media_status', $2::text, "
-        "'media_attempts', COALESCE((metadata->>'media_attempts')::int, 0) + 1, "
+        "'media_status', (CASE WHEN $2::text = 'retry' AND $4::boolean AND COALESCE((metadata->>'media_attempts')::int, 0) + 1 >= $5::int THEN 'unavailable' ELSE $2::text END)::text, "
+        "'media_attempts', COALESCE((metadata->>'media_attempts')::int, 0) + (CASE WHEN $4::boolean THEN 1 ELSE 0 END), "
         "'media_next_retry', EXTRACT(EPOCH FROM NOW()) + GREATEST($3::double precision, "
         "LEAST(3600, 30 * power(2, LEAST(7, COALESCE((metadata->>'media_attempts')::int, 0)))))) "
-        "WHERE id = $1", message_id, status, delay,
+        "WHERE id = $1", message_id, status, delay, counted, MEDIA_MAX_ATTEMPTS,
     )
 
 
 async def record_media_result(pool: asyncpg.Pool, message_id: MessageId,
-                              status: str, delay: float = 0) -> None:
+                              status: str, delay: float = 0, counted: bool = True) -> None:
     async with pool.acquire() as conn:
-        await media_result(conn, message_id, status, delay)
+        await media_result(conn, message_id, status, delay, counted)
 
 
 # --- Transcription helpers ---------------------------------------------------

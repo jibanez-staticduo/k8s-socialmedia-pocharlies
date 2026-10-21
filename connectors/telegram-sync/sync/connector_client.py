@@ -55,6 +55,10 @@ def retry_after(response: httpx.Response) -> float:
             seconds = 30.0
     return max(1.0, seconds) if math.isfinite(seconds) else 30.0
 
+
+def is_throttled(error: Exception) -> bool:
+    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (429, 503)
+
 # Default in-cluster connector service per account (overridable via CONNECTOR_BASE_URL).
 _DEFAULT_BASE = {
     "personal": "http://telegram-connector:3002",
@@ -182,7 +186,11 @@ class ConnectorClient:
         body: dict[str, Any] = {"text": text}
         if topic_id:
             body["topicId"] = topic_id
-        r = await self._client.post(f"{self.base_url}/api/public/send/{chat_id}", json=body)
+        r = await self._client.post(
+            f"{self.base_url}/api/public/send/{chat_id}",
+            json=body,
+            headers=self._sign(body),
+        )
         r.raise_for_status()
         return r.json()
 

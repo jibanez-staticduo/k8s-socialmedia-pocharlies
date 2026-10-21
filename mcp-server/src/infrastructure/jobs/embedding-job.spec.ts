@@ -6,8 +6,16 @@
  * todo Telegram se quedaban sin embedding en silencio (medido 04-10).
  */
 import { EmbeddingJob, lookupMessageId as EmbeddingJobLookup } from './embedding-job';
+import { useTestAccounts } from '../../domain/test-accounts';
 
 type Event = Parameters<typeof EmbeddingJob.messageKeyFor>[0];
+
+beforeAll(() =>
+  useTestAccounts({
+    whatsapp: { professional: 'http://wa-professional', leila: 'http://wa-leila' },
+    telegram: { personal: 'http://tg-personal', professional: 'http://tg-professional' },
+  })
+);
 
 it('WhatsApp personal: la clave va sin prefijo (compat con las filas históricas)', () => {
   const e: Event = { eventType: 'MessageReceived', conversationId: '123@c.us', waMessageId: '3EB0AA' };
@@ -34,6 +42,20 @@ it('Telegram: tg_<chat>_<mensaje>, con su cuenta cuando no es la default', () =>
   const pro: Event = { ...personal, account: 'professional' };
   expect(EmbeddingJob.messageKeyFor(personal)).toBe('tg_-1004409526898_8972');
   expect(EmbeddingJob.messageKeyFor(pro)).toBe('professional:tg_-1004409526898_8972');
+});
+
+it('SKIRM-107: un id ya namespaced a otra cuenta no se convierte en clave (el handler lo registra)', () => {
+  const e: Event = {
+    eventType: 'MessageReceived',
+    conversationId: '123@c.us',
+    waMessageId: 'leila:3EB0AA',
+    account: 'professional',
+  };
+  expect(() => EmbeddingJob.messageKeyFor(e)).toThrow('Cross-account identifier');
+  // el prefijo de la propia cuenta sigue siendo idempotente
+  expect(EmbeddingJob.messageKeyFor({ ...e, waMessageId: 'professional:3EB0AA' })).toBe(
+    'professional:3EB0AA'
+  );
 });
 
 it('un evento sin id util no manda una consulta vacía', () => {

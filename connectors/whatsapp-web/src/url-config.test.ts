@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import './test-env';
 import { dashboardUrl, qrPageUrl, whatsappSocketOptions } from './url-config';
-import { notifyDashboard } from './dashboard-notifier';
+import { notifyDashboard } from '@mcp-socialmedia/shared';
 import { buildManualWhatsAppOpenUrl } from './contact-sync';
 
 test('QR links honor public URL, compatibility fallback, and prefixed local route', () => {

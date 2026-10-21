@@ -1,4 +1,3 @@
-import { requireAccount, connectorSecretFor } from '../domain/account-registry';
 /**
  * Backfill Instagram account data into the unified messages table.
  *
@@ -10,6 +9,7 @@ import { requireAccount, connectorSecretFor } from '../domain/account-registry';
  */
 import { Pool } from 'pg';
 import pino from 'pino';
+import { generateHMACSignature, requireConnectorSecret } from '@mcp-socialmedia/shared';
 import {
   InstagramEvent,
   InstagramIngestionService,
@@ -18,6 +18,10 @@ import {
 const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
 });
+
+// SKIRM-112: /api/v1 of the connector needs its signature. Resolved at load: a missing key stops the
+// run here instead of becoming a failed probe or an empty backfill (the fetches below swallow errors).
+const CONNECTOR_SECRET = requireConnectorSecret();
 
 type BackfillConfig = {
   connectorUrl: string;
@@ -89,18 +93,12 @@ function requireDatabaseUrl(): string {
 }
 
 function configFromEnv(): BackfillConfig {
-  if (!process.env.INSTAGRAM_BACKFILL_ACCOUNT)
-    throw new Error('INSTAGRAM_BACKFILL_ACCOUNT is required');
-  const registered = requireAccount('instagram', process.env.INSTAGRAM_BACKFILL_ACCOUNT);
   return {
     connectorUrl: (
-      registered.connectorUrl ||
-      process.env.INSTAGRAM_CONNECTOR_URL ||
-      'http://instagram-connector:3003'
+      process.env.INSTAGRAM_CONNECTOR_URL || 'http://instagram-connector:3003'
     ).replace(/\/+$/, ''),
-    // No hardcoded DB target; the job must be pointed at the intended database.
     databaseUrl: requireDatabaseUrl(),
-    account: registered.accountId,
+    account: process.env.INSTAGRAM_BACKFILL_ACCOUNT || 'barbelpapis',
     dryRun: boolEnv('INSTAGRAM_BACKFILL_DRY_RUN', true),
     validateOnly: boolEnv('INSTAGRAM_BACKFILL_VALIDATE_ONLY', false),
     includeDms: boolEnv('INSTAGRAM_BACKFILL_INCLUDE_DMS', true),
@@ -116,9 +114,13 @@ function configFromEnv(): BackfillConfig {
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const account = requireAccount('instagram', process.env.INSTAGRAM_BACKFILL_ACCOUNT || '');
+  // A GET has no body, so it signs "{}".
+  const timestamp = Math.floor(Date.now() / 1000);
   const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${connectorSecretFor(account)}` },
+    headers: {
+      'X-Connector-Signature': generateHMACSignature({}, timestamp, CONNECTOR_SECRET),
+      'X-Connector-Timestamp': String(timestamp),
+    },
   });
   const text = await response.text();
   if (!response.ok) {

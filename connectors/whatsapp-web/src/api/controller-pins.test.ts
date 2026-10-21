@@ -1,3 +1,5 @@
+import '../test-env';
+
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import express from 'express';
@@ -44,7 +46,8 @@ test('pin history requires HMAC and strict chat scope, independently of sending'
   };
   try {
     assert.equal((await post({ conversationId: '123@g.us' }, false)).status, 401);
-    for (const conversationId of ['', [], ['123@g.us'], 'status@broadcast', '12@newsletter', {}]) {
+    for (const conversationId of ['', [], ['123@g.us'], 'status@broadcast', '12@newsletter', 7, {}]) {
+
       assert.equal((await post({ conversationId })).status, 400);
     }
     assert.deepEqual(calls, []);

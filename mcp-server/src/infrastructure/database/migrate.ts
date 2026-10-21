@@ -67,6 +67,18 @@ const LEGACY_NAS_CHECKSUMS: Record<string, string> = {
     '951b0e7cd5de08a9dcb7c32b32ca531bd68732f563f95ea3c18c8822aeb6c851',
 };
 
+// The author branch published these filenames, but their numeric prefixes
+// collide with fork migrations. Their bytes stay immutable and are recorded
+// in the ledger after the additive 039 compatibility bootstrap runs.
+const AUTHOR_COMPAT_CHECKSUMS: Record<string, string> = {
+  '021_whatsapp_novedades_channels.sql':
+    '833497ffef1801470dfae72a3d1451984abf12bd2cc4f2588a198fdb3c9cb525',
+  '022_whatsapp_contacts_view.sql':
+    '20ddceb41d9591eb2444ac6b2dc912ecdb53bdb746db7941eb0cf8acb0e8f849',
+  '023_whatsapp_chat_time_index.sql':
+    '25151ce5de2c0be3adf0271058e2ec9e59a5971848bcd826cecd3224b40fb261',
+};
+
 /** Files that must run even when their objects already exist (idempotent bodies). */
 const ALWAYS_RUN_MARKER = '-- migrate:always-run';
 
@@ -130,15 +142,22 @@ export async function runMigrations(
   client: MigrationClient,
   dir: string = join(__dirname, 'migrations')
 ): Promise<void> {
+  const files = readdirSync(dir)
+    .filter(f => /^\d+.*\.sql$/.test(f))
+    .sort();
+  for (const file of files.filter(file => AUTHOR_COMPAT_CHECKSUMS[file])) {
+    const checksum = createHash('sha256').update(readFileSync(join(dir, file))).digest('hex');
+    if (checksum !== AUTHOR_COMPAT_CHECKSUMS[file])
+      throw new Error(`Author migration checksum changed: ${file}`);
+    if (!files.includes('039_shared_author_compat.sql'))
+      throw new Error(`Author migration ${file} requires 039_shared_author_compat.sql`);
+  }
   await client.query('BEGIN');
   try {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('socialmedia.schema-migrations'))");
     await client.query(
       `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (version text PRIMARY KEY, checksum text NOT NULL, adopted boolean NOT NULL DEFAULT false, applied_at timestamptz NOT NULL DEFAULT now())`
     );
-    const files = readdirSync(dir)
-      .filter(f => /^\d+.*\.sql$/.test(f))
-      .sort();
     const recorded = await client.query(`SELECT version FROM ${LEDGER_TABLE}`);
     const done = new Set(recorded.rows.map(r => String(r.version)));
     const nasInitial = await client.query(
@@ -203,6 +222,15 @@ export async function runMigrations(
           throw new Error(`Migration checksum changed: ${file}`);
         return;
       }
+      if (AUTHOR_COMPAT_CHECKSUMS[file]) {
+        await client.query(
+          `INSERT INTO ${LEDGER_TABLE}(version, checksum, adopted) VALUES ($1,$2,$3)`,
+          [file, checksum, true]
+        );
+        done.add(file);
+        console.log(`Adopted author migration ${file}`);
+        return;
+      }
       const table = primaryTable(sql);
       const alwaysRun =
         sql.includes(ALWAYS_RUN_MARKER) ||
@@ -255,6 +283,14 @@ export async function runMigrations(
       console.log(`${adopted ? 'Adopted' : 'Applied'} ${file}`);
     };
     for (const file of files) {
+      // Prerequisites are available after 020. Bootstrap before adopting the
+      // author's source files and before 034 installs its contacts row trigger.
+      if (
+        (AUTHOR_COMPAT_CHECKSUMS[file] || file === '034_hindsight_conversations.sql') &&
+        files.includes('039_shared_author_compat.sql')
+      ) {
+        await apply('039_shared_author_compat.sql');
+      }
       // The preserved prod 008 expects provider-text IDs although prod 001
       // creates UUIDs. Prepare only that incompatible fresh/legacy schema.
       if (file === '008_multiaccount_first_class.sql' && !done.has(file)) {

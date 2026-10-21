@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "tsc",
-    "start": "node dist/main.js",
-    "test": "tsx --test src/cloud-api.test.ts"
+    "test": "pnpm --filter @mcp-socialmedia/shared run build && tsx --test src/startup-guard.test.ts",
+    "start": "node dist/main.js"
   },
   "dependencies": {
     "@mcp-socialmedia/shared": "workspace:*",

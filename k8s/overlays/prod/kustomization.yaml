@@ -38,9 +38,17 @@ images:
   # patch-image.yaml, now the authority for those two names.
   # telegram-sync is SESSION-LESS (ingests via the connector NATS+HTTP API,
   # holds no Telethon session) and has no legacy DGX webhook path.
+  # SKIRM-101 08-10: v1.3.82 -> v1.3.105 (run 37739696589, deploy/prod@129b8ea: #229 —
+  # recuperacion de medios de Telegram con tope de 8 intentos por mensaje; sin migraciones
+  # SQL). Digest checked against Harbor (crane). Moves telegram-sync and
+  # telegram-sync-professional (same image name); the connector side is in patch-image.yaml.
+  # SKIRM-111 10-10: v1.3.105 -> v1.3.110 (run 38021085868, deploy/prod@8c9ee62): #251,
+  # telegram-sync firma POST /api/public/send (y la lectura) con la firma HMAC del conector. El
+  # conector de Telegram (v1.3.105) aun no exige la firma: un consumidor que firma no rompe nada.
+  # Digest comprobado en Harbor (crane).
   - name: harbor.e-dani.com/homelab/whatsappmcp-telegram-sync
-    newTag: v1.3.82
-    digest: sha256:3fbf891f0fd28e7f962b4b4f5ab06522bb49f014702619914c397ab59e3618a1
+    newTag: v1.3.110
+    digest: sha256:d8f1e7bb12d930e6447d2270cf714275fa350e9899f1594c47f8c45c2a642b1e
   # SC-1214 C4 re-pin: v1.3.55 (run 36075936408, deploy/prod@7d6c030 — after
   # ee71b15, the SC-1143/P1 merge) carries the IG pairing flow + credential
   # resolution (resolveCredential) + the oauth callback route, still dark:
@@ -48,9 +56,12 @@ images:
   # SC-1256: v1.3.55 -> v1.3.74 (run 36725155383, deploy/prod@7f0dd82 — merge #123):
   # /health por sub del conector IG (puerta por actor de social_list_accounts) y,
   # de paso, SC-1258 #96 (tolerar 0 cuentas de env con CREDENTIAL_STORE_ENABLED).
+  # SKIRM-102 08-10: instagram-e69969eb -> v1.3.106 (run 37744603591, deploy/prod@897435e):
+  # #231, POST /webhook exige x-hub-signature-256 valido (401 sin firma o firma ajena, 503 si
+  # no hay secreto de app). Es lo unico que cambia en connectors/instagram desde e69969eb.
   - name: harbor.e-dani.com/homelab/whatsappmcp-instagram-connector
-    newTag: instagram-e69969eb788407ef443bc05eb9bd7504685c42b0
-    digest: sha256:6ac8aa71bbc7fe168502b894d63da8339ea72e9782c378f81779f0a536f27bad
+    newTag: v1.3.106
+    digest: sha256:bbd49fd3a9bb60198d3e776b82dbfe0a899f761a249a0318df86ac40911e0fc0
   # fase 3: v1.3.64 (run 36568095620) trajo las migraciones 009/010 (#95/#108);
   # v1.3.65 (run 36603533264, deploy/prod@c8cce97) añade PR-3 #110 (social_delete_message
   # por POST /messages/delete); v1.3.66 (run 36612247560, deploy/prod@c36993e) añade la
@@ -107,9 +118,37 @@ images:
   # meta.partialErrors y no tumba las demas; sin BRAIN_MESSAGING_SEARCH_KEY, INFRA-637, cae a
   # texto con fallbackReason), #219 (SDK MCP 1.31.0 y sharp 0.35.5) y #209 (descripcion de la
   # tool de audio). 73 tools, contrato sin cambios.
+  # v1.3.104 (run 37711962973, deploy/prod@5ed41bc): sobre v1.3.102 trae #230 (SKIRM-107):
+  # accountKey lanza "Cross-account identifier" si el id ya viene namespaced a otra cuenta
+  # (tambien bajo personal), e inEveryNamespace/brainScopes buscan un id namespaced solo en la
+  # cuenta que lleva. INFRA-637 (#226) no toca la imagen. Sin migraciones nuevas. 73 tools,
+  # contrato sin cambios.
+  # SKIRM-118 08-10: v1.3.104 -> v1.3.107 (run 37775775514, deploy/prod@8cf1f6c): #239,
+  # social_send_message manda los audio/ogg de Telegram como nota de voz (voiceNote). Trae
+  # tambien #234 (SKIRM-103: requireConnectorSecret en el arranque, providerGet firmado; sin
+  # CONNECTOR_SECRET_STRICT no cambia el comportamiento con la clave actual). Sin migraciones
+  # nuevas. Mueve mcp-server, mcp-sse, social-api, brain-windows y el Job de migracion.
+  # SKIRM-106 10-10: v1.3.107 -> v1.3.109 (run 38008072969, deploy/prod@3cdf251): migracion 021
+  # (canales de WhatsApp que sigue la cuenta; aditiva e idempotente, la aplica el Job PreSync) y
+  # SKIRM-130 (#248, handlebars actualizado por los CVE de la puerta Trivy). v1.3.108 quemado
+  # por esa puerta. Digest comprobado en Harbor (crane). Los conectores de WhatsApp no se
+  # pinan aqui: siguen con los digests de patch-image.yaml.
+  # SKIRM-112 10-10: v1.3.109 -> v1.3.110 (run 38021085868, deploy/prod@8c9ee62): #249, mcp-server
+  # (instagramCall) y el job de backfill de Instagram firman las llamadas a /api/v1 del conector.
+  # El conector de Instagram (v1.3.106) aun no exige la firma: un consumidor que firma no rompe
+  # nada. Digest comprobado en Harbor (crane). Mueve mcp-server, mcp-sse, social-api, los
+  # CronJobs de brain-windows y voz, y el Job de migracion.
+  # INFRA-926 17-10: v1.3.110 -> v1.3.111 (run 39055381833, deploy/prod@c4a0e32): tool MCP de lectura
+  # social_get_reactions (recuento de reacciones de Telegram). Digest comprobado en Harbor (crane).
   - name: harbor.e-dani.com/homelab/whatsappmcp-mcp-server
-    newTag: v1.3.102
-    digest: sha256:d666d0fc2fdf198af310c5b0213991e69980002cde9338dc05557f709e15cf27
+    newTag: v1.3.115
+    digest: sha256:9ecb6c3593a8309de24809c6e3d8e1471489e419cca0dd0bd9d27e902c29f984
   - name: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-synapse-bridge
     newTag: socialmedia-v2-c88dce16
     digest: sha256:21d7cf9b021dce06af53b779056f9bd5c599722251726e483cdb50917b02263e
+  # SC-2760: app de WhatsApp del fork de Jordi. El base la deja en :latest (no
+  # existe en Harbor: el pod estaba en ImagePullBackOff); este pin la fija. v1.3.126
+  # (run 39508533271) lleva el enrutado de media por bucket (skirmshop-drive vs legacy).
+  - name: harbor.e-dani.com/homelab/whatsappmcp-whatsapp-app
+    newTag: v1.3.126
+    digest: sha256:fd41746515dd6c867e0c5514cc2c072fd9f7cf9eb92815d795981c4a8037be18

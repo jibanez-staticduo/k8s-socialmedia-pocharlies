@@ -158,6 +158,9 @@ test('OIDC rejects callback state and nonce mismatches and unauthorized subjects
   unauthorized.idp.nonce = unauthorizedLocation.searchParams.get('nonce');
   const unauthorizedResult = await unauthorized.request(`/auth/callback?code=test-code&state=${unauthorizedLocation.searchParams.get('state')}`, { headers: { cookie: `__Host-wa_oidc_tx=${cookieValue(unauthorizedLogin.headers.get('set-cookie'), '__Host-wa_oidc_tx')}` } });
   assert.equal(unauthorizedResult.status, 403);
+  assert.match(unauthorizedResult.headers.get('content-type'), /text\/html/);
+  const unauthorizedBody = await unauthorizedResult.text();
+  assert.match(unauthorizedBody, /href="https:\/\/idp\.example\/realms\/apps\/protocol\/openid-connect\/logout\?redirect_uri=https%3A%2F%2Fwa\.example%2F"/);
   assert.equal(unauthorizedResult.headers.get('set-cookie'), null);
   assert.equal(location.searchParams.get('state')?.length > 20, true);
 });
@@ -184,7 +187,9 @@ test('OIDC sessions expire and logout clears the server session', async t => {
   assert.equal(wrongOriginPost.status, 403);
   assert.equal((await fresh.request('/api/accounts', { headers: { cookie: `__Host-wa_session=${loggedIn.session}` } })).status, 200);
   const logout = await fresh.request('/auth/logout', { method: 'POST', headers: { cookie: `__Host-wa_session=${loggedIn.session}`, origin: 'https://wa.example', 'content-type': 'application/json' }, body: '{}' });
-  assert.equal(logout.status, 204);
+  assert.equal(logout.status, 200);
+  // QA #12: sin URL de logout del IdP el SSO retoma la sesión sola.
+  assert.match((await logout.json()).logoutUrl, /protocol\/openid-connect\/logout\?redirect_uri=https%3A%2F%2Fwa\.example%2F$/);
   assert.equal((await fresh.request('/api/accounts', { headers: { cookie: `__Host-wa_session=${loggedIn.session}` } })).status, 401);
   const loggedOutApproval = await fresh.request('/api/ai/proposal', { method: 'POST', headers: { cookie: `__Host-wa_session=${loggedIn.session}`, origin: 'https://wa.example', 'content-type': 'application/json' }, body: JSON.stringify(approval) });
   assert.equal(loggedOutApproval.status, 401);

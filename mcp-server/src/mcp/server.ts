@@ -917,6 +917,16 @@ export class MCPServer {
         return this.canonicalManageComment(args);
       case 'reactMessage':
         return this.canonicalReactMessage(args);
+      case 'getReactions':
+        this.requireChannel(args, 'telegram');
+        this.providerOnlyRead(args, 'Telegram reactions');
+        return this.handleTelegramGetReactions({
+          chatId: this.target(args),
+          account: this.account(args),
+          messageId: args.messageId,
+          topicId: args.topicId,
+          limit: args.limit,
+        });
       case 'starMessage':
         return this.canonicalStarMessage(args);
       case 'pinMessage':
@@ -2235,6 +2245,10 @@ export class MCPServer {
                 chatId: destination,
                 filePath: location,
                 caption: pickString(attachmentValue, ['caption']) || undefined,
+                ...(pickString(attachmentValue, ['mimeType']).split(';')[0].trim().toLowerCase() ===
+                'audio/ogg'
+                  ? { voiceNote: true }
+                  : {}),
                 account: accountIdValue,
                 replyTo: args.replyTo ?? undefined,
                 threadId: args.threadId ?? undefined,
@@ -6267,10 +6281,13 @@ export class MCPServer {
     const secret = account ? connectorSecretFor(account) : process.env.CONNECTOR_SHARED_SECRET;
     if (!secret) throw new Error('Missing connector secret for Instagram pairing');
     const url = `${account?.connectorUrl || this.instagramBaseUrl()}${path}`;
+    const timestamp = Math.floor(Date.now() / 1000);
     const options: RequestInit = {
       method,
       headers: {
         'Content-Type': 'application/json',
+        'X-Connector-Signature': generateHMACSignature(body || {}, timestamp, secret),
+        'X-Connector-Timestamp': timestamp.toString(),
         Authorization: `Bearer ${secret}`,
         ...actorRequestHeaders(),
       },
@@ -6280,6 +6297,72 @@ export class MCPServer {
     const resp = await fetch(url, options);
     if (!resp.ok) throw new Error(`Instagram API error (${resp.status}): ${await resp.text()}`);
     return resp.json();
+  }
+
+  private async handleTelegramGetReactions(args: {
+    chatId: string;
+    account?: string;
+    messageId?: string;
+    topicId?: number | string;
+    limit?: number;
+  }) {
+    const account = normalizeAccount(args.account);
+    const target = this.telegramTopicTarget(args.chatId, args.topicId);
+    const { chatId } = target;
+    const tgUrl = this.tgUrl(account);
+    const chatPath = encodeURIComponent(chatId);
+    const count = async (msgId: number) => {
+      const rx = await this.connectorCall(
+        tgUrl,
+        'GET',
+        `/api/v1/messages/reactors/${chatPath}/${msgId}?limit=5000`,
+        undefined,
+        60000
+      );
+      const byEmoji: Record<string, number> = {};
+      for (const reactor of rx?.reactors || []) {
+        byEmoji[reactor.emoji] = (byEmoji[reactor.emoji] || 0) + 1;
+      }
+      return { total: Number(rx?.total) || 0, byEmoji };
+    };
+    const describe = async (msgId: number) => {
+      const single = await this.connectorCall(
+        tgUrl,
+        'GET',
+        `/api/v1/messages/single/${chatPath}/${msgId}`
+      );
+      const message = single?.message || {};
+      return {
+        messageId: String(msgId),
+        date: message.telegramTimestamp ?? message.date ?? null,
+        from: message.senderFirstName || message.senderUsername || null,
+        senderId: message.senderTelegramId ?? null,
+        type: message.messageType ?? null,
+        text: typeof message.content === 'string' ? message.content.slice(0, 200) : null,
+        ...(await count(msgId)),
+      };
+    };
+    if (args.messageId !== undefined && args.messageId !== null && args.messageId !== '') {
+      return this.jsonResponse(
+        await describe(this.telegramMessageNumber(String(args.messageId), chatId, account))
+      );
+    }
+    if (!target.topicId) {
+      throw this.canonicalError(
+        'invalid_request',
+        'messageId or a forum topic (topicId, or target <chat>_<topic>) is required'
+      );
+    }
+    const { results } = await this.connectorCall(tgUrl, 'POST', '/api/v1/messages/search', {
+      query: '',
+      chatId,
+      threadId: target.topicId,
+      limit: clampInteger(args.limit, 100, 1, 200),
+    });
+    const messages = [];
+    for (const message of results || []) messages.push(await describe(Number(message.id)));
+    messages.sort((a, b) => b.total - a.total);
+    return this.jsonResponse({ chatId, topicId: target.topicId, count: messages.length, messages });
   }
 
   private async handleInstagramGetProfile(args: { account: string }) {

@@ -78,10 +78,20 @@ test('SQL keeps account predicates and joins participant names by scoped id', ()
 });
 
 test('chat views filter archive state before limiting results', () => {
-  assert.match(CHAT_LIST_ACTIVE_SQL, /WHERE c\.account = \$1[\s\S]*AND \(COALESCE\(c\.archived, false\) OR COALESCE\(pn_alias\.archived, false\)\) = false\s+ORDER BY[\s\S]*LIMIT 500$/);
+  // 20-10: el LIMIT vive dentro del interior (la página se recorta antes de los
+  // laterals de nombre, que aplican por fuera sobre la página).
+  assert.match(CHAT_LIST_ACTIVE_SQL, /WHERE c\.account = \$1[\s\S]*AND \(COALESCE\(c\.archived, false\) OR COALESCE\(pn_alias\.archived, false\)\) = false\s+ORDER BY[\s\S]*LIMIT 500\)\s*b\b/);
   assert.match(CHAT_LIST_ARCHIVED_SQL, /WHERE c\.account = \$1[\s\S]*AND \(COALESCE\(c\.archived, false\) OR COALESCE\(pn_alias\.archived, false\)\) = true\s+ORDER BY/);
-  assert.match(CHAT_LIST_ACTIVE_SQL, /m\.conversation_id = ANY\(array_prepend\(c\.id, COALESCE\(pn_alias\.ids/);
-  assert.match(CHAT_LIST_ARCHIVED_SQL, /lid\.account = c\.account/);
+  // SC-2760: cada LATERAL de messages va en UNION ALL (igualdad + ANY por
+  // brazo); con array_prepend o un solo ANY no constante el planner abandona
+  // el índice por conversación y escanea messages por timestamp global.
+  // (c o b: el lateral inbound aplica por fuera, sobre la página ya recortada)
+  assert.equal((CHAT_LIST_ACTIVE_SQL.match(/m\.conversation_id = (?:c|b)\.id\b/g) || []).length, 2);
+  assert.ok((CHAT_LIST_ACTIVE_SQL.match(/UNION ALL/g) || []).length >= 2);
+  // 20-10: el COUNT(*) correlacionado por fila (lid.account = c.account) se
+  // sustituye por la CTE agrupada; si vuelve el COUNT por fila, timeout otra vez.
+  assert.match(CHAT_LIST_ARCHIVED_SQL, /WITH lid_phones AS MATERIALIZED/);
+  assert.doesNotMatch(CHAT_LIST_ARCHIVED_SQL, /SELECT COUNT\(\*\) FROM conversations/);
   assert.doesNotMatch(CHAT_LIST_ARCHIVED_SQL, /LIMIT 500$/);
 });
 

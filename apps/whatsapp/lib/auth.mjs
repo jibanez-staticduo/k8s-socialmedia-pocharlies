@@ -241,10 +241,31 @@ export class AppAuth {
       const id = parseCookie(req.headers.cookie, SESSION_COOKIE);
       if (id) this.sessions.delete(id);
       await this.saveSessions();
-      return { setCookie: clearCookie(SESSION_COOKIE) };
+      // Soltar solo la cookie de la app deja viva la sesión de Keycloak: el
+      // siguiente /auth/login la retoma solo y el usuario sigue dentro
+      // (QA #12). La URL es la misma construcción que ya usa la página de
+      // cuenta no autorizada (19-10).
+      const logout = new URL('protocol/openid-connect/logout', `${this.issuer.href.replace(/\/$/, '')}/`);
+      logout.searchParams.set('redirect_uri', this.publicUrl.href);
+      return { setCookie: clearCookie(SESSION_COOKIE), logoutUrl: logout.href };
     }
-    return { setCookie: null };
+    return { setCookie: null, logoutUrl: null };
   }
+}
+
+/**
+ * Página de "cuenta no autorizada": el JSON del fallo dejaba al usuario sin
+ * salida con una sesión SSO que no podía cerrar (Dani, 19-10). El enlace
+ * termina la sesión de Keycloak y devuelve a la app.
+ */
+export function unauthorizedHtml(publicUrl, issuer) {
+  const logout = new URL('protocol/openid-connect/logout', `${issuer.href.replace(/\/$/, '')}/`);
+  logout.searchParams.set('redirect_uri', publicUrl);
+  return `<!doctype html><html lang="es"><meta charset="utf-8"><title>Cuenta no autorizada</title>
+<body style="font:16px system-ui;max-width:36em;margin:4em auto">
+<p>Tu sesión de Keycloak no está en la lista de cuentas de esta app.</p>
+<p><a href="${logout.href}">Cerrar sesión en Keycloak</a> y volver a intentarlo con otra cuenta.</p>
+</body>`;
 }
 
 export { SESSION_COOKIE, TRANSACTION_COOKIE, clearCookie, cookie, parseCookie, safeReturnTo };

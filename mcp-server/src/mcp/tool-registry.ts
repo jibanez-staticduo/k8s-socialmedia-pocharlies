@@ -81,10 +81,18 @@ const attachment = {
         'audio/ogg → native voice note (ptt), other audio/* → audio message, anything else → ' +
         'document (fileName taken from the URL last path segment, so prefer URLs ending in ' +
         'the real filename). Telegram fetches http(s) connector-side too; non-http paths ' +
-        'pass through and fail for cluster-internal URLs.',
+        'pass through and fail for cluster-internal URLs. On Telegram the DECLARED mimeType ' +
+        'decides, not the Content-Type the URL serves (see mimeType).',
     },
     name: { type: 'string' },
-    mimeType: { type: 'string' },
+    mimeType: {
+      type: 'string',
+      description:
+        'Telegram: with mimeType audio/ogg (parameters allowed, e.g. audio/ogg; codecs=opus) ' +
+        'the attachment goes out as a voice note and must be OGG/Opus; with any other value, ' +
+        'or none, it goes out as a document (an audio/ogg URL without mimeType is still a ' +
+        'document). WhatsApp: no effect, the downloaded Content-Type decides.',
+    },
     caption: { type: 'string' },
     viewOnce: {
       type: 'boolean',
@@ -1274,6 +1282,29 @@ export const SOCIAL_TOOL_REGISTRY: readonly SocialToolDefinition[] = [
         },
       },
       ['channel', 'accountId', 'target', 'messageId', 'emoji']
+    ),
+    idempotent: true,
+  }),
+  tool({
+    name: 'social_get_reactions',
+    title: 'Get message reactions',
+    description:
+      'Count the reactions on Telegram messages: total (Telegram’s own count) and per emoji. ' +
+      'With messageId, that message; without it, every message of the forum topic topicId ' +
+      '(or a target <chat>_<topic>), sorted by total. Use it to tally a photo contest.',
+    effect: 'read',
+    authScope: 'social.read',
+    capability: 'messages.reactions',
+    handler: 'getReactions',
+    inputSchema: objectSchema(
+      {
+        ...commonProperties,
+        messageId: { type: 'string', minLength: 1 },
+        topicId: { type: ['string', 'integer'], description: 'Forum topic to tally.' },
+        limit: { type: 'integer', minimum: 1, maximum: 200, default: 100 },
+        readSource,
+      },
+      ['channel', 'accountId', 'target']
     ),
     idempotent: true,
   }),

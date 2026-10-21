@@ -425,7 +425,7 @@ spec:
       annotations:
         # Sin reloader: cambiar la key de LiteLLM exige rodar el pod (envFrom).
         litellm.e-dani.com/key-alias: "socialmedia"
-        contracts.e-dani.com/socialmedia-digest: "sha256:8845fb27cdbbac6ebceb195f48542dd7f24401b22d46eb50c0b94b0f73e9fa26"
+        contracts.e-dani.com/socialmedia-digest: "sha256:bb9c14c82e2c7de7beafc01abeee1a59b938d91c7856f25b88ba35cc45ddfeaa"
     spec:
       enableServiceLinks: false
       nodeSelector: { topology: lan, kubernetes.io/arch: amd64 }
@@ -501,7 +501,7 @@ spec:
       annotations:
         # Sin reloader: cambiar la key de LiteLLM exige rodar el pod (envFrom).
         litellm.e-dani.com/key-alias: "socialmedia"
-        contracts.e-dani.com/socialmedia-digest: "sha256:8845fb27cdbbac6ebceb195f48542dd7f24401b22d46eb50c0b94b0f73e9fa26"
+        contracts.e-dani.com/socialmedia-digest: "sha256:bb9c14c82e2c7de7beafc01abeee1a59b938d91c7856f25b88ba35cc45ddfeaa"
     spec:
       enableServiceLinks: false
       nodeSelector:

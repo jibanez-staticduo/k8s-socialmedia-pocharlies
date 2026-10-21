@@ -620,6 +620,71 @@ async function channelConversations(
 }
 
 /**
+ * The id a channel post lives under in `messages`. A channel's message ids
+ * are only unique inside the channel, while `messages.wa_message_id` is one
+ * key per account and the insert is ON CONFLICT DO NOTHING: the post of a
+ * second channel whose id another channel already holds would vanish without
+ * a trace, and its message key would overwrite the first post's. The first
+ * channel keeps the bare id (every stored row, key and revoke stays as it is);
+ * a clash with another channel's row gets `<channel jid>:<id>`. The ingest and
+ * the revoke / edit that names the post ask with the same (channel, id), so
+ * both reach the same row. A failed lookup answers the bare id: it never
+ * stops the ingest.
+ */
+export async function channelPostMessageId(channelJid: string, id: string): Promise<string> {
+  // The account prefix is not added here: accountKey does it on the way in (storeMessage, markMessageRevoked, markMessageEdited).
+  try {
+    const result = await getPool().query(
+      `SELECT conversation_id FROM messages WHERE wa_message_id = $1`,
+      [accountKey(id)]
+    );
+    const holder = result.rows[0]?.conversation_id;
+    return holder && holder !== accountKey(channelJid) ? `${channelJid}:${id}` : id;
+  } catch {
+    return id;
+  }
+}
+
+/** How many revokes that arrived before their post are remembered, and for how long. */
+const REVOKE_TOMBS_MAX = 2000;
+const REVOKE_TOMB_TTL_MS = 24 * 60 * 60 * 1000;
+const revokeTombs = new Map<string, number>();
+
+/** Test hook: forget every remembered revoke. */
+export function resetRevokeTombsForTests(): void {
+  revokeTombs.clear();
+}
+
+const tombKey = (chatJid: string, id: string): string => `${chatJid}|${id}`;
+
+/**
+ * A revoke of a channel post or a status found no row: its post has not been
+ * stored yet. Remembered in this process (never in the database: it does not
+ * survive a restart) so the post is marked deleted when it arrives instead of
+ * coming back. The key is the chat and the WhatsApp id exactly as they arrive,
+ * before any composition and without the account prefix, so neither the order
+ * of arrival nor `channelPostMessageId` can give the tomb to another channel.
+ * At most REVOKE_TOMBS_MAX; the oldest goes first.
+ */
+export function noteRevokeBeforePost(chatJid: string, id: string): void {
+  const key = tombKey(chatJid, id);
+  revokeTombs.delete(key);
+  revokeTombs.set(key, Date.now());
+  if (revokeTombs.size > REVOKE_TOMBS_MAX) {
+    revokeTombs.delete(revokeTombs.keys().next().value as string);
+  }
+}
+
+/** Whether a revoke of this post arrived first (and is not older than 24 h); it is used up. */
+export function takeRevokeBeforePost(chatJid: string, id: string): boolean {
+  const key = tombKey(chatJid, id);
+  const notedAt = revokeTombs.get(key);
+  if (notedAt === undefined) return false;
+  revokeTombs.delete(key);
+  return Date.now() - notedAt <= REVOKE_TOMB_TTL_MS;
+}
+
+/**
  * Posts of the channels this account receives (or of one), newest first,
  * from historical `messages`, excluding posts with authoritative isolated
  * state. Media: GET /messages/media/:channelId/:messageId.
