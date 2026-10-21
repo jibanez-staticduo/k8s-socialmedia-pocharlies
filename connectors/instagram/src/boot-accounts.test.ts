@@ -56,7 +56,7 @@ for (const businessAccountId of ['biz-a', '']) {
       const app = await createInstagramApp({ env, accounts, credentialStore: null,
         publisher: { publish(account, event) { events.push({ account, event }); } } });
       const listening = await listen(app);
-      server = listening.server;
+    server = listening.server;
       const body = '{ "object": "instagram", "entry": [{ "id": "biz-a", "messaging": [{ "sender": { "id": "sender-a" }, "recipient": { "id": "biz-a" }, "timestamp": 1700000000, "message": { "mid": "message-a", "text": "hello" } }] }] }';
       const sign = (raw: string) => 'sha256=' + createHmac('sha256', env.FACEBOOK_APP_SECRET).update(raw).digest('hex');
       const post = (signature?: string) => originalFetch(listening.base + '/webhook', {
@@ -72,7 +72,27 @@ for (const businessAccountId of ['biz-a', '']) {
       assert.equal((events[0] as { account: string }).account, 'default');
       assert.equal((await originalFetch(listening.base + '/webhook?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=challenge')).status, 200);
       accounts.get('default')!.config.appSecret = '';
-      assert.equal((await post(sign(body))).status, 503, 'missing app secret never permits unsigned delivery');
+      await new Promise<void>(resolve => server!.close(() => resolve()));
+      server = undefined;
+      const missingSecretApp = await createInstagramApp({
+        env: { ...env, FACEBOOK_APP_SECRET: '' },
+        accounts,
+        credentialStore: null,
+        publisher: { publish() {} },
+      });
+      const missingSecret = await listen(missingSecretApp);
+      server = missingSecret.server;
+      const postMissingSecret = () =>
+        originalFetch(missingSecret.base + '/webhook', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-hub-signature-256': sign(body) },
+          body,
+        });
+      assert.equal(
+        (await postMissingSecret()).status,
+        503,
+        'missing app secret never permits unsigned delivery'
+      );
       assert.equal(events.length, 1);
     } finally {
       globalThis.fetch = originalFetch;
@@ -87,13 +107,22 @@ test('registry app isolates account listing and keeps OAuth routes before accoun
     { channel: 'instagram', accountId: 'test-one', enabled: true, secretEnv: 'ONE' },
     { channel: 'instagram', accountId: 'second', enabled: true, secretEnv: 'TWO' },
   ]));
-  const env = { SOCIAL_ACCOUNTS_FILE: file, INSTAGRAM_ACCOUNTS: 'test-one,second', ONE: 'one', TWO: 'two' };
+  const env = {
+    SOCIAL_ACCOUNTS_FILE: file,
+    INSTAGRAM_ACCOUNTS: 'test-one,second',
+    ONE: 'one',
+    TWO: 'two',
+    CONNECTOR_SHARED_SECRET: CONNECTOR_KEY,
+  };
   const accounts = loadAccounts({ env });
   assert.equal(accounts.size, 2);
   assert.equal(accounts.get('test-one')?.ready, false);
   const app = await createInstagramApp({ env, accounts, credentialStore: null, publisher: { publish() {} } });
   const { server, base } = await listen(app);
-  const get = (path: string, token = '') => fetch(base + path, { headers: { authorization: `Bearer ${token}` } });
+  const get = (path: string, token = '') =>
+    fetch(base + path, {
+      headers: connectorHeaders({ authorization: `Bearer ${token}` }),
+    });
   try {
     assert.deepEqual(await (await get('/health')).json(), { status: 'alive' });
     assert.equal((await get('/api/v1/accounts')).status, 401);
@@ -102,7 +131,9 @@ test('registry app isolates account listing and keeps OAuth routes before accoun
     assert.deepEqual(await list.json(), { accounts: [{ name: 'test-one', status: 'setup-required' }] });
     assert.equal((await get('/api/v1/second/profile', 'one')).status, 401);
     assert.equal((await get('/api/v1/test-one/profile', 'one')).status, 503);
-    const oauth = await fetch(base + '/api/v1/oauth/instagram/authorize-url', { headers: { 'x-user-sub': 'test-user' } });
+    const oauth = await fetch(base + '/api/v1/oauth/instagram/authorize-url', {
+      headers: connectorHeaders({ 'x-user-sub': 'test-user' }),
+    });
     assert.equal(oauth.status, 400);
     assert.equal((await oauth.json()).error.code, 'instagram_pairing_unavailable');
   } finally {
