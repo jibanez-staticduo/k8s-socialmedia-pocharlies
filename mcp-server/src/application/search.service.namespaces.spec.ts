@@ -95,7 +95,10 @@ describe('text search account isolation', () => {
 
   it('with an explicit account, a foreign namespace produces an empty candidate set', async () => {
     const { query, service } = keywordService();
-    await service.keywordSearch('hola', { account: 'professional', chatId: 'leila:34600@s.whatsapp.net' });
+    await service.keywordSearch('hola', {
+      account: 'professional',
+      chatId: 'leila:34600@s.whatsapp.net',
+    });
     expect(query).toHaveBeenCalled();
     expect(paramsOf(query)[1]).toEqual(['whatsapp:professional']);
     expect(paramsOf(query)[2]).toEqual([]);
@@ -148,7 +151,10 @@ describe('account-less semantic search (brain scopes)', () => {
 
   it('with an explicit account, a foreign namespace makes no semantic request', async () => {
     const { calls, service } = brainService();
-    await service.semanticSearch('hola', { account: 'professional', chatId: 'leila:34600@s.whatsapp.net' });
+    await service.semanticSearch('hola', {
+      account: 'professional',
+      chatId: 'leila:34600@s.whatsapp.net',
+    });
     expect(calls).toHaveLength(0);
   });
 });

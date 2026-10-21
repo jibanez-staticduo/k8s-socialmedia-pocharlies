@@ -6,35 +6,53 @@ import { EmbeddingJob } from '../infrastructure/jobs/embedding-job';
 import { EmbeddingService } from './embedding.service';
 import { isWhatsAppUpdate } from '../domain/whatsapp-surface';
 
-jest.mock('pino', () => ({ __esModule: true, default: () => ({ debug: jest.fn(), info: jest.fn(), error: jest.fn(), warn: jest.fn() }) }));
+jest.mock('pino', () => ({
+  __esModule: true,
+  default: () => ({ debug: jest.fn(), info: jest.fn(), error: jest.fn(), warn: jest.fn() }),
+}));
 jest.mock('./embedding.service');
 
 function event(account: string, conversationId: string): MessageReceivedEvent {
   return {
-    eventType: EventType.MESSAGE_RECEIVED, account, conversationId,
-    senderWaId: '123@s.whatsapp.net', waMessageId: 'same-id',
-    waTimestamp: '2026-09-27T12:00:00Z', content: 'ordinary text',
-    messageType: 'TEXT', isForwarded: false,
+    eventType: EventType.MESSAGE_RECEIVED,
+    account,
+    conversationId,
+    senderWaId: '123@s.whatsapp.net',
+    waMessageId: 'same-id',
+    waTimestamp: '2026-09-27T12:00:00Z',
+    content: 'ordinary text',
+    messageType: 'TEXT',
+    isForwarded: false,
   } as MessageReceivedEvent;
 }
 
 describe('WhatsApp conversational ingestion boundary', () => {
-  beforeAll(() => { process.env.SOCIAL_ACCOUNTS_FILE = join(__dirname, '../domain/accounts.fixture.json'); });
+  beforeAll(() => {
+    process.env.SOCIAL_ACCOUNTS_FILE = join(__dirname, '../domain/accounts.fixture.json');
+  });
   beforeEach(() => jest.clearAllMocks());
 
-  test.each(['status@broadcast', 'secondary:status@broadcast', '123@newsletter', 'secondary:123@newsletter'])(
-    '%s never writes conversations or requests embeddings', async conversationId => {
-      const query = jest.fn();
-      const db = { query } as unknown as Pool;
-      await new MessageIngestionService(db, '').handleMessageReceived(event('secondary', conversationId));
-      await new EmbeddingJob('', db, '', '').handleMessageReceived(event('secondary', conversationId));
-      expect(query).not.toHaveBeenCalled();
-      expect(EmbeddingService.prototype.processMessage).not.toHaveBeenCalled();
-    }
-  );
+  test.each([
+    'status@broadcast',
+    'secondary:status@broadcast',
+    '123@newsletter',
+    'secondary:123@newsletter',
+  ])('%s never writes conversations or requests embeddings', async conversationId => {
+    const query = jest.fn();
+    const db = { query } as unknown as Pool;
+    await new MessageIngestionService(db, '').handleMessageReceived(
+      event('secondary', conversationId)
+    );
+    await new EmbeddingJob('', db, '', '').handleMessageReceived(
+      event('secondary', conversationId)
+    );
+    expect(query).not.toHaveBeenCalled();
+    expect(EmbeddingService.prototype.processMessage).not.toHaveBeenCalled();
+  });
 
   test.each(['123@g.us', '123@s.whatsapp.net', '123@lid', 'secondary:123@s.whatsapp.net'])(
-    'ordinary chat %s is not filtered by text or emoji', conversationId => {
+    'ordinary chat %s is not filtered by text or emoji',
+    conversationId => {
       expect(isWhatsAppUpdate(conversationId)).toBe(false);
     }
   );
@@ -51,11 +69,17 @@ describe('WhatsApp conversational ingestion boundary', () => {
   });
 
   test('a PN event still embeds a row redirected to its canonical LID conversation', async () => {
-    const query = jest.fn().mockResolvedValue({ rows: [{
-      id: 'canonical-message', conversation_id: 'secondary:42@lid',
-    }] });
-    await new EmbeddingJob('', { query } as unknown as Pool, '', '')
-      .handleMessageReceived(event('secondary', '123@s.whatsapp.net'));
+    const query = jest.fn().mockResolvedValue({
+      rows: [
+        {
+          id: 'canonical-message',
+          conversation_id: 'secondary:42@lid',
+        },
+      ],
+    });
+    await new EmbeddingJob('', { query } as unknown as Pool, '', '').handleMessageReceived(
+      event('secondary', '123@s.whatsapp.net')
+    );
     expect(query.mock.calls[0][1]).toEqual(['secondary', 'secondary:same-id']);
     expect(query.mock.calls[0][0]).not.toContain('conversation_id =');
     expect(EmbeddingService.prototype.processMessage).toHaveBeenCalledWith('canonical-message');
@@ -65,7 +89,9 @@ describe('WhatsApp conversational ingestion boundary', () => {
     const query = jest.fn().mockResolvedValue({ rows: [] });
     const job = new EmbeddingJob('', { query } as unknown as Pool, '', '');
     await job.handleMessageReceived(event('personal', '123@s.whatsapp.net'));
-    await expect(job.handleMessageReceived(event('unknown-account', '123@s.whatsapp.net'))).rejects.toThrow();
+    await expect(
+      job.handleMessageReceived(event('unknown-account', '123@s.whatsapp.net'))
+    ).rejects.toThrow();
     expect(query).toHaveBeenCalledTimes(1);
     expect(EmbeddingService.prototype.processMessage).not.toHaveBeenCalled();
   });
@@ -75,12 +101,16 @@ describe('WhatsApp conversational ingestion boundary', () => {
     process.env.SOCIAL_ACCOUNTS_FILE = join(__dirname, '../domain/legacy-accounts.fixture.json');
     jest.useFakeTimers();
     try {
-      const query = jest.fn().mockResolvedValueOnce({ rows: [] })
+      const query = jest
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({ rows: [{ id: 'telegram-row' }] });
       const job = new EmbeddingJob('', { query } as unknown as Pool, '', '');
       const pending = job.handleMessageReceived({
         eventType: EventType.TELEGRAM_MESSAGE_RECEIVED,
-        account: 'personal', conversationId: '-10042', telegramMessageId: '7',
+        account: 'personal',
+        conversationId: '-10042',
+        telegramMessageId: '7',
       });
       await jest.advanceTimersByTimeAsync(500);
       await pending;

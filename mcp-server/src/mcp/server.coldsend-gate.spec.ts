@@ -45,7 +45,9 @@ function serverWith(queryImpl: QueryImpl) {
   };
 }
 
-const hasInbound: QueryImpl = async (_sql, params) => ({ rows: [{ id: (params[0] as string[])[0] }] });
+const hasInbound: QueryImpl = async (_sql, params) => ({
+  rows: [{ id: (params[0] as string[])[0] }],
+});
 const noInbound: QueryImpl = async () => ({ rows: [] });
 
 describe('handleSendFile cold-send gate (professional)', () => {
@@ -95,15 +97,22 @@ describe('handleSendFile cold-send gate (professional)', () => {
     });
     expect(query).toHaveBeenCalledTimes(1);
     expect(connectorCall).toHaveBeenCalledWith(
-      'http://wa-professional', 'POST', '/api/v1/messages/media/send',
+      'http://wa-professional',
+      'POST',
+      '/api/v1/messages/media/send',
       { conversationId: '198517716955152@lid', fileUrl: 'http://f/x.jpg' }
     );
   });
 
   it('blocks a cold @lid media send before calling the connector', async () => {
     const { sendFile, connectorCall } = serverWith(noInbound);
-    await expect(sendFile({ conversationId: '198517716955152@lid', fileUrl: 'http://f/x.jpg', account: 'professional' }))
-      .rejects.toThrow(/only allowed after/);
+    await expect(
+      sendFile({
+        conversationId: '198517716955152@lid',
+        fileUrl: 'http://f/x.jpg',
+        account: 'professional',
+      })
+    ).rejects.toThrow(/only allowed after/);
     expect(connectorCall).not.toHaveBeenCalled();
   });
 
@@ -241,16 +250,27 @@ describe('handleForwardMessage cold-send gate (professional)', () => {
     });
     expect(query).toHaveBeenCalledTimes(1);
     expect(connectorCall).toHaveBeenCalledWith(
-      'http://wa-professional', 'POST', '/api/v1/messages/forward',
-      { chatId: 'professional:source@s.whatsapp.net', messageId: 'm1', toChatId: '198517716955152@lid' }
+      'http://wa-professional',
+      'POST',
+      '/api/v1/messages/forward',
+      {
+        chatId: 'professional:source@s.whatsapp.net',
+        messageId: 'm1',
+        toChatId: '198517716955152@lid',
+      }
     );
   });
 
   it('blocks a cold @lid forward destination before calling the connector', async () => {
     const { forward, connectorCall } = serverWith(noInbound);
-    await expect(forward({ chatId: 'professional:source@s.whatsapp.net', messageId: 'm1',
-      toChatId: '198517716955152@lid', account: 'professional' }))
-      .rejects.toThrow(/only allowed after/);
+    await expect(
+      forward({
+        chatId: 'professional:source@s.whatsapp.net',
+        messageId: 'm1',
+        toChatId: '198517716955152@lid',
+        account: 'professional',
+      })
+    ).rejects.toThrow(/only allowed after/);
     expect(connectorCall).not.toHaveBeenCalled();
   });
 
@@ -314,7 +334,7 @@ describe('handleForwardMessage cold-send gate (professional)', () => {
         toChatId: '34660242739',
         account: 'PROFESSIONAL',
       })
-    ).rejects.toThrow("Unknown or disabled whatsapp account: PROFESSIONAL");
+    ).rejects.toThrow('Unknown or disabled whatsapp account: PROFESSIONAL');
     expect(query).not.toHaveBeenCalled();
     expect(connectorCall).not.toHaveBeenCalled();
   });

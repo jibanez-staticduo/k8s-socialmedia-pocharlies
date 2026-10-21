@@ -719,6 +719,7 @@ export function createRouter(
   /**
    * Fetch the exact message when repairing a previously failed media download.
    */
+  // CONTRACT: http.telegram-connector.messages-single.v1
   router.get('/messages/single/:chatId/:msgId', (req: Request, res: Response): void => {
     void (async () => {
       const messageId = Number(req.params.msgId);

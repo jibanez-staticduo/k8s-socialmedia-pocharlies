@@ -530,6 +530,7 @@ async function main(): Promise<void> {
  * refused (an alert fires on any > 0 — the cap only stops the damage, a
  * human has to look) and when the pass finished.
  */
+// CONTRACT: metric.brain-windows.refused-deletes.v1
 export function passMetricsText(refusedByAccount: Record<string, number>, nowMs: number): string {
   const lines = Object.entries(refusedByAccount).map(
     ([account, n]) => `brain_windows_refused_deletes{account="${account}"} ${n} ${nowMs}`

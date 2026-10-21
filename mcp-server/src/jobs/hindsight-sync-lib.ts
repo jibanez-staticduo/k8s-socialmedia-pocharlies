@@ -20,7 +20,8 @@ export interface SyncOptions {
 
 function positiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const value = env[name] === undefined ? fallback : Number(env[name]);
-  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`);
+  if (!Number.isSafeInteger(value) || value < 1)
+    throw new Error(`${name} must be a positive integer`);
   return value;
 }
 
@@ -35,7 +36,10 @@ export function syncOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): SyncOp
     intervalMs: positiveInteger(env, 'HINDSIGHT_SYNC_INTERVAL_MS', 30000),
     retryMs: positiveInteger(env, 'HINDSIGHT_SYNC_RETRY_MS', 30000),
     since: new Date(since).toISOString(),
-    chatIds: (env.HINDSIGHT_SYNC_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean),
+    chatIds: (env.HINDSIGHT_SYNC_CHAT_IDS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
     loop: env.HINDSIGHT_SYNC_LOOP === 'true',
   };
 }
@@ -86,12 +90,23 @@ export interface SyncEntry {
 }
 
 export function destinationKey(url: string, bankId: string): string {
-  return createHash('sha256').update(JSON.stringify([url.replace(/\/+$/, ''), bankId])).digest('hex');
+  return createHash('sha256')
+    .update(JSON.stringify([url.replace(/\/+$/, ''), bankId]))
+    .digest('hex');
 }
 
 /** Deterministic UUID per source revision: A -> B -> A must not reuse operation A. */
-export function versionOperationId(destination: string, messageId: string, revision: string, hash: string, previousOperationId?: string): string {
-  const bytes = createHash('sha256').update(JSON.stringify([destination, messageId, revision, hash, previousOperationId || null])).digest().subarray(0, 16);
+export function versionOperationId(
+  destination: string,
+  messageId: string,
+  revision: string,
+  hash: string,
+  previousOperationId?: string
+): string {
+  const bytes = createHash('sha256')
+    .update(JSON.stringify([destination, messageId, revision, hash, previousOperationId || null]))
+    .digest()
+    .subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = bytes.toString('hex');
@@ -101,15 +116,22 @@ export function versionOperationId(destination: string, messageId: string, revis
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
   if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`).join(',')}}`;
+    return `{${Object.keys(value)
+      .sort()
+      .map(k => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value) ?? 'null';
 }
 
 export function selectionHash(accounts: SocialAccount[], options: SyncOptions): string {
-  const scopes = accounts.filter(a => a.enabled)
-    .map(a => [a.channel,a.namespace,a.accountId]).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  return createHash('sha256').update(stableJson({scopes,since:options.since,chatIds:[...options.chatIds].sort()})).digest('hex');
+  const scopes = accounts
+    .filter(a => a.enabled)
+    .map(a => [a.channel, a.namespace, a.accountId])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return createHash('sha256')
+    .update(stableJson({ scopes, since: options.since, chatIds: [...options.chatIds].sort() }))
+    .digest('hex');
 }
 
 export function messageScope(row: SyncMessage): SyncScope {
@@ -117,55 +139,110 @@ export function messageScope(row: SyncMessage): SyncScope {
     platform: row.platform,
     namespace: row.account,
     // Instagram metadata is authoritative, including when it is absent.
-    provider_account: row.platform === 'instagram'
-      ? (typeof row.metadata?.instagram_account === 'string' ? row.metadata.instagram_account : null)
-      : row.account,
+    provider_account:
+      row.platform === 'instagram'
+        ? typeof row.metadata?.instagram_account === 'string'
+          ? row.metadata.instagram_account
+          : null
+        : row.account,
     conversation_id: row.conversation_id,
     timestamp: new Date(row.wa_timestamp).toISOString(),
   };
 }
 
 export function scopeEnabled(scope: SyncScope, accounts: SocialAccount[]): boolean {
-  return accounts.some(a => a.enabled && a.channel === scope.platform &&
-    a.namespace === scope.namespace && a.accountId === scope.provider_account);
+  return accounts.some(
+    a =>
+      a.enabled &&
+      a.channel === scope.platform &&
+      a.namespace === scope.namespace &&
+      a.accountId === scope.provider_account
+  );
 }
 
 export function buildSyncEntry(
-  destination: string, messageId: string, revision: string, row: SyncMessage | null,
-  scope: SyncScope, accounts: SocialAccount[], options: SyncOptions,
-  previousOperationId?: string,
+  destination: string,
+  messageId: string,
+  revision: string,
+  row: SyncMessage | null,
+  scope: SyncScope,
+  accounts: SocialAccount[],
+  options: SyncOptions,
+  previousOperationId?: string
 ): SyncEntry {
-  const eligible = row && scopeEnabled(scope, accounts) && Date.parse(scope.timestamp) >= Date.parse(options.since) &&
+  const eligible =
+    row &&
+    scopeEnabled(scope, accounts) &&
+    Date.parse(scope.timestamp) >= Date.parse(options.since) &&
     (!options.chatIds.length || options.chatIds.includes(scope.conversation_id));
-  const isDeleted = !eligible || Boolean(row?.is_deleted) || row?.metadata?.deleted_for_me === true ||
+  const isDeleted =
+    !eligible ||
+    Boolean(row?.is_deleted) ||
+    row?.metadata?.deleted_for_me === true ||
     !row?.content?.trim();
   const sender = row?.sender_wa_id || row?.direction || 'unknown';
   // Preserve original message text and time; Hindsight performs its own extraction.
-  const text = row?.content ? unwrapAsrJson(row.content) ?? row.content : '';
+  const text = row?.content ? (unwrapAsrJson(row.content) ?? row.content) : '';
   const content = isDeleted ? '' : `[${scope.timestamp}] ${sender}: ${text}`;
   const metadata: Record<string, string> = {
-    platform: scope.platform, namespace: scope.namespace,
-    provider_account: scope.provider_account || '', conversation_id: scope.conversation_id,
-    message_id: messageId, source_message_id: row?.wa_message_id || '',
-    sender, direction: row?.direction || '', message_type: row?.message_type || '',
+    platform: scope.platform,
+    namespace: scope.namespace,
+    provider_account: scope.provider_account || '',
+    conversation_id: scope.conversation_id,
+    message_id: messageId,
+    source_message_id: row?.wa_message_id || '',
+    sender,
+    direction: row?.direction || '',
+    message_type: row?.message_type || '',
     sender_name: typeof row?.metadata?.sender_name === 'string' ? row.metadata.sender_name : '',
   };
   const payload: SyncPayload = {
-    documentId: socialmediaDocumentId(messageId), content, metadata,
-    tags: isDeleted ? [] : [socialmediaScopeTag(scope.platform, scope.namespace, scope.provider_account || ''),
-      socialmediaChatTag(scope.conversation_id)], timestamp: scope.timestamp, scope,
+    documentId: socialmediaDocumentId(messageId),
+    content,
+    metadata,
+    tags: isDeleted
+      ? []
+      : [
+          socialmediaScopeTag(scope.platform, scope.namespace, scope.provider_account || ''),
+          socialmediaChatTag(scope.conversation_id),
+        ],
+    timestamp: scope.timestamp,
+    scope,
   };
   const versionHash = createHash('sha256').update(stableJson({ payload, isDeleted })).digest('hex');
-  return { destination, messageId, sourceRevision: revision, versionHash, selectionHash: selectionHash(accounts,options),
-    operationId: versionOperationId(destination, messageId, revision, versionHash, previousOperationId),
-    payload, isDeleted, status: 'pending', attempts: 0 };
+  return {
+    destination,
+    messageId,
+    sourceRevision: revision,
+    versionHash,
+    selectionHash: selectionHash(accounts, options),
+    operationId: versionOperationId(
+      destination,
+      messageId,
+      revision,
+      versionHash,
+      previousOperationId
+    ),
+    payload,
+    isDeleted,
+    status: 'pending',
+    attempts: 0,
+  };
 }
 
-export type SyncClient = Pick<HindsightClient, 'getOperation' | 'retryOperation' | 'retainDocument' | 'deleteDocument'>;
+export type SyncClient = Pick<
+  HindsightClient,
+  'getOperation' | 'retryOperation' | 'retainDocument' | 'deleteDocument'
+>;
 export type SaveEntry = (entry: SyncEntry, delayMs: number) => Promise<void>;
 
 /** Reconcile before resubmitting, including after a lost HTTP acknowledgement. */
-export async function advanceSyncEntry(entry: SyncEntry, client: SyncClient, save: SaveEntry, retryMs: number): Promise<SyncEntry['status']> {
+export async function advanceSyncEntry(
+  entry: SyncEntry,
+  client: SyncClient,
+  save: SaveEntry,
+  retryMs: number
+): Promise<SyncEntry['status']> {
   if (entry.status === 'completed') return entry.status;
   try {
     if (entry.isDeleted) {
@@ -197,8 +274,13 @@ export async function advanceSyncEntry(entry: SyncEntry, client: SyncClient, sav
   return entry.status;
 }
 
-export async function saveSyncEntry(db: PoolClient, entry: SyncEntry, delayMs: number): Promise<void> {
-  await db.query(`INSERT INTO hindsight_sync_ledger
+export async function saveSyncEntry(
+  db: PoolClient,
+  entry: SyncEntry,
+  delayMs: number
+): Promise<void> {
+  await db.query(
+    `INSERT INTO hindsight_sync_ledger
     (destination,message_id,source_revision,version_hash,operation_id,payload,is_deleted,status,attempts,retry_at,indexed_at,selection_hash)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+($10::double precision * interval '1 millisecond'),
       CASE WHEN $8='completed' THEN now() END,$11)
@@ -208,28 +290,59 @@ export async function saveSyncEntry(db: PoolClient, entry: SyncEntry, delayMs: n
       selection_hash=EXCLUDED.selection_hash,
       status=EXCLUDED.status,attempts=EXCLUDED.attempts,retry_at=EXCLUDED.retry_at,
       indexed_at=EXCLUDED.indexed_at,updated_at=now()`,
-  [entry.destination,entry.messageId,entry.sourceRevision,entry.versionHash,entry.operationId,
-    JSON.stringify(entry.payload),entry.isDeleted,entry.status,entry.attempts,delayMs,entry.selectionHash]);
+    [
+      entry.destination,
+      entry.messageId,
+      entry.sourceRevision,
+      entry.versionHash,
+      entry.operationId,
+      JSON.stringify(entry.payload),
+      entry.isDeleted,
+      entry.status,
+      entry.attempts,
+      delayMs,
+      entry.selectionHash,
+    ]
+  );
 }
 
-export async function seedHistoryBatch(db: PoolClient, destination: string, batch: number): Promise<void> {
+export async function seedHistoryBatch(
+  db: PoolClient,
+  destination: string,
+  batch: number
+): Promise<void> {
   // Keep cursor and queue insert atomic; live triggers win ON CONFLICT.
   await db.query('BEGIN');
   try {
-    await db.query('INSERT INTO hindsight_sync_destinations(destination) VALUES($1) ON CONFLICT DO NOTHING', [destination]);
-    const state = await db.query('SELECT * FROM hindsight_sync_destinations WHERE destination=$1 FOR UPDATE', [destination]);
+    await db.query(
+      'INSERT INTO hindsight_sync_destinations(destination) VALUES($1) ON CONFLICT DO NOTHING',
+      [destination]
+    );
+    const state = await db.query(
+      'SELECT * FROM hindsight_sync_destinations WHERE destination=$1 FOR UPDATE',
+      [destination]
+    );
     if (!state.rows[0].seeded) {
-      const rows = await db.query(`SELECT id::text AS id FROM messages
-        WHERE ($1::text IS NULL OR id > $1::uuid) ORDER BY id LIMIT $2`, [state.rows[0].seed_last_id, batch]);
+      const rows = await db.query(
+        `SELECT id::text AS id FROM messages
+        WHERE ($1::text IS NULL OR id > $1::uuid) ORDER BY id LIMIT $2`,
+        [state.rows[0].seed_last_id, batch]
+      );
       if (rows.rows.length) {
-        await db.query(`INSERT INTO hindsight_sync_changes(message_id,scope)
+        await db.query(
+          `INSERT INTO hindsight_sync_changes(message_id,scope)
           SELECT id::text,jsonb_build_object('platform',platform,'namespace',account,
             'provider_account',CASE WHEN platform='instagram' THEN metadata->>'instagram_account' ELSE account END,
             'conversation_id',conversation_id,'timestamp',wa_timestamp)
-          FROM messages WHERE id=ANY($1::uuid[]) ON CONFLICT DO NOTHING`, [rows.rows.map(r => r.id)]);
+          FROM messages WHERE id=ANY($1::uuid[]) ON CONFLICT DO NOTHING`,
+          [rows.rows.map(r => r.id)]
+        );
       }
-      await db.query(`UPDATE hindsight_sync_destinations SET seed_last_id=COALESCE($2,seed_last_id),seeded=$3
-        WHERE destination=$1`, [destination, rows.rows.at(-1)?.id || null, rows.rows.length < batch]);
+      await db.query(
+        `UPDATE hindsight_sync_destinations SET seed_last_id=COALESCE($2,seed_last_id),seeded=$3
+        WHERE destination=$1`,
+        [destination, rows.rows.at(-1)?.id || null, rows.rows.length < batch]
+      );
     }
     await db.query('COMMIT');
   } catch (error) {
@@ -244,15 +357,30 @@ interface Candidate {
   scope: SyncScope;
   message: SyncMessage | null;
   ledger: {
-    destination: string; message_id: string; source_revision: string; version_hash: string;
+    destination: string;
+    message_id: string;
+    source_revision: string;
+    version_hash: string;
     selection_hash: string;
-    operation_id: string; payload: SyncPayload; is_deleted: boolean; status: SyncEntry['status']; attempts: number;
+    operation_id: string;
+    payload: SyncPayload;
+    is_deleted: boolean;
+    status: SyncEntry['status'];
+    attempts: number;
   } | null;
 }
 
-export async function fetchSyncCandidates(db: PoolClient, destination: string, accounts: SocialAccount[], options: SyncOptions): Promise<Candidate[]> {
-  const scopes = accounts.filter(a => a.enabled).map(a => ({ platform: a.channel, namespace: a.namespace, provider_account: a.accountId }));
-  const result = await db.query(`SELECT c.message_id,c.revision::text,c.scope,
+export async function fetchSyncCandidates(
+  db: PoolClient,
+  destination: string,
+  accounts: SocialAccount[],
+  options: SyncOptions
+): Promise<Candidate[]> {
+  const scopes = accounts
+    .filter(a => a.enabled)
+    .map(a => ({ platform: a.channel, namespace: a.namespace, provider_account: a.accountId }));
+  const result = await db.query(
+    `SELECT c.message_id,c.revision::text,c.scope,
     CASE WHEN m.id IS NULL THEN NULL ELSE jsonb_build_object(
       'id',m.id,'platform',m.platform,'account',m.account,'conversation_id',m.conversation_id,
       'wa_message_id',m.wa_message_id,'wa_timestamp',m.wa_timestamp,'content',m.content,
@@ -271,40 +399,91 @@ export async function fetchSyncCandidates(db: PoolClient, destination: string, a
           AND l.payload->'scope'->>'provider_account'=s.provider_account)))
       AND (l.message_id IS NOT NULL OR ((c.scope->>'timestamp')::timestamptz >= $3::timestamptz
         AND (cardinality($4::text[])=0 OR c.scope->>'conversation_id'=ANY($4::text[]))))
-    ORDER BY c.revision LIMIT $5`, [destination,JSON.stringify(scopes),options.since,options.chatIds,options.batch,selectionHash(accounts,options)]);
+    ORDER BY c.revision LIMIT $5`,
+    [
+      destination,
+      JSON.stringify(scopes),
+      options.since,
+      options.chatIds,
+      options.batch,
+      selectionHash(accounts, options),
+    ]
+  );
   return result.rows;
 }
 
-export interface SyncPassResult { selected: number; accepted: number; completed: number; failed: number }
+export interface SyncPassResult {
+  selected: number;
+  accepted: number;
+  completed: number;
+  failed: number;
+}
 
-export async function runSyncPass(db: PoolClient, client: SyncClient, destination: string,
-  accounts: SocialAccount[], options: SyncOptions): Promise<SyncPassResult> {
+export async function runSyncPass(
+  db: PoolClient,
+  client: SyncClient,
+  destination: string,
+  accounts: SocialAccount[],
+  options: SyncOptions
+): Promise<SyncPassResult> {
   await seedHistoryBatch(db, destination, options.batch);
   const candidates = await fetchSyncCandidates(db, destination, accounts, options);
-  const result: SyncPassResult = { selected: candidates.length, accepted: 0, completed: 0, failed: 0 };
+  const result: SyncPassResult = {
+    selected: candidates.length,
+    accepted: 0,
+    completed: 0,
+    failed: 0,
+  };
   for (const candidate of candidates) {
     const l = candidate.ledger;
     // Finish the durable submitted snapshot before advancing to newer source data.
-    const entry: SyncEntry = l && l.status !== 'completed' ? {
-      destination: l.destination, messageId: l.message_id, sourceRevision: String(l.source_revision),
-      versionHash: l.version_hash, selectionHash: l.selection_hash, operationId: l.operation_id, payload: l.payload,
-      isDeleted: l.is_deleted, status: l.status, attempts: l.attempts,
-    } : buildSyncEntry(destination,candidate.message_id,String(candidate.revision),candidate.message,
-      candidate.message ? messageScope(candidate.message) : candidate.scope,accounts,options,l?.operation_id);
+    const entry: SyncEntry =
+      l && l.status !== 'completed'
+        ? {
+            destination: l.destination,
+            messageId: l.message_id,
+            sourceRevision: String(l.source_revision),
+            versionHash: l.version_hash,
+            selectionHash: l.selection_hash,
+            operationId: l.operation_id,
+            payload: l.payload,
+            isDeleted: l.is_deleted,
+            status: l.status,
+            attempts: l.attempts,
+          }
+        : buildSyncEntry(
+            destination,
+            candidate.message_id,
+            String(candidate.revision),
+            candidate.message,
+            candidate.message ? messageScope(candidate.message) : candidate.scope,
+            accounts,
+            options,
+            l?.operation_id
+          );
     if (l?.status === 'completed' && l.version_hash === entry.versionHash) {
       entry.status = 'completed';
       entry.operationId = l.operation_id;
-      await saveSyncEntry(db,entry,0);
+      await saveSyncEntry(db, entry, 0);
       result.completed++;
       continue;
     }
     if (!l || l.status === 'completed') await saveSyncEntry(db, entry, 0);
     let persistenceFailed = false;
     try {
-      const status = await advanceSyncEntry(entry,client,async (e,delay) => {
-        try { await saveSyncEntry(db,e,delay); }
-        catch (error) { persistenceFailed = true; throw error; }
-      },options.retryMs);
+      const status = await advanceSyncEntry(
+        entry,
+        client,
+        async (e, delay) => {
+          try {
+            await saveSyncEntry(db, e, delay);
+          } catch (error) {
+            persistenceFailed = true;
+            throw error;
+          }
+        },
+        options.retryMs
+      );
       if (status === 'completed') result.completed++;
       else result.accepted++;
     } catch (error) {

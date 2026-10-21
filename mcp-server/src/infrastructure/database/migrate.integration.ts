@@ -20,12 +20,16 @@ const legacyMigrationFiles = (): string[] =>
 
 /** Everything an already-running installation holds before 012 exists. */
 const preOwnReasonMigrationFiles = (): string[] =>
-  migrationFiles().filter(file =>
-    (Number(file.slice(0, 3)) < 26 || file.startsWith('030_')) && !isAuthorSource(file)
+  migrationFiles().filter(
+    file => (Number(file.slice(0, 3)) < 26 || file.startsWith('030_')) && !isAuthorSource(file)
   );
 
 const isAuthorSource = (file: string): boolean =>
-  ['021_whatsapp_novedades_channels.sql', '022_whatsapp_contacts_view.sql', '023_whatsapp_chat_time_index.sql'].includes(file);
+  [
+    '021_whatsapp_novedades_channels.sql',
+    '022_whatsapp_contacts_view.sql',
+    '023_whatsapp_chat_time_index.sql',
+  ].includes(file);
 
 async function database(label: string): Promise<{ client: Client; url: string }> {
   assert.ok(process.env.DATABASE_URL, 'Use a disposable PostgreSQL DATABASE_URL');
@@ -200,7 +204,7 @@ test('039 materializes an existing author contacts view without losing rows', as
       'CREATE TABLE messages(account text, conversation_id text, wa_timestamp timestamptz, platform text)'
     );
     await client.query(
-      "CREATE TABLE participants(id text PRIMARY KEY, account text NOT NULL, name text, push_name text)"
+      'CREATE TABLE participants(id text PRIMARY KEY, account text NOT NULL, name text, push_name text)'
     );
     await client.query(
       "INSERT INTO participants(id,account,name,push_name) VALUES('personal:legacy-peer','personal','Saved peer','Push peer')"
@@ -214,10 +218,9 @@ test('039 materializes an existing author contacts view without losing rows', as
         .rows[0].relkind,
       'r'
     );
-    assert.deepEqual(
-      (await client.query('SELECT account,jid,name FROM whatsapp_contacts')).rows,
-      [{ account: 'personal', jid: 'legacy-peer', name: 'Saved peer' }]
-    );
+    assert.deepEqual((await client.query('SELECT account,jid,name FROM whatsapp_contacts')).rows, [
+      { account: 'personal', jid: 'legacy-peer', name: 'Saved peer' },
+    ]);
   } finally {
     await client.end();
   }
@@ -778,9 +781,14 @@ for (const bigintIds of [false, true]) {
     try {
       await stageProduction(client, bigintIds);
       const beforeFix = mkdtempSync(join(tmpdir(), 'social-response-before-'));
-      for (const file of migrationFiles().filter(file => Number(file.slice(0, 3)) < 35 && !isAuthorSource(file)))
+      for (const file of migrationFiles().filter(
+        file => Number(file.slice(0, 3)) < 35 && !isAuthorSource(file)
+      ))
         writeFileSync(join(beforeFix, file), readFileSync(join(dir, file)));
-      writeFileSync(join(beforeFix, '039_shared_author_compat.sql'), readFileSync(join(dir, '039_shared_author_compat.sql')));
+      writeFileSync(
+        join(beforeFix, '039_shared_author_compat.sql'),
+        readFileSync(join(dir, '039_shared_author_compat.sql'))
+      );
       await runMigrations(client, beforeFix);
       await client.query(`INSERT INTO conversations(id,account,name) VALUES
         ('personal:target','personal','Target'), ('personal:other','personal','Other'),

@@ -18,7 +18,11 @@ beforeAll(() =>
 );
 
 it('WhatsApp personal: la clave va sin prefijo (compat con las filas históricas)', () => {
-  const e: Event = { eventType: 'MessageReceived', conversationId: '123@c.us', waMessageId: '3EB0AA' };
+  const e: Event = {
+    eventType: 'MessageReceived',
+    conversationId: '123@c.us',
+    waMessageId: '3EB0AA',
+  };
   expect(EmbeddingJob.messageKeyFor(e)).toBe('3EB0AA');
 });
 

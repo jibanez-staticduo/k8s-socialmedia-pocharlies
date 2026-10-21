@@ -77,8 +77,10 @@ export function useTestAccounts(maps: {
       channel: 'instagram',
       accountId,
       connectorUrl,
-      namespace: accountId === 'skirmshop' && namespaces.has('professional') ? 'professional' : 'personal',
-      brainInstance: accountId === 'skirmshop' && namespaces.has('professional') ? 'skirmshop' : 'personal',
+      namespace:
+        accountId === 'skirmshop' && namespaces.has('professional') ? 'professional' : 'personal',
+      brainInstance:
+        accountId === 'skirmshop' && namespaces.has('professional') ? 'skirmshop' : 'personal',
       ...(maps.secretEnv ? { secretEnv: maps.secretEnv } : {}),
     };
     if (existing >= 0) entries[existing] = entry;

@@ -146,7 +146,9 @@ export async function runMigrations(
     .filter(f => /^\d+.*\.sql$/.test(f))
     .sort();
   for (const file of files.filter(file => AUTHOR_COMPAT_CHECKSUMS[file])) {
-    const checksum = createHash('sha256').update(readFileSync(join(dir, file))).digest('hex');
+    const checksum = createHash('sha256')
+      .update(readFileSync(join(dir, file)))
+      .digest('hex');
     if (checksum !== AUTHOR_COMPAT_CHECKSUMS[file])
       throw new Error(`Author migration checksum changed: ${file}`);
     if (!files.includes('039_shared_author_compat.sql'))

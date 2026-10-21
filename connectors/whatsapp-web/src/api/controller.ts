@@ -1317,7 +1317,7 @@ export function createRouter(
     })();
   });
 
-  // CONTRACT: http.whatsapp-connector.auth-qr.v2 — auth, path and response are frozen.
+  // CONTRACT: http.whatsapp-connector.auth-qr.v3 — auth, path and response are frozen.
   // The connector access middleware protects this QR response.
   router.get('/auth/qr', (_req: Request, res: Response) => sendCurrentQR(qrHandler, res));
 
@@ -1878,7 +1878,7 @@ export function createRouter(
   });
 
   // Request older Baileys history for chats where we have persisted message keys.
-  // CONTRACT: http.whatsapp-connector.history-recover.v1
+  // CONTRACT: http.whatsapp-connector.history-recover.v2
   router.post('/history/recover', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       try {
@@ -3171,7 +3171,7 @@ export function createRouter(
 
   // Edit one of our own text messages (fase 3 / PR-3).
   // CONTRACT: http.whatsapp-connector.messages-edit.v1 — body {chatId, messageId, content}, 200 {edited, messageId, editId, editedAt}
-  // CONTRACT: http.whatsapp-connector.messages-info.v1
+  // CONTRACT: http.whatsapp-connector.messages-info.v2
   router.post('/messages/info', auth, (req: AuthenticatedRequest, res: Response): void => {
     void (async () => {
       const body = optionalObject(req.body);

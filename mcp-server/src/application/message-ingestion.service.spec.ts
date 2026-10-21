@@ -126,7 +126,9 @@ describe('a disabled account behaves as before the guard', () => {
       'Unknown or disabled whatsapp account: old'
     );
     expect(calls).toHaveLength(0);
-    expect(mockError).toHaveBeenCalledWith(expect.stringContaining('Unknown or disabled whatsapp account'));
+    expect(mockError).toHaveBeenCalledWith(
+      expect.stringContaining('Unknown or disabled whatsapp account')
+    );
   });
 });
 

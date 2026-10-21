@@ -2,8 +2,12 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import Redis from 'ioredis';
 import {
-  activateCurrentChatTurn, revokeCurrentChatTurn, requireCurrentChatTurn,
-  createCurrentChatProposal, listCurrentChatProposals, consumeCurrentChatProposal,
+  activateCurrentChatTurn,
+  revokeCurrentChatTurn,
+  requireCurrentChatTurn,
+  createCurrentChatProposal,
+  listCurrentChatProposals,
+  consumeCurrentChatProposal,
 } from './current-chat-proposals';
 import type { CurrentChatCapability } from './current-chat-capability';
 
@@ -29,9 +33,11 @@ run('current-chat proposals with Redis', () => {
 
   beforeAll(async () => {
     const port = await unusedPort();
-    processHandle = spawn('redis-server', [
-      '--bind', '127.0.0.1', '--port', String(port), '--save', '', '--appendonly', 'no',
-    ], { stdio: 'ignore' });
+    processHandle = spawn(
+      'redis-server',
+      ['--bind', '127.0.0.1', '--port', String(port), '--save', '', '--appendonly', 'no'],
+      { stdio: 'ignore' }
+    );
     redis = new Redis(port, '127.0.0.1', { retryStrategy: () => 50, maxRetriesPerRequest: 10 });
     await redis.ping();
   });
@@ -43,7 +49,11 @@ run('current-chat proposals with Redis', () => {
 
   test('turn replacement revokes old capability and old finally cannot revoke the new turn', async () => {
     const scope: CurrentChatCapability = {
-      account, chat, turn, exp: Math.floor(Date.now() / 1000) + 120, ops: ['read', 'propose'],
+      account,
+      chat,
+      turn,
+      exp: Math.floor(Date.now() / 1000) + 120,
+      ops: ['read', 'propose'],
     };
     await activateCurrentChatTurn(redis, account, chat, turn, 300);
     await requireCurrentChatTurn(redis, scope);
@@ -57,23 +67,41 @@ run('current-chat proposals with Redis', () => {
 
   test('proposal is scoped, idempotent, one-time and expires from pending list', async () => {
     const scope: CurrentChatCapability = {
-      account, chat, turn, exp: Math.floor(Date.now() / 1000) + 120, ops: ['propose'],
+      account,
+      chat,
+      turn,
+      exp: Math.floor(Date.now() / 1000) + 120,
+      ops: ['propose'],
     };
     await activateCurrentChatTurn(redis, account, chat, turn, 300);
     const first = await createCurrentChatProposal(redis, scope, 'Exact text', 'request-1');
     const replay = await createCurrentChatProposal(redis, scope, 'Exact text', 'request-1');
     expect(replay).toMatchObject({ replayed: true, proposal: { id: first.proposal.id } });
-    await expect(createCurrentChatProposal(redis, scope, 'Changed', 'request-1')).rejects.toThrow('conflict');
+    await expect(createCurrentChatProposal(redis, scope, 'Changed', 'request-1')).rejects.toThrow(
+      'conflict'
+    );
     expect(await listCurrentChatProposals(redis, account, chat)).toContainEqual(first.proposal);
-    expect(await consumeCurrentChatProposal(redis, first.proposal.id, account,
-      'personal:999999999@s.whatsapp.net', turn)).toBeNull();
-    expect(await consumeCurrentChatProposal(redis, first.proposal.id, account, chat,
-      nextTurn)).toBeNull();
-    expect(await consumeCurrentChatProposal(redis, first.proposal.id, account, chat,
-      turn)).toEqual(first.proposal);
-    expect(await consumeCurrentChatProposal(redis, first.proposal.id, account, chat,
-      turn)).toBeNull();
-    await expect(createCurrentChatProposal(redis, scope, 'Exact text', 'request-1')).rejects.toThrow('gone');
+    expect(
+      await consumeCurrentChatProposal(
+        redis,
+        first.proposal.id,
+        account,
+        'personal:999999999@s.whatsapp.net',
+        turn
+      )
+    ).toBeNull();
+    expect(
+      await consumeCurrentChatProposal(redis, first.proposal.id, account, chat, nextTurn)
+    ).toBeNull();
+    expect(await consumeCurrentChatProposal(redis, first.proposal.id, account, chat, turn)).toEqual(
+      first.proposal
+    );
+    expect(
+      await consumeCurrentChatProposal(redis, first.proposal.id, account, chat, turn)
+    ).toBeNull();
+    await expect(
+      createCurrentChatProposal(redis, scope, 'Exact text', 'request-1')
+    ).rejects.toThrow('gone');
 
     const expiring = await createCurrentChatProposal(redis, scope, 'Soon gone', 'request-2');
     await redis.expire(`social:hermes:proposal:${expiring.proposal.id}`, 1);

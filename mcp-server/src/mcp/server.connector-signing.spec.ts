@@ -112,7 +112,10 @@ describe('the inline signers use the constructed secret, never an empty one from
           markAsSent: async () => undefined,
         },
       });
-      await server.handleSendApprovedReply({ sendToken: 'send-d1-1700000000', account: 'personal' });
+      await server.handleSendApprovedReply({
+        sendToken: 'send-d1-1700000000',
+        account: 'personal',
+      });
       expect(wa.seen.map(s => [s.method, s.url, s.signatureOk])).toEqual([
         ['POST', '/api/v1/messages/send', true],
       ]);

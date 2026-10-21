@@ -78,7 +78,9 @@ describe('loadMcpRuntimeConfig', () => {
   });
 
   it('does not suppress an unreadable TLS CA', () => {
-    expect(() => redisOptionsFor({ redisUrl: 'rediss://cache', redisTlsCa: '/definitely/missing/ca.pem' })).toThrow();
+    expect(() =>
+      redisOptionsFor({ redisUrl: 'rediss://cache', redisTlsCa: '/definitely/missing/ca.pem' })
+    ).toThrow();
   });
 
   it('fails closed when the database URL is missing', () => {

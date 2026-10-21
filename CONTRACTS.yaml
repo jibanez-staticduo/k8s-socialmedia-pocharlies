@@ -5,6 +5,17 @@ registry_files:
 contracts:
 - id: http.whatsapp-connector.messages-info.v1
   kind: http-route
+  value: /api/messages/info
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/messages/info de la app whatsapp.e-dani.com: detalle de un
+    mensaje (reacciones, estado, temporizador) por (account, chat,
+    messageId). Consumidor: el frontend de la app (panel de info del mensaje).
+- id: http.whatsapp-connector.messages-info.v2
+  kind: http-route
   value: /messages/info
   role: provider
   files:
@@ -78,6 +89,18 @@ contracts:
     existing source data or Hindsight documents. Database-wide policy must be
     consistent across workers on the same source database.'
 - id: http.whatsapp-connector.history-recover.v1
+  kind: http-route
+  value: /api/messages/recover
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    POST /api/messages/recover de la app whatsapp.e-dani.com: recuperacion de
+    un mensaje/historico por (account, chat, messageId), respaldada en la
+    lectura de la DB compartida y el conector. Marcado por el codigo del fork
+    con el id del contrato de la casa; consumidor: el frontend de la app.
+- id: http.whatsapp-connector.history-recover.v2
   kind: http-route
   value: /history/recover
   role: provider
@@ -162,12 +185,13 @@ contracts:
   files:
   - connectors/whatsapp-web/src/api/controller.ts
   status: deprecated
-  replaced_by: http.whatsapp-connector.auth-qr.v2
+  replaced_by: http.whatsapp-connector.auth-qr.v3
   remove_after: '2026-12-29'
-  note: 'GET /api/v1/auth/qr of the house WhatsApp connectors (personal, professional, leila): unauthenticated,
+  note: 'Historical GET /api/v1/auth/qr contract of the house WhatsApp connectors (personal, professional, leila):
     200 {qrCode, expiresAt} (qrCode a PNG data URL, expiresAt ISO) or 404 {"error":"No QR code available"}.
-    Registered by SC-1197 (design D6). This historical unauthenticated contract was replaced when connector
-    access protection was added. Per-sub QR lives only on http.whatsapp-pairing.internal-sessions.v1.'
+    Registered by SC-1197 (design D6). Connector access protection now requires valid HMAC credentials or UI Basic
+    authentication; the protected replacement is http.whatsapp-connector.auth-qr.v3. Per-sub QR lives only on
+    http.whatsapp-pairing.internal-sessions.v1.'
 - id: http.whatsapp-connector.messages-forward.v1
   kind: http-route
   value: /messages/forward
@@ -1860,6 +1884,24 @@ contracts:
     y otras contestan; la respuesta completa no cambia de forma.'
 - id: http.whatsapp-connector.auth-qr.v2
   kind: http-route
+  value: /api/v2/auth/qr
+  anchor: "router.get('/auth/qr'"
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/auth-qr.ts
+  status: active
+  note: >-
+    GET /api/v2/auth/qr of the house WhatsApp connectors: the payload of
+    http.whatsapp-connector.auth-qr (200 {qrCode, expiresAt} or 404
+    {"error":"No QR code available"}) behind the connector HMAC (SKIRM-103):
+    x-connector-timestamp + x-connector-signature over "<ts>:{}", a GET having no
+    body; without them 401. A new path rather than the v1 one with a door, because
+    closing a route in place is the breaking change this registry forbids. Born
+    without consumers; it exists so v1's replaced_by resolves and so a client has
+    somewhere to move before v1 is removed. Path, signature scheme and payload are
+    contract: changing any is breaking — a new `.v3` entry beside this one.
+- id: http.whatsapp-connector.auth-qr.v3
+  kind: http-route
   value: /auth/qr
   anchor: auth/qr
   role: provider
@@ -1972,3 +2014,382 @@ contracts:
     only until their conversation is migrated. Bearer credentials
     remain server-side and redirect forwarding is refused. Source versions, accepted versus
     completed operations and tombstones live in the separate additive Hindsight ledger.'
+- id: http.whatsapp-connector.public-chats.v1
+  kind: http-route
+  value: /api/public/chats
+  anchor: "router.get('/chats'"
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/public-routes.ts
+  status: active
+  note: >-
+    GET /api/public/chats of the house WhatsApp connectors (note: /api/public,
+    not /api/v1): the chats the account sees, consumed by the MCP server's
+    providerGet (mcp-server/src/mcp/server.ts listConversationsFor and
+    canonicalGetConversation: social_list_conversations, social_get_conversation
+    and the target resolver; mcp-sse runs the same code).
+    HMAC-signed since SKIRM-103 (x-connector-timestamp + x-connector-signature
+    over "<ts>:{}", the same scheme as /api/v1; a GET has no body): without them
+    401, with them 200 {chats [{id, name, isGroup, timestamp}]} or 500 {error}.
+    The path, the signature scheme and the 200 shape are contract: changing any
+    is breaking — a new `.v2` entry beside this one. Each rejection is logged
+    without headers, body or signature, one line per reason every 10 s.
+- id: http.whatsapp-connector.public-history.v1
+  kind: http-route
+  value: /api/public/history/:chatId
+  anchor: "router.get('/history/:chatId'"
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/public-routes.ts
+  status: active
+  note: >-
+    GET /api/public/history/:chatId?limit= of the house WhatsApp connectors:
+    the stored history of one chat (limit default 500), consumed by the MCP
+    server's providerGet (mcp-server/src/mcp/server.ts canonicalListMessages:
+    social_list_messages with readSource provider). Signed like
+    http.whatsapp-connector.public-chats.v1 (over
+    "<ts>:{}", the limit travels in the query and is not signed): without it
+    401, with it 200 {messages} or 500 {error}. dgx-infra
+    services/dashboard/api/routes_history.py also names it, with
+    WA_URL=http://localhost:3001, which is not the connector from the dashboard
+    pod (sre confirmed the call is dead, SKIRM-99); it carries no signature and
+    is not migrated. The path, the signature scheme and the 200 shape are
+    contract: changing any is breaking — a new `.v2` entry beside this one.
+- id: http.whatsapp-connector.public-backfill-media.v1
+  kind: http-route
+  value: /api/public/backfill-media
+  anchor: "router.post('/backfill-media'"
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/public-routes.ts
+  status: active
+  note: >-
+    POST /api/public/backfill-media?days=&limit= of the house WhatsApp
+    connectors (defaults 7 and 100): a manual best-effort media backfill that is
+    today a no-op in the Baileys client, 200 {ok, unavailable, total}, 500
+    {error}. No consumer in code or in the cluster (sre, SKIRM-99): it was run by
+    hand with curl. Signed like http.whatsapp-connector.public-chats.v1 over
+    "<ts>:{}" with an EMPTY body, the parameters in the query (the how-to is the
+    comment above createPublicRouter); without the signature 401. The path, the
+    signature scheme and the 200 shape are contract: changing any is breaking —
+    a new `.v2` entry beside this one.
+- id: http.whatsapp-connector.history-sync.v1
+  kind: http-route
+  value: /history/sync
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    POST /api/v1/history/sync?limit= of the house WhatsApp connectors (limit
+    default 500): starts a background download of the chat history
+    (getAllChatsWithHistory) and answers at once. Signed like the rest of
+    /api/v1 (x-connector-timestamp + x-connector-signature over "<ts>:{}",
+    no body; the limit travels in the query and is not signed): without them
+    401, with them 200 {status: started, limit, message} or 503 {error} when
+    WhatsApp is not connected. No registered consumer. The path, the
+    signature scheme and the 200 shape are contract: changing any is
+    breaking — a new `.v2` entry beside this one.
+- id: http.whatsapp-connector.history-chat.v1
+  kind: http-route
+  value: /history/:chatId
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    GET /api/v1/history/:chatId?limit= of the house WhatsApp connectors
+    (limit default 100): the stored history of one chat (fetchChatHistory).
+    Signed like the rest of /api/v1 (x-connector-timestamp +
+    x-connector-signature over "<ts>:{}", the limit travels in the query and
+    is not signed): without them 401, with them 200 {chatId, count,
+    messages} or 500 {error}. No registered consumer. The path, the
+    signature scheme and the 200 shape are contract: changing any is
+    breaking — a new `.v2` entry beside this one.
+- id: http.whatsapp-connector.chats-modify-parameterized.v1
+  kind: http-route
+  value: /chats/:chatId/modify
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    Alias de la app whatsapp.e-dani.com (SC-2760): la app pone el id de chat
+    en la ruta y firma el body que manda (action, value para mute: value > 0
+    se traduce a durationMs y value 0 = silenciar siempre). El alias hace
+    merge del param al body DESPUÉS del HMAC y reutiliza el handler de
+    /chats/modify (mismo gate de envío). Se retira cuando el conector lleve
+    las rutas de Jordi en tándem con la app.
+- id: http.whatsapp-connector.contacts-block-parameterized.v1
+  kind: http-route
+  value: /chats/:chatId/block
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    Alias de la app whatsapp.e-dani.com (SC-2760): POST {blocked: boolean};
+    el alias lo traduce a {conversationId, action, confirm: true} y llama al
+    handler de /contacts/block. El confirm se da por cumplido porque el
+    consumidor es interno (HMAC) y la app ya confirma con el usuario.
+- id: http.whatsapp-connector.chats-disappearing-parameterized.v1
+  kind: http-route
+  value: /chats/:chatId/disappearing
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    Alias de la app whatsapp.e-dani.com (SC-2760): id en la ruta, body
+    {expiration}; merge tras el HMAC, mismo handler que /chats/disappearing.
+- id: http.whatsapp-connector.groups-update-parameterized.v1
+  kind: http-route
+  value: /groups/:chatId/update
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    Alias de la app whatsapp.e-dani.com (SC-2760): id de grupo en la ruta;
+    merge a groupId tras el HMAC, mismo handler que /groups/update.
+- id: http.whatsapp-connector.messages-delete-parameterized.v1
+  kind: http-route
+  value: /messages/:chatId/:msgId/for-me
+  role: provider
+  files:
+    - connectors/whatsapp-web/src/api/controller.ts
+  status: active
+  note: >-
+    Alias de la app whatsapp.e-dani.com (SC-2760): DELETE con ids en la ruta
+    y body vacío (firma "{}"); el alias rellena chatId/messageId/forMe=true
+    tras el HMAC y llama al handler de /messages/delete. El DELETE plano
+    /messages/:chatId/:msgId (para todos) ya existía.
+- id: http.telegram-connector.public-dialogs.v1
+  kind: http-route
+  value: /api/public/dialogs
+  anchor: "router.get('/dialogs'"
+  role: provider
+  files:
+    - connectors/telegram/src/api/public-routes.ts
+  status: active
+  note: >-
+    GET /api/public/dialogs of the house Telegram connectors (note:
+    /api/public, not /api/v1; the Telegram twin of
+    http.whatsapp-connector.public-chats.v1): the dialogs the account sees,
+    consumed by the MCP server's providerGet (mcp-server/src/mcp/server.ts
+    listConversationsFor and canonicalGetConversation). HMAC-signed
+    (x-connector-timestamp + x-connector-signature over "<ts>:{}", the same
+    scheme as /api/v1; a GET has no body): without them 401, with them 200
+    {dialogs [{id, name, type, unreadCount}]}, 503 {error} while Telegram is
+    not connected, 500 {error}. The path, the signature scheme and the 200
+    shape are contract: changing any is breaking — a new `.v2` entry beside
+    this one. Each rejection is logged without headers, body or signature,
+    one line per reason every 10 s.
+- id: http.telegram-connector.public-messages.v1
+  kind: http-route
+  value: /api/public/messages/:chatId
+  anchor: "router.get('/messages/:chatId'"
+  role: provider
+  files:
+    - connectors/telegram/src/api/public-routes.ts
+  status: active
+  note: >-
+    GET /api/public/messages/:chatId?limit= of the house Telegram connectors
+    (limit default 50): the latest messages of one chat, consumed by the MCP
+    server's providerGet (mcp-server/src/mcp/server.ts canonicalListMessages:
+    social_list_messages with readSource provider). Signed like
+    http.telegram-connector.public-dialogs.v1 (over "<ts>:{}", the limit
+    travels in the query and is not signed): without it 401, with it 200
+    {messages}, 503 {error} while Telegram is not connected, 500 {error}.
+    dgx-infra services/dashboard/api/routes_history.py names it too and sends
+    no signature. The path, the signature scheme and the 200 shape are
+    contract: changing any is breaking — a new `.v2` entry beside this one.
+- id: http.telegram-connector.public-send.v1
+  kind: http-route
+  value: /api/public/send/:chatId
+  anchor: "router.post('/send/:chatId'"
+  role: provider
+  files:
+    - connectors/telegram/src/api/public-routes.ts
+  status: active
+  note: >-
+    POST /api/public/send/:chatId {text, topicId?} of the house Telegram
+    connectors: sends a text AS the account's user (not as a bot), consumed
+    by telegram-sync (sync/connector_client.py ConnectorClient.send) and by
+    dgx-infra services/monitoring/scripts/notify-synapse-monitor.sh. Signed
+    like /api/v1: x-connector-timestamp + x-connector-signature over
+    "<ts>:<body>", where <body> is JSON.stringify of the body as the connector
+    parsed it, so a client signs the compact JSON it sends (telegram-sync
+    does). Without a valid signature 401, ahead of the sending gate: 403
+    disabled_sending (ENABLE_SENDING set to anything but "true", or
+    EMERGENCY_DISABLE_SENDING=true) is only
+    seen by a signed caller. Signed: 200 {success: true}, 400 {error} (no
+    text, topicId not a positive integer), 503 {error} while Telegram is not
+    connected, 500 {error}. The path, the body fields, the signature scheme
+    and the 200 shape are contract: changing any is breaking — a new `.v2`
+    entry beside this one.
+- id: http.telegram-connector.messages-single.v1
+  kind: http-route
+  value: /messages/single/:chatId/:msgId
+  role: provider
+  files:
+    - connectors/telegram/src/api/controller.ts
+  status: active
+  note: >-
+    HMAC-signed route of the house Telegram connectors (telegram-connector,
+    telegram-connector-professional). GET
+    /api/v1/messages/single/:chatId/:msgId (read, ungated), consumed by
+    telegram-sync (media recovery, SKIRM-101: it fetches the exact message
+    whose download failed). 200 {message: {...}} in the shape of
+    http.telegram-connector.messages-list.v1; 400 invalid message id; 404 the
+    message no longer exists; 429 Telegram flood wait (Retry-After header, body
+    {error, retryAfter}); 502 upstream failure; 503 not connected; 504 deadline
+    (TELEGRAM_MEDIA_DOWNLOAD_TIMEOUT_SECONDS, 120 s). The path, the body fields
+    and the 200 shape are contract: changing any is breaking — a new `.v2`
+    entry beside this one.
+- id: http.instagram-connector.api-v1.v1
+  kind: http-route
+  value: /api/v1
+  role: provider
+  files:
+    - connectors/instagram/src/main.ts
+    - connectors/instagram/src/api-gate.ts
+    - mcp-server/src/mcp/server.ts
+  status: active
+  note: >-
+    /api/v1 of the instagram-connector (:3003): GET
+    /accounts, GET /oauth/instagram/authorize-url and every /:account/* route
+    (profile, media, comments, conversations, send DM, publish, stories,
+    hide and delete comment, insights, hashtags, mentions). SKIRM-112:
+    everything under /api/v1, a path no route serves included, answers only
+    to a signed caller. Headers x-connector-timestamp + x-connector-signature
+    = sha256=HMAC(CONNECTOR_SHARED_SECRET, "<ts>:<JSON body>"), 5-minute
+    window, the scheme of the WhatsApp connectors; a request with no body
+    (GET, DELETE) signs "{}". 401 {error} without the headers, with another
+    key, another body or a timestamp outside the window; 503 {error} on every
+    request when no usable key is set (missing, blank, or the repository
+    default under CONNECTOR_SECRET_STRICT=true), while /health and /webhook
+    keep answering. Each rejection is logged without headers, body, signature
+    or query (one line per reason every 10 s). x-user-sub still selects the
+    per-user credential row: the signature identifies the calling service and
+    does not replace it. Outside the gate on purpose: GET /health
+    (http.instagram-connector.health.v1), /webhook
+    (http.instagram-connector.webhook.v1) and /oauth/instagram/callback.
+    Consumers: mcp-server (instagramCall, connectorCall, jobs/instagram-backfill.ts);
+    the Synapse messaging adapter (services/synapse-adapter-messaging,
+    channels/instagram.py) for POST /:account/messages/send and
+    /:account/comments/:id/reply.
+    The prefix, the signature scheme and the 401/503 answers are contract:
+    changing any is breaking — a new `.v2` entry beside this one.
+# SC-2760: superficies marcadas con `# CONTRACT:` en el codigo verbatim del
+# fork de Jordi (apps/whatsapp). Se registran tal cual: el unico consumidor
+# de estas rutas es el propio frontend de la app; los ids
+# http.whatsapp-connector.* nombran el contrato de la casa que la app
+# re-sirve o consume, no una ruta nueva del conector.
+- id: http.whatsapp-app.auth-callback.v1
+  kind: http-route
+  value: /auth/callback
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /auth/callback de la app whatsapp.e-dani.com: cierre del flujo OIDC
+    (codigo + state -> sesion). El 403 (sub fuera de OIDC_ALLOWED_SUBJECTS) se
+    contesta en HTML con el enlace de logout del issuer, no en JSON: quien
+    navega necesita cerrar la sesion SSO equivocada (Dani, 19-10).
+  exception:
+    reason: >-
+      Log de acceso y eventos de auth (QA #77): se anade console.log dentro del
+      handler (log de request con res.on('finish') y [auth] login/logout). No
+      altera la superficie: /auth/callback sigue siendo GET con el mismo
+      contrato de respuesta.
+    consumers_checked: >-
+      superficie anonima barrida (QA #66: todo /api/* -> 401, resto -> 302); el
+      unico cambio observable es que ahora hay lineas de peticion en el log.
+      Ningun consumidor cambia de contrato.
+    approved_by: dani 2026-10-21
+- id: http.whatsapp-app.messages-list.v1
+  kind: http-route
+  value: /api/messages
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/messages de la app whatsapp.e-dani.com: pagina de mensajes de
+    (account, chat) con adjuntos, thumbnails y previews de enlaces. Las
+    consultas auxiliares comparan messages.id: con ids numéricos (bigint, la
+    casa, linaje NAS) por id para usar el índice — el cast por texto sobre
+    80k filas de un grupo pasaba de los 10 s del statement_timeout en frío
+    (57014, medido 20-10) —; con ids uuid (el desplegador original) por
+    texto (42883 si se fija un tipo, medido 20-10).
+- id: http.whatsapp-app.messages-delete.v1
+  kind: http-route
+  value: /api/messages/delete
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    POST /api/messages/delete de la app whatsapp.e-dani.com (scope me|
+    everyone). El espejo local escribe la revocacion en metadata
+    (deleted_for_me / deleted_at como texto): la casa no tiene columna
+    deleted_at (42703 medido 20-10); el conector es la fuente de verdad.
+- id: http.whatsapp-app.logout.v1
+  kind: http-route
+  value: /auth/logout
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    POST /auth/logout de la app whatsapp.e-dani.com (CSRF por Origin).
+    Responde 200 { logoutUrl }: el front redirige al logout del IdP —
+    sin eso el SSO de Keycloak retoma la sesión sola y el usuario sigue
+    dentro tras «Cerrar sesión» (QA #12). null en modo basic.
+- id: http.whatsapp-app.media.v1
+  kind: http-route
+  value: /api/media
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/media/<attachment id> (proxy de adjuntos con Range) de la app
+    whatsapp.e-dani.com. El id es bigint (o uuid legacy): nunca validar solo
+    por patrón uuid (QA #6). La referencia sale solo de attachments.file_url
+    — storage_key no existe en la casa (42703, QA #12) — y mediaRequest
+    entiende refs s3:// contra S3_ENDPOINT/S3_BUCKET.
+- id: http.whatsapp-app.search.v1
+  kind: http-route
+  value: /api/search
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/search (alias /api/messages/search,
+    /api/chats/<jid>/search) de la app whatsapp.e-dani.com. Filtra
+    m.content con ILIKE y necesita el índice trigram
+    idx_messages_content_trgm (migración 002); sin él es seq scan y
+    revienta el statement_timeout (57014). chatName sale legible
+    (readableChatName), nunca el jid crudo (QA #10).
+- id: http.whatsapp-app.chat-details.v1
+  kind: http-route
+  value: /api/chat-details
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/chat-details (alias contact-details, group-details,
+    /api/chats/<jid>/group|contact, /api/groups/<jid>/info|participants) de
+    la app whatsapp.e-dani.com. Las consultas de participants usan solo
+    columnas de la casa (id, name, push_name, phone, profile_pic_url):
+    wa_user_id es del esquema del desplegador original y no existe aqui
+    (42703 en todos los chats, medido 20-10). El listado de chats expone
+    avatarUrl solo con foto guardada (null = iniciales): forzar la URL del
+    proxy en cada fila disparaba ~1 peticion por chat al abrir (985 medidas,
+    931x404 + 54x502 del conector); la busqueda al proveedor queda para la
+    cabecera del chat abierto.

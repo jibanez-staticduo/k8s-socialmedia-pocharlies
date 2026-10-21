@@ -112,7 +112,14 @@ describe('social_search_messages — mediaType', () => {
     const { sql, params } = lastQuery();
     expect(sql).toContain('upper(m.message_type) = ANY($5::text[])');
     expect(sql).toContain("upper(split_part(m.content, ' |', 1)) = ANY($5::text[])");
-    expect(params).toEqual(['run', ['instagram:barbelpapis'], ['personal'], 'instagram', ['VIDEO', 'VIDEO_NOTE'], 20]);
+    expect(params).toEqual([
+      'run',
+      ['instagram:barbelpapis'],
+      ['personal'],
+      'instagram',
+      ['VIDEO', 'VIDEO_NOTE'],
+      20,
+    ]);
   });
 
   it('filters WhatsApp images keeping the namespaced chat id', async () => {
@@ -163,7 +170,9 @@ describe('social_search_messages — mediaType', () => {
     expect(lastQuery().sql).not.toContain('message_type) = ANY');
     expect(lastQuery().sql).not.toMatch(/AND m.platform = \$/);
     const allowedScopes = lastQuery().params[1];
-    expect(allowedScopes).toEqual(expect.arrayContaining(['whatsapp:personal', 'instagram:skirmshop']));
+    expect(allowedScopes).toEqual(
+      expect.arrayContaining(['whatsapp:personal', 'instagram:skirmshop'])
+    );
     expect(lastQuery().params).toEqual(['hola', allowedScopes, 20]);
     await run({ query: 'hola', mediaType: 'sticker' });
     expect(lastQuery().params).toEqual(['hola', allowedScopes, ['STICKER'], 20]);

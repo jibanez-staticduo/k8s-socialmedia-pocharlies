@@ -1442,6 +1442,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         return json(401, { error: 'Authentication required', ...(auth.oidcEnabled ? { code: 'AUTH_REQUIRED', loginUrl: '/auth/login' } : {}) });
       }
       if (req.method === 'POST') checkOrigin(req, env);
+      // CONTRACT: http.whatsapp-app.logout.v1
       if (path === '/auth/logout' && req.method === 'POST') {
         const result = await auth.logout(req); res.setHeader('set-cookie', result.setCookie ? [result.setCookie] : []);
         // logoutUrl: sin redirigir al IdP el SSO retoma la sesión sola (QA #12).
@@ -1676,6 +1677,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         res.end(bytes);
         return;
       }
+      // CONTRACT: http.whatsapp-app.media.v1
       if (req.method === 'GET' && path.startsWith('/api/media/')) {
         const a = accountFor(url.searchParams.get('account')); const chat = required(url.searchParams.get('chat'), 'chat');
         const readIds = await conversationReadIds(a, await conversationFor(a, chat));
@@ -1706,6 +1708,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         else res.end();
         return;
       }
+      // CONTRACT: http.whatsapp-app.chat-details.v1
       if (req.method === 'GET' && (path === '/api/chat-details' || path === '/api/contact-details' || path === '/api/group-details' || /^\/api\/chats\/[^/]+\/(?:group|contact)$/.test(path) || /^\/api\/groups\/[^/]+\/(?:info|participants)$/.test(path))) {
         const a = accountParam(url.searchParams.get('account'));
         const pathChat = path.match(/^\/api\/(?:chats|groups)\/([^/]+)\/(?:group|contact|info|participants)$/)?.[1];
@@ -1861,6 +1864,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         [a.accountId, await conversationReadIds(a, conversation), range.start, range.end]);
         return json(200, {account: a.accountId, chat: conversation.id, messageId: rows[0]?.wa_message_id || rows[0]?.id || null});
       }
+      // CONTRACT: http.whatsapp-app.search.v1
       if (req.method === 'GET' && (path === '/api/search' || path === '/api/messages/search' || /^\/api\/chats\/[^/]+\/search$/.test(path))) {
         const a = accountParam(url.searchParams.get('account'));
         const pathChat = path.match(/^\/api\/chats\/([^/]+)\/search$/)?.[1];

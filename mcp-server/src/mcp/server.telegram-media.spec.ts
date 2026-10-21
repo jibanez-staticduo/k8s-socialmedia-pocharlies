@@ -38,13 +38,20 @@ function resolverWith(opts: {
 }
 
 describe('resolveTelegramMediaAccount', () => {
-  it.each(['personal', 'professional'])('keeps requested %s despite sibling database evidence', async requested => {
-    const { resolve, query } = resolverWith({ messageRows: [{ conversation_id: 'professional:tg_42' }, { conversation_id: 'tg_42' }] });
-    const result = await resolve('42', 'message', requested);
-    expect(result.account).toBe(requested);
-    expect(result.candidates).toEqual([requested === 'personal' ? 'tg_42' : 'professional:tg_42']);
-    expect(query).not.toHaveBeenCalled();
-  });
+  it.each(['personal', 'professional'])(
+    'keeps requested %s despite sibling database evidence',
+    async requested => {
+      const { resolve, query } = resolverWith({
+        messageRows: [{ conversation_id: 'professional:tg_42' }, { conversation_id: 'tg_42' }],
+      });
+      const result = await resolve('42', 'message', requested);
+      expect(result.account).toBe(requested);
+      expect(result.candidates).toEqual([
+        requested === 'personal' ? 'tg_42' : 'professional:tg_42',
+      ]);
+      expect(query).not.toHaveBeenCalled();
+    }
+  );
   it('rejects unknown account without querying another account', async () => {
     const { resolve, query } = resolverWith({});
     await expect(resolve('42', 'message', 'unknown')).rejects.toThrow();

@@ -425,11 +425,13 @@ describe('Socialmedia canonical v2 acceptance gaps', () => {
           target: 'professional:123456789-987654321@g.us',
         });
         expect(valid.structuredContent).toMatchObject({ ok: true });
-        const handler = toolName === 'social_create_draft'
-          ? server.handleDraftReply : server.handleListDrafts;
-        expect(handler).toHaveBeenCalledWith(expect.objectContaining({
-          chatId: 'professional:123456789-987654321@g.us',
-        }));
+        const handler =
+          toolName === 'social_create_draft' ? server.handleDraftReply : server.handleListDrafts;
+        expect(handler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            chatId: 'professional:123456789-987654321@g.us',
+          })
+        );
       }
     );
 
@@ -557,15 +559,12 @@ describe('Socialmedia canonical v2 acceptance gaps', () => {
           );
         });
 
-        const result = await server.executeCanonicalTool(
-          definition('social_send_message'),
-          {
-            channel: 'whatsapp',
-            accountId: 'personal',
-            target: '34600000000@s.whatsapp.net',
-            attachments: [{ url: gifUrl, caption: 'animation' }],
-          }
-        );
+        const result = await server.executeCanonicalTool(definition('social_send_message'), {
+          channel: 'whatsapp',
+          accountId: 'personal',
+          target: '34600000000@s.whatsapp.net',
+          attachments: [{ url: gifUrl, caption: 'animation' }],
+        });
 
         expect(server.connectorCall).toHaveBeenCalledWith(
           'http://wa-personal',
