@@ -2,6 +2,7 @@ import { PoolClient } from 'pg';
 import { SocialAccount } from '../domain/account-registry';
 import {
   advanceSyncEntry,
+  advanceAndCount,
   saveSyncEntry,
   SyncClient,
   SyncEntry,
@@ -126,27 +127,12 @@ export async function drainLegacyPending(
       status: row.status,
       attempts: row.attempts,
     };
-    let persistenceFailed = false;
-    try {
-      const status = await advanceSyncEntry(
-        entry,
-        client,
-        async (e, delay) => {
-          try {
-            await saveSyncEntry(db, e, delay);
-          } catch (error) {
-            persistenceFailed = true;
-            throw error;
-          }
-        },
-        options.retryMs
-      );
-      if (status === 'completed') result.completed++;
-      else result.accepted++;
-    } catch (error) {
-      if (persistenceFailed) throw error;
-      result.failed++;
-    }
+    await advanceAndCount(
+      entry,
+      (value, save) => advanceSyncEntry(value, client, save, options.retryMs),
+      (value, delay) => saveSyncEntry(db, value, delay),
+      result
+    );
   }
   const {
     rows: [state],
@@ -355,27 +341,12 @@ export async function runConversationSyncPass(
       entry = planConversationUpdate(entry, snapshot, c.revision, hash);
       await saveConversationEntry(db, entry, 0);
     }
-    let persistenceFailed = false;
-    try {
-      const status = await advanceConversationEntry(
-        entry,
-        client,
-        async (e, delay) => {
-          try {
-            await saveConversationEntry(db, e, delay);
-          } catch (error) {
-            persistenceFailed = true;
-            throw error;
-          }
-        },
-        options.retryMs
-      );
-      if (status === 'completed') result.completed++;
-      else result.accepted++;
-    } catch (error) {
-      if (persistenceFailed) throw error;
-      result.failed++;
-    }
+    await advanceAndCount(
+      entry,
+      (value, save) => advanceConversationEntry(value, client, save, options.retryMs),
+      (value, delay) => saveConversationEntry(db, value, delay),
+      result
+    );
   }
   return result;
 }

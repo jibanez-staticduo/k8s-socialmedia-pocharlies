@@ -326,27 +326,20 @@ it('no resucita legacy al vaciar una conversación confirmada por filtros de sel
   expect(sql).toContain('END) = d.topic_id');
 });
 
-it('conserva legacy para chats que nunca tuvieron conversación confirmada', async () => {
+it.each([
+  ['conserva legacy para chats que nunca tuvieron conversación confirmada', null],
+  [
+    'no suprime legacy por UUID de un snapshot antiguo si la fila actual pertenece a otro topic',
+    conversationMapping({ legacy_message_ids: [] }),
+  ],
+])('%s', async (_name, mapping) => {
   const tags = [socialmediaScopeTag('whatsapp', 'personal', 'personal')];
   const query = jest.fn(async (sql: string) => ({
-    rows: sql.includes('FROM hindsight_conversation_documents') ? [] : [row()],
-  }));
-  const svc = new SearchService({ query } as any, null, jest.fn(), {
-    destination,
-    recall: jest.fn(async () => [hit(tags)]),
-  } as any);
-  expect(
-    (await svc.semanticSearch('query', { platform: 'whatsapp', account: 'personal' })).results.map(
-      r => r.messageId
-    )
-  ).toEqual([ID]);
-});
-
-it('no suprime legacy por UUID de un snapshot antiguo si la fila actual pertenece a otro topic', async () => {
-  const mapping = conversationMapping({ legacy_message_ids: [] });
-  const tags = [socialmediaScopeTag('whatsapp', 'personal', 'personal')];
-  const query = jest.fn(async (sql: string) => ({
-    rows: sql.includes('FROM hindsight_conversation_documents') ? [mapping] : [row()],
+    rows: sql.includes('FROM hindsight_conversation_documents')
+      ? mapping
+        ? [mapping]
+        : []
+      : [row()],
   }));
   const svc = new SearchService({ query } as any, null, jest.fn(), {
     destination,

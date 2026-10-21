@@ -39,7 +39,9 @@ function interactiveText(message: proto.Message.IInteractiveMessage, depth: numb
     message.header?.subtitle,
     message.body?.text,
     message.footer?.text,
-    ...(message.nativeFlowMessage?.buttons || []).map(button => nativeLabels(button.buttonParamsJson)),
+    ...(message.nativeFlowMessage?.buttons || []).map(button =>
+      nativeLabels(button.buttonParamsJson)
+    ),
     ...(message.carouselMessage?.cards || []).map(card => interactiveText(card, depth + 1)),
   ]);
 }
@@ -53,17 +55,28 @@ function templateText(message: proto.Message.ITemplateMessage, depth: number): s
     hydrated?.hydratedContentText,
     hydrated?.hydratedFooterText,
     ...(hydrated?.hydratedButtons || []).map(button =>
-      lines([button.quickReplyButton?.displayText, button.urlButton?.displayText, button.callButton?.displayText])
+      lines([
+        button.quickReplyButton?.displayText,
+        button.urlButton?.displayText,
+        button.callButton?.displayText,
+      ])
     ),
     // HSM namespace/elementName/params are template identifiers, not rendered text.
     ...[fourRow?.content, fourRow?.footer, fourRow?.highlyStructuredMessage].map(hsm =>
       hsm?.hydratedHsm ? templateText(hsm.hydratedHsm, depth + 1) : null
     ),
     ...(fourRow?.buttons || []).map(button =>
-      lines([button.quickReplyButton?.displayText, button.urlButton?.displayText, button.callButton?.displayText]
-        .map(hsm => hsm?.hydratedHsm ? templateText(hsm.hydratedHsm, depth + 1) : null))
+      lines(
+        [
+          button.quickReplyButton?.displayText,
+          button.urlButton?.displayText,
+          button.callButton?.displayText,
+        ].map(hsm => (hsm?.hydratedHsm ? templateText(hsm.hydratedHsm, depth + 1) : null))
+      )
     ),
-    message.interactiveMessageTemplate ? interactiveText(message.interactiveMessageTemplate, depth + 1) : null,
+    message.interactiveMessageTemplate
+      ? interactiveText(message.interactiveMessageTemplate, depth + 1)
+      : null,
   ]);
 }
 
@@ -77,34 +90,60 @@ export function businessMessageText(
     return { type: 'TEMPLATEMESSAGE', text: templateText(content.templateMessage, 0) };
   if (content.buttonsMessage) {
     const buttons = content.buttonsMessage;
-    return { type: 'BUTTONSMESSAGE', text: lines([
-      buttons.text, buttons.contentText, buttons.footerText,
-      ...(buttons.buttons || []).map(button => lines([
-        button.buttonText?.displayText, nativeLabels(button.nativeFlowInfo?.paramsJson),
-      ])),
-    ]) };
+    return {
+      type: 'BUTTONSMESSAGE',
+      text: lines([
+        buttons.text,
+        buttons.contentText,
+        buttons.footerText,
+        ...(buttons.buttons || []).map(button =>
+          lines([button.buttonText?.displayText, nativeLabels(button.nativeFlowInfo?.paramsJson)])
+        ),
+      ]),
+    };
   }
   if (content.templateButtonReplyMessage)
-    return { type: 'TEMPLATEBUTTONREPLYMESSAGE', text: lines([content.templateButtonReplyMessage.selectedDisplayText]) };
+    return {
+      type: 'TEMPLATEBUTTONREPLYMESSAGE',
+      text: lines([content.templateButtonReplyMessage.selectedDisplayText]),
+    };
   if (content.buttonsResponseMessage)
-    return { type: 'BUTTONSRESPONSEMESSAGE', text: lines([content.buttonsResponseMessage.selectedDisplayText]) };
+    return {
+      type: 'BUTTONSRESPONSEMESSAGE',
+      text: lines([content.buttonsResponseMessage.selectedDisplayText]),
+    };
   if (content.listMessage) {
     const list = content.listMessage;
-    return { type: 'LISTMESSAGE', text: lines([
-      list.title, list.description, list.footerText, list.buttonText,
-      ...(list.sections || []).map(section => lines([
-        section.title, ...(section.rows || []).map(row => lines([row.title, row.description])),
-      ])),
-    ]) };
+    return {
+      type: 'LISTMESSAGE',
+      text: lines([
+        list.title,
+        list.description,
+        list.footerText,
+        list.buttonText,
+        ...(list.sections || []).map(section =>
+          lines([
+            section.title,
+            ...(section.rows || []).map(row => lines([row.title, row.description])),
+          ])
+        ),
+      ]),
+    };
   }
   if (content.listResponseMessage)
-    return { type: 'LISTRESPONSEMESSAGE', text: lines([content.listResponseMessage.title, content.listResponseMessage.description]) };
+    return {
+      type: 'LISTRESPONSEMESSAGE',
+      text: lines([content.listResponseMessage.title, content.listResponseMessage.description]),
+    };
   if (content.interactiveMessage)
     return { type: 'INTERACTIVEMESSAGE', text: interactiveText(content.interactiveMessage, 0) };
   if (content.interactiveResponseMessage)
-    return { type: 'INTERACTIVERESPONSEMESSAGE', text: lines([
-      content.interactiveResponseMessage.body?.text,
-      nativeLabels(content.interactiveResponseMessage.nativeFlowResponseMessage?.paramsJson),
-    ]) };
+    return {
+      type: 'INTERACTIVERESPONSEMESSAGE',
+      text: lines([
+        content.interactiveResponseMessage.body?.text,
+        nativeLabels(content.interactiveResponseMessage.nativeFlowResponseMessage?.paramsJson),
+      ]),
+    };
   return null;
 }

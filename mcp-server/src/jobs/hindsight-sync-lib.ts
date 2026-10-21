@@ -419,6 +419,31 @@ export interface SyncPassResult {
   failed: number;
 }
 
+/** Count provider outcomes while keeping persistence errors fatal for the pass. */
+export async function advanceAndCount<Entry, Status extends string>(
+  entry: Entry,
+  advance: (entry: Entry, save: (value: Entry, delay: number) => Promise<void>) => Promise<Status>,
+  save: (value: Entry, delay: number) => Promise<void>,
+  result: SyncPassResult
+): Promise<void> {
+  let persistenceFailed = false;
+  try {
+    const status = await advance(entry, async (value, delay) => {
+      try {
+        await save(value, delay);
+      } catch (error) {
+        persistenceFailed = true;
+        throw error;
+      }
+    });
+    if (status === 'completed') result.completed++;
+    else result.accepted++;
+  } catch (error) {
+    if (persistenceFailed) throw error;
+    result.failed++;
+  }
+}
+
 export async function runSyncPass(
   db: PoolClient,
   client: SyncClient,
@@ -469,27 +494,12 @@ export async function runSyncPass(
       continue;
     }
     if (!l || l.status === 'completed') await saveSyncEntry(db, entry, 0);
-    let persistenceFailed = false;
-    try {
-      const status = await advanceSyncEntry(
-        entry,
-        client,
-        async (e, delay) => {
-          try {
-            await saveSyncEntry(db, e, delay);
-          } catch (error) {
-            persistenceFailed = true;
-            throw error;
-          }
-        },
-        options.retryMs
-      );
-      if (status === 'completed') result.completed++;
-      else result.accepted++;
-    } catch (error) {
-      if (persistenceFailed) throw error;
-      result.failed++;
-    }
+    await advanceAndCount(
+      entry,
+      (value, save) => advanceSyncEntry(value, client, save, options.retryMs),
+      (value, delay) => saveSyncEntry(db, value, delay),
+      result
+    );
   }
   return result;
 }

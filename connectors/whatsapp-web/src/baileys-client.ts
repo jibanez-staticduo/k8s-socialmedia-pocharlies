@@ -112,9 +112,7 @@ import {
   getParticipantAvatar,
   setConversationAvatar,
   setParticipantAvatar,
-  setConversationState,
   applyArchiveSnapshot,
-  setMessageStatus,
   setConversationWaChatId,
   setConversationName,
   setParticipantName,
@@ -2068,7 +2066,9 @@ export class BaileysClient extends EventEmitter {
           pinned,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
-          chatNameWrites.push(setConversationName(norm, c.name, { authoritative: isGroup }).catch(() => {}));
+          chatNameWrites.push(
+            setConversationName(norm, c.name, { authoritative: isGroup }).catch(() => {})
+          );
         }
         this.persistChatSnapshotState(norm, c, pinned);
       }
@@ -2185,7 +2185,9 @@ export class BaileysClient extends EventEmitter {
         this.chatStore.set(norm, {
           id: norm,
           rawJid: c.id,
-          name: !isJidGroup(c.id) ? this.savedContactNameFor(c.id, norm) || c.name || c.id : c.name || c.id,
+          name: !isJidGroup(c.id)
+            ? this.savedContactNameFor(c.id, norm) || c.name || c.id
+            : c.name || c.id,
           isGroup: !!isJidGroup(c.id),
           unreadCount: c.unreadCount || 0,
           timestamp: Number(c.conversationTimestamp || 0),
@@ -2193,7 +2195,9 @@ export class BaileysClient extends EventEmitter {
           pinned,
         });
         if (c.name && !isWhatsAppJidLikeName(c.name, norm)) {
-          void setConversationName(norm, this.savedContactNameFor(c.id, norm) || c.name, { authoritative: !!isJidGroup(c.id) || !!this.savedContactNameFor(c.id, norm) }).catch(() => {});
+          void setConversationName(norm, this.savedContactNameFor(c.id, norm) || c.name, {
+            authoritative: !!isJidGroup(c.id) || !!this.savedContactNameFor(c.id, norm),
+          }).catch(() => {});
         }
         this.persistChatSnapshotState(norm, c, pinned);
         // Subscribe to presence so we get typing updates for this chat.
@@ -2705,8 +2709,11 @@ export class BaileysClient extends EventEmitter {
       let lid = lidFromPnMessage(msg);
       if (!lid) {
         try {
-          const mapped = await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(msg.key.remoteJid || '');
-          if (typeof mapped === 'string' && /^\d+(?::\d+)?@lid$/.test(mapped)) lid = jidNormalizedUser(mapped);
+          const mapped = await this.sock?.signalRepository?.lidMapping?.getLIDForPN?.(
+            msg.key.remoteJid || ''
+          );
+          if (typeof mapped === 'string' && /^\d+(?::\d+)?@lid$/.test(mapped))
+            lid = jidNormalizedUser(mapped);
         } catch {
           // An unavailable provider mapping leaves the PN unchanged.
         }
@@ -2714,7 +2721,10 @@ export class BaileysClient extends EventEmitter {
       if (lid) waMessage.conversationId = lid;
     }
     if (isChannelJid(msg.key.remoteJid)) {
-      waMessage.waMessageId = await channelPostMessageId(waMessage.conversationId, waMessage.waMessageId);
+      waMessage.waMessageId = await channelPostMessageId(
+        waMessage.conversationId,
+        waMessage.waMessageId
+      );
     }
 
     this.rememberKey(waMessage.waMessageId, msg.key, msg.key.remoteJid || '');
@@ -2868,11 +2878,27 @@ export class BaileysClient extends EventEmitter {
     if (msg.key.fromMe && !novedadesKind(msg.key)) {
       // Reapply provider receipts to close the receipt-before-message-row race.
       const status = typeof msg.status === 'number' ? mapWaStatus(msg.status) : null;
-      await recordAggregateStatus(waMessage.conversationId, waMessage.waMessageId, status || 'sent');
-      for (const receipt of msg.userReceipt || []) await this.persistParticipantReceipt(waMessage.conversationId, waMessage.waMessageId, receipt);
+      await recordAggregateStatus(
+        waMessage.conversationId,
+        waMessage.waMessageId,
+        status || 'sent'
+      );
+      for (const receipt of msg.userReceipt || [])
+        await this.persistParticipantReceipt(
+          waMessage.conversationId,
+          waMessage.waMessageId,
+          receipt
+        );
     }
-    if (msgId && msg.key.id && (isChannelJid(rawChatJid) || isStatusJid(rawChatJid)) && takeRevokeBeforePost(waMessage.conversationId, msg.key.id)) {
-      this.logger.info(`Revoke of ${waMessage.conversationId} ${msg.key.id} arrived before its post: applied`);
+    if (
+      msgId &&
+      msg.key.id &&
+      (isChannelJid(rawChatJid) || isStatusJid(rawChatJid)) &&
+      takeRevokeBeforePost(waMessage.conversationId, msg.key.id)
+    ) {
+      this.logger.info(
+        `Revoke of ${waMessage.conversationId} ${msg.key.id} arrived before its post: applied`
+      );
       await this.recordInboundRevoke(waMessage.waMessageId);
     }
     // Not for a REACTION: prod folds it into the target's messages.reactions
@@ -3206,18 +3232,19 @@ export class BaileysClient extends EventEmitter {
       messageType = k.toUpperCase();
     }
 
-    const context = [
-      ext,
-      content.imageMessage,
-      content.videoMessage,
-      content.audioMessage,
-      content.documentMessage,
-      content.stickerMessage,
-      content.locationMessage,
-      content.contactMessage,
-    ]
-      .map(item => item?.contextInfo)
-      .find(Boolean) || messageContextInfo(content);
+    const context =
+      [
+        ext,
+        content.imageMessage,
+        content.videoMessage,
+        content.audioMessage,
+        content.documentMessage,
+        content.stickerMessage,
+        content.locationMessage,
+        content.contactMessage,
+      ]
+        .map(item => item?.contextInfo)
+        .find(Boolean) || messageContextInfo(content);
     if (context) {
       isForwarded = !!context.isForwarded || (context.forwardingScore || 0) > 0;
       if (!replyToWaId && context.stanzaId) replyToWaId = context.stanzaId;

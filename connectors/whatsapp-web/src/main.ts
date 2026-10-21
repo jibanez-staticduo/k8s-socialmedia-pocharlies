@@ -112,8 +112,15 @@ async function main(): Promise<void> {
     res.redirect(302, uiPath('/api/v1/manual-open/page'));
   });
 
-  app.use(createQrRouter({ qrHandler, client, eventPublisher, sessionPath: SESSION_PATH, allowWebRenew: ALLOW_WEB_RENEW }));
-
+  app.use(
+    createQrRouter({
+      qrHandler,
+      client,
+      eventPublisher,
+      sessionPath: SESSION_PATH,
+      allowWebRenew: ALLOW_WEB_RENEW,
+    })
+  );
 
   app.listen(PORT, () => {
     console.log(`WhatsApp Connector API listening on port ${PORT}`);

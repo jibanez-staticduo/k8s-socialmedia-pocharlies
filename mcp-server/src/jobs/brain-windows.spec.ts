@@ -96,6 +96,22 @@ function mockBrainFetch() {
 
 const META = [{ id: 'reforma@g.us', name: 'Reforma casa', type: 'GROUP', is_group: true }];
 
+function recomputeRange(pool: FakePool, minTs: Date, maxTs: Date, dryRun = false) {
+  return recomputeChat(
+    pool as never,
+    SINK,
+    CFG,
+    { pushDocsCap: 400, maxDeletesPerChat: 50 },
+    'personal',
+    { platform: 'whatsapp', conversation_id: 'reforma@g.us', minTs, maxTs },
+    dryRun
+  );
+}
+
+function ledgerRows(rows: Handler['rows']): Handler {
+  return { match: 'content_hash, chunk_count, llm_status', rows };
+}
+
 describe('recomputeChat', () => {
   it('pushes parents + children for new windows and records the ledger', async () => {
     const msgs = [msg(1), msg(2), msg(3), msg(4), msg(5)];
@@ -104,24 +120,11 @@ describe('recomputeChat', () => {
       { match: 'wa_timestamp < ', rows: [] },
       { match: 'wa_timestamp > ', rows: [] },
       { match: 'LEFT JOIN participants', rows: msgs },
-      { match: 'content_hash, chunk_count, llm_status', rows: [] },
+      ledgerRows([]),
       { match: 'INSERT INTO brain_windows', rows: [] },
     ]);
     const pushes = mockBrainFetch();
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: msgs[0].wa_timestamp,
-        maxTs: msgs[4].wa_timestamp,
-      },
-      false
-    );
+    const r = await recomputeRange(pool, msgs[0].wa_timestamp, msgs[4].wa_timestamp, false);
     expect(r.chats).toBe(1);
     expect(r.pushed).toBe(1);
     const push = pushes[0];
@@ -147,24 +150,11 @@ describe('recomputeChat', () => {
     const pool = new FakePool([
       { match: 'FROM conversations', rows: META },
       { match: 'LEFT JOIN participants', rows: msgs },
-      { match: 'content_hash, chunk_count, llm_status', rows: [] },
+      ledgerRows([]),
       { match: 'INSERT INTO brain_windows', rows: [] },
     ]);
     const pushes = mockBrainFetch();
-    await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: msgs[0].wa_timestamp,
-        maxTs: msgs[2].wa_timestamp,
-      },
-      false
-    );
+    await recomputeRange(pool, msgs[0].wa_timestamp, msgs[2].wa_timestamp, false);
     const docs = pushes[0].body.documents as { metadata: { type: string; llm_status: string } }[];
     expect(docs.length).toBe(1);
     expect(docs[0].metadata.llm_status).toBe('skipped');
@@ -187,20 +177,7 @@ describe('recomputeChat', () => {
       },
     ]);
     const pushes = mockBrainFetch();
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: msgs[0].wa_timestamp,
-        maxTs: msgs[3].wa_timestamp,
-      },
-      false
-    );
+    const r = await recomputeRange(pool, msgs[0].wa_timestamp, msgs[3].wa_timestamp, false);
     expect(r.pushed).toBe(0);
     expect(pushes.length).toBe(0);
   });
@@ -216,18 +193,10 @@ describe('recomputeChat', () => {
       { match: 'DELETE FROM brain_windows', rows: [] },
     ]);
     const calls = mockBrainFetch();
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: new Date('2026-03-14T09:00:00Z'),
-        maxTs: new Date('2026-03-14T09:05:00Z'),
-      },
+    const r = await recomputeRange(
+      pool,
+      new Date('2026-03-14T09:00:00Z'),
+      new Date('2026-03-14T09:05:00Z'),
       false
     );
     expect(r.deleted).toBe(1);
@@ -262,28 +231,19 @@ describe('recomputeChat', () => {
     const pool = new FakePool([
       { match: 'FROM conversations', rows: META },
       { match: 'LEFT JOIN participants', rows: [] },
-      {
-        match: 'content_hash, chunk_count, llm_status',
+      ledgerRows(
         // emulate the SQL range filter: start_ts BETWEEN $4 AND $5 when given
-        rows: (params: unknown[]) =>
+        (params: unknown[]) =>
           params.length < 5
             ? stored
             : stored.filter(
                 s => s.start_ts >= (params[3] as Date) && s.start_ts <= (params[4] as Date)
-              ),
-      },
+              )
+      ),
       { match: 'DELETE FROM brain_windows', rows: [] },
     ]);
     const calls = mockBrainFetch();
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      { platform: 'whatsapp', conversation_id: 'reforma@g.us', minTs, maxTs },
-      false
-    );
+    const r = await recomputeRange(pool, minTs, maxTs);
     const deleted = calls
       .filter(c => c.url.endsWith('/delete-document'))
       .map(c => c.body.source_id);
@@ -303,22 +263,14 @@ describe('recomputeChat', () => {
     const pool = new FakePool([
       { match: 'FROM conversations', rows: META },
       { match: 'LEFT JOIN participants', rows: [] },
-      { match: 'content_hash, chunk_count, llm_status', rows: stored },
+      ledgerRows(stored),
       { match: 'DELETE FROM brain_windows', rows: [] },
     ]);
     const calls = mockBrainFetch();
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: new Date('2026-03-14T09:00:00Z'),
-        maxTs: new Date('2026-03-14T09:05:00Z'),
-      },
+    const r = await recomputeRange(
+      pool,
+      new Date('2026-03-14T09:00:00Z'),
+      new Date('2026-03-14T09:05:00Z'),
       false
     );
     expect(r.deleted).toBe(0);
@@ -332,23 +284,10 @@ describe('recomputeChat', () => {
     const pool = new FakePool([
       { match: 'FROM conversations', rows: META },
       { match: 'LEFT JOIN participants', rows: msgs },
-      { match: 'content_hash, chunk_count, llm_status', rows: [] },
+      ledgerRows([]),
     ]);
     const pushes = mockBrainFetch();
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: msgs[0].wa_timestamp,
-        maxTs: msgs[3].wa_timestamp,
-      },
-      true
-    );
+    const r = await recomputeRange(pool, msgs[0].wa_timestamp, msgs[3].wa_timestamp, true);
     expect(r.pushed).toBe(1);
     expect(pushes.length).toBe(0);
     expect(pool.sqlLike('INSERT INTO brain_windows').length).toBe(0);
@@ -359,25 +298,12 @@ describe('recomputeChat', () => {
     const pool = new FakePool([
       { match: 'FROM conversations', rows: META },
       { match: 'LEFT JOIN participants', rows: msgs },
-      { match: 'content_hash, chunk_count, llm_status', rows: [] },
+      ledgerRows([]),
     ]);
     global.fetch = jest.fn(
       async () => new Response('nope', { status: 400 })
     ) as unknown as typeof fetch;
-    const r = await recomputeChat(
-      pool as never,
-      SINK,
-      CFG,
-      { pushDocsCap: 400, maxDeletesPerChat: 50 },
-      'personal',
-      {
-        platform: 'whatsapp',
-        conversation_id: 'reforma@g.us',
-        minTs: msgs[0].wa_timestamp,
-        maxTs: msgs[3].wa_timestamp,
-      },
-      false
-    );
+    const r = await recomputeRange(pool, msgs[0].wa_timestamp, msgs[3].wa_timestamp, false);
     expect(r.pushed).toBe(0);
     expect(pool.sqlLike('INSERT INTO brain_windows').length).toBe(0);
   });
