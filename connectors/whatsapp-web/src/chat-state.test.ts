@@ -359,7 +359,7 @@ test('each action writes its own columns on the canonical row', async () => {
     },
     {
       action: 'markUnread',
-      sets: [/unread_count = GREATEST\(unread_count, 1\)/],
+      sets: [/WHEN id = \$1 THEN CASE WHEN \$2 < 0 THEN GREATEST\(unread_count, 1\) ELSE \$2 END/],
       params: [],
       mod: { markRead: false },
     },
@@ -586,12 +586,12 @@ test('chats.update from the phone: pin / mute on the canonical row, marked-unrea
     // above: 34600@c.us is a tombstone, its state would never be listed.
     const legacy = legacyStateWrites(calls);
     assert.equal(legacy.length, 2);
-    assert.match(legacy[0].sql, /unread_count = GREATEST\(unread_count, 1\)/);
+    assert.match(legacy[0].sql, /WHEN id = \$1 THEN CASE WHEN \$2 < 0 THEN GREATEST\(unread_count, 1\) ELSE \$2 END/);
     assert.equal(legacy[0].params[0], 'professional:111@lid');
     // An archive-only delta of a chat not cached here leaves the badge alone.
-    assert.doesNotMatch(legacy[1].sql, /unread_count/);
-    assert.deepEqual(legacy[1].params, ['professional:111@lid', true]);
-    assert.match(legacy[1].sql, /^UPDATE conversations SET archived = \$2, updated_at = now\(\) WHERE id = \$1$/);
+    assert.match(legacy[1].sql, /WHEN \$2::integer IS NULL THEN unread_count/);
+    assert.deepEqual(legacy[1].params, ['professional:111@lid', null, true, 'professional', []]);
+    assert.match(legacy[1].sql, /WHERE account = \$4 AND \(id = \$1 OR id = ANY/);
 
   } finally {
     restore();
@@ -640,7 +640,7 @@ test('chats.upsert archive / unread: canonical row; a chat with no conversation 
     await settle();
     const writes = legacyStateWrites(known.calls);
     assert.equal(writes.length, 1);
-    assert.deepEqual(writes[0].params, ['professional:111@lid', 2, true]);
+    assert.deepEqual(writes[0].params, ['professional:111@lid', 2, true, 'professional', []]);
   } finally {
     known.restore();
   }
@@ -676,7 +676,7 @@ test('one chat event resolves the canonical conversation once and writes archive
     await settle();
     assert.equal(calls.filter(c => isResolve(c.sql)).length, 1);
     const [legacy] = legacyStateWrites(calls);
-    assert.deepEqual(legacy.params, ['professional:111@lid', 3, true]);
+    assert.deepEqual(legacy.params, ['professional:111@lid', 3, true, 'professional', []]);
     const [write] = chatStateWrites(calls);
     assert.equal(write.params[0], 'professional:111@lid');
     assert.match(write.sql, /pinned_at = \$3::timestamptz, muted = \$4, mute_until = \$5/);
@@ -698,8 +698,8 @@ test('markAsRead clears the badge on the canonical conversation, never on the ji
     assert.equal(sock.read.length, 1);
     const writes = legacyStateWrites(known.calls);
     assert.equal(writes.length, 1);
-    assert.match(writes[0].sql, /unread_count = \$2/);
-    assert.deepEqual(writes[0].params, ['professional:111@lid', 0]);
+    assert.match(writes[0].sql, /WHEN id = \$1 THEN CASE WHEN \$2 < 0 THEN GREATEST\(unread_count, 1\) ELSE \$2 END/);
+    assert.deepEqual(writes[0].params, ['professional:111@lid', 0, null, 'professional', []]);
     assert.equal(known.calls.filter(c => isResolve(c.sql)).length, 1);
   } finally {
     known.restore();

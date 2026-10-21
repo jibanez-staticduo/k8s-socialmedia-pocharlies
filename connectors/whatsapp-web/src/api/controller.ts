@@ -2095,6 +2095,12 @@ export function createRouter(
     '/chats/:chatId/modify',
     auth,
     (req: AuthenticatedRequest, _res: Response, next): void => {
+      // Capability actions have a dedicated handler below. Skip this route
+      // before merging parameters so its HMAC still sees the signed body.
+      if (req.body?.action === 'star' || req.body?.action === 'unstar') {
+        next('route');
+        return;
+      }
       mergePathParam(req, 'chatId', 'conversationId');
       const body = optionalObject(req.body);
       if (body.action === 'mute' && body.durationMs === undefined && body.muteUntil === undefined) {
