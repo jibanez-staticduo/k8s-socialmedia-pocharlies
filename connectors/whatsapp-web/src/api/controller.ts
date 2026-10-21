@@ -539,6 +539,12 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function readJson(res: Response, operation: () => Promise<unknown>): void {
+  void operation()
+    .then(data => res.json(data))
+    .catch(error => res.status(500).json({ error: String(error) }));
+}
+
 function capabilityErrorResponse(res: Response, error: unknown): void {
   if (error instanceof MessageUnavailableError) {
     res
@@ -1907,15 +1913,8 @@ export function createRouter(
   });
 
   // Get authenticated account info
-  router.get('/me', auth, (req: AuthenticatedRequest, res: Response): void => {
-    void (async () => {
-      try {
-        const me = await client.getMe();
-        res.json(me);
-      } catch (e) {
-        res.status(500).json({ error: String(e) });
-      }
-    })();
+  router.get('/me', auth, (_req: Request, res: Response): void => {
+    readJson(res, () => client.getMe());
   });
 
   // ---------------------------------------------------------------------
@@ -2041,15 +2040,8 @@ export function createRouter(
   });
 
   // Get unread chats
-  router.get('/chats/unread', auth, (req: AuthenticatedRequest, res: Response): void => {
-    void (async () => {
-      try {
-        const chats = await client.getUnreadChats();
-        res.json({ chats });
-      } catch (e) {
-        res.status(500).json({ error: String(e) });
-      }
-    })();
+  router.get('/chats/unread', auth, (_req: Request, res: Response): void => {
+    readJson(res, async () => ({ chats: await client.getUnreadChats() }));
   });
 
   // Archive / pin / mute / read-unread a chat (fase 3 / PR-5): an app-state

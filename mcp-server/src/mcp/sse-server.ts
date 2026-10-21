@@ -9,8 +9,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { Client, Pool } from 'pg';
 import { ensureSearchIndexes } from '../application/search.service';
 import { syncSocialAccountsBestEffort } from '../infrastructure/database/social-accounts';
-import Redis, { RedisOptions } from 'ioredis';
-import * as fs from 'fs';
+import Redis from 'ioredis';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -24,28 +23,10 @@ import {
   listCurrentChatProposals,
   consumeCurrentChatProposal,
 } from './current-chat-proposals';
-import {
-  actorFromHeaders,
-  requireConnectorSecret,
-  runWithRequestActor,
-} from '@mcp-socialmedia/shared';
+import { actorFromHeaders, runWithRequestActor } from '@mcp-socialmedia/shared';
+import { loadMcpRuntimeConfig, redisOptionsFor } from './runtime-config';
 
-// SC-1239 C2: no hardcoded fallback — fail at startup naming the variable.
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  throw new Error(
-    'DATABASE_URL is unset: refusing to start the MCP SSE server without an explicit database connection'
-  );
-}
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
-const REDIS_TLS_CA = process.env.REDIS_TLS_CA;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const LLM_BASE_URL = process.env.LLM_BASE_URL || '';
-const LLM_CHAT_MODEL = process.env.LLM_CHAT_MODEL || '';
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'dev-encryption-key-change-in-production';
-// Refuse to start without an explicit connector HMAC key.
-const CONNECTOR_SHARED_SECRET = requireConnectorSecret();
-const CONNECTOR_URL = process.env.CONNECTOR_URL || 'http://whatsapp-connector:3001';
+const config = loadMcpRuntimeConfig('sse');
 const SSE_PORT = parseInt(process.env.MCP_SSE_PORT || '3010', 10);
 const AUTH_TOKEN = process.env.MCP_SSE_AUTH_TOKEN || '';
 const LANDING_PAGE = publicPage();
@@ -150,7 +131,7 @@ function startSseHeartbeat(res: ServerResponse, onFail: () => void): () => void 
 
 async function main() {
   const dbPool = new Pool({
-    connectionString: DATABASE_URL,
+    connectionString: config.databaseUrl,
     max: 30,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
@@ -166,7 +147,7 @@ async function main() {
   void ensureSearchIndexes(
     async () => {
       const client = new Client({
-        connectionString: DATABASE_URL,
+        connectionString: config.databaseUrl,
         application_name: 'mcp-sse-index',
       });
       await client.connect();
@@ -175,24 +156,19 @@ async function main() {
     message => console.log(`[SSE] ${message}`)
   );
 
-  let redisOptions: RedisOptions = {};
-  if (REDIS_URL.startsWith('rediss://') && REDIS_TLS_CA) {
-    const ca = fs.readFileSync(REDIS_TLS_CA, 'utf-8');
-    redisOptions = { tls: { ca, rejectUnauthorized: true } };
-  }
-  const redisClient = new Redis(REDIS_URL, redisOptions);
+  const redisClient = new Redis(config.redisUrl, redisOptionsFor(config));
   console.log('[SSE] Connected to Redis');
 
   const mcpServer = new MCPServer(
     dbPool,
     redisClient,
-    OPENAI_API_KEY,
-    ENCRYPTION_KEY,
-    CONNECTOR_SHARED_SECRET,
-    CONNECTOR_URL,
-    REDIS_URL,
-    LLM_BASE_URL || undefined,
-    LLM_CHAT_MODEL || undefined
+    config.openaiApiKey,
+    config.encryptionKey,
+    config.connectorSharedSecret,
+    config.connectorUrl,
+    config.redisUrl,
+    config.llmBaseUrl || undefined,
+    config.llmChatModel || undefined
   );
 
   const sessions = new Map<string, SessionRecord>();

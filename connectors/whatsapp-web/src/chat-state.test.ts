@@ -359,7 +359,7 @@ test('each action writes its own columns on the canonical row', async () => {
     },
     {
       action: 'markUnread',
-      sets: [/WHEN id = \$1 THEN CASE WHEN \$2 < 0 THEN GREATEST\(unread_count, 1\) ELSE \$2 END/],
+      sets: [/unread_count = GREATEST\(unread_count, 1\)/],
       params: [],
       mod: { markRead: false },
     },

@@ -1,8 +1,8 @@
 // Only connection-local temporary tables in a disposable QA database are written.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import pg from 'pg';
 import { CHAT_LIST_SQL, MESSAGE_LIST_SQL } from '../lib/chat-names.mjs';
+import { connectDisposableDatabase } from './postgres-fixture.mjs';
 
 const url = process.env.WHATSAPP_TEST_DATABASE_URL;
 function nodes(plan) {
@@ -11,9 +11,7 @@ function nodes(plan) {
 
 for (const idType of ['uuid', 'bigint']) {
   test(`bounded sender names keep aliases and account isolation with ${idType} ids`, {skip: !url}, async () => {
-    assert.match(new URL(url).pathname, /^\/(whatsapp_qa[^/]*|socialmedia_shared_qa)$/);
-    const db = new pg.Client({connectionString: url});
-    await db.connect();
+    const db = await connectDisposableDatabase(url);
     try {
       await db.query('BEGIN');
       await db.query(`

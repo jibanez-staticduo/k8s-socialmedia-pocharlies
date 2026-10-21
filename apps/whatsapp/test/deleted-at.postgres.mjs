@@ -1,13 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import pg from 'pg';
 import { DELETED_AT_SQL } from '../lib/chat-names.mjs';
+import { connectDisposableDatabase } from './postgres-fixture.mjs';
 
 const url = process.env.WHATSAPP_TEST_DATABASE_URL;
 test('deleted timestamps retain the real instant for legacy UTC and timestamptz schemas', {skip: !url}, async () => {
-  assert.match(new URL(url).pathname, /^\/(whatsapp_qa[^/]*|socialmedia_shared_qa)$/);
-  const db = new pg.Client({connectionString: url});
-  await db.connect();
+  const db = await connectDisposableDatabase(url);
   try {
     await db.query('BEGIN');
     await db.query("SET LOCAL TIME ZONE 'Europe/Madrid'");

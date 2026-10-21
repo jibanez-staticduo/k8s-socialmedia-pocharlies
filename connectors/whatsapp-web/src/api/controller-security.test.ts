@@ -72,11 +72,41 @@ test('emergency sending lock blocks forward and delete before provider mutation'
   }
 });
 
+test('account and unread JSON reads preserve authentication, payloads and errors', async () => {
+  let failure: unknown;
+  const calls: string[] = [];
+  const me = { id: '34600@c.us', platform: 'whatsapp' };
+  const chats = [{ id: '34601@c.us', unreadCount: 2 }];
+  const app = await startApp({
+    getMe: async () => { calls.push('me'); if (failure) throw failure; return me; },
+    getUnreadChats: async () => { calls.push('unread'); if (failure) throw failure; return chats; },
+  });
+  try {
+    for (const [path, payload] of [['/me', me], ['/chats/unread', { chats }]] as const) {
+      assert.equal((await fetch(`${app.base}/api/v1${path}`)).status, 401);
+      assert.deepEqual(calls, []);
+      const response = await fetch(`${app.base}/api/v1${path}`, { headers: signedHeaders({}) });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), payload);
+      calls.length = 0;
+      failure = new Error('provider unavailable');
+      const failed = await fetch(`${app.base}/api/v1${path}`, { headers: signedHeaders({}) });
+      assert.equal(failed.status, 500);
+      assert.deepEqual(await failed.json(), { error: 'Error: provider unavailable' });
+      calls.length = 0;
+      failure = undefined;
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 test('parameterized chat mutations validate input and enforce both sending locks', async () => {
   const previousEnabled = process.env.ENABLE_SENDING;
   const previousEmergency = process.env.EMERGENCY_DISABLE_SENDING;
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const app = await startApp({
+    isConnected: () => true,
     modifyCapabilityChat: async (...args: unknown[]) => {
       calls.push({ method: 'modify', args });
       return { applied: true };
@@ -119,7 +149,7 @@ test('parameterized chat mutations validate input and enforce both sending locks
     assert.deepEqual(calls, [
       { method: 'modify', args: [chat, 'star', true, [{ id: 'S1', fromMe: true }]] },
       { method: 'modify', args: [chat, 'unstar', false, [{ id: 'S1', fromMe: true }]] },
-      { method: 'disappearing', args: [chat, 86400] },
+      { method: 'disappearing', args: [chat, 86400, { actor: undefined }] },
       { method: 'read', args: [chat] },
     ]);
   } finally {

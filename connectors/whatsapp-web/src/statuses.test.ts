@@ -659,82 +659,27 @@ function holderOf(conversation?: string) {
     isHolderLookup(sql) && conversation ? [{ conversation_id: conversation }] : [];
 }
 
-test('a channel post whose id another channel holds is stored under <channel>:<id>, not dropped', async () => {
-  useAccount('professional');
-  const { calls, restore } = stubPool(holderOf(`professional:${CHANNEL_A}`));
-  try {
-    const { client } = makeClient();
-    const result = await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    assert.equal(
-      calls.find(c => isMessageInsert(c.sql))!.params[0],
-      `professional:${CHANNEL_B}:SAME`
-    );
-    assert.equal(calls.find(c => isKeyInsert(c.sql))!.params[0], `professional:${CHANNEL_B}:SAME`);
-    assert.equal(result.waMessage.waMessageId, `${CHANNEL_B}:SAME`);
-  } finally {
-    restore();
-  }
-});
-
-test('a channel post keeps its bare id when nobody holds it or its own channel does (a replay)', async () => {
-  for (const [account, holder, expected] of [
-    ['professional', undefined, 'professional:SAME'],
-    ['professional', `professional:${CHANNEL_B}`, 'professional:SAME'],
-    ['personal', undefined, 'SAME'],
-    ['personal', CHANNEL_B, 'SAME'],
-  ] as const) {
-    useAccount(account);
-    const { calls, restore } = stubPool(holderOf(holder));
-    try {
-      const { client } = makeClient();
-      await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
-        source: 'live',
-        publishEvent: false,
-      });
-      assert.equal(calls.find(c => isMessageInsert(c.sql))!.params[0], expected);
-    } finally {
-      restore();
+test('channel posts retain native IDs in the isolated store, regardless of legacy holders', async () => {
+  for (const account of ['personal', 'professional']) {
+    for (const holder of [undefined, `${account}:${CHANNEL_A}`, `${account}:${CHANNEL_B}`]) {
+      useAccount(account);
+      const { calls, restore } = stubPool(holderOf(holder));
+      try {
+        const { client } = makeClient();
+        for (const channel of [CHANNEL_A, CHANNEL_B]) {
+          await priv(client).ingestMessage(channelPost(channel, 'SAME'), {
+            source: 'live', publishEvent: false,
+          });
+        }
+        const posts = calls.filter(c => /INSERT INTO whatsapp_novedades_messages/.test(c.sql));
+        assert.deepEqual(posts.map(c => c.params.slice(0, 3)), [
+          [account, CHANNEL_A, 'SAME'], [account, CHANNEL_B, 'SAME'],
+        ]);
+        assert.equal(calls.filter(c => isMessageInsert(c.sql) || isKeyInsert(c.sql) || isHolderLookup(c.sql)).length, 0);
+      } finally {
+        restore();
+      }
     }
-  }
-});
-
-test('a clash on the personal account composes the id without a prefix; chats pay no lookup', async () => {
-  useAccount('personal');
-  const { calls, restore } = stubPool(holderOf(CHANNEL_A));
-  try {
-    const { client } = makeClient();
-    await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    assert.equal(calls.find(c => isMessageInsert(c.sql))!.params[0], `${CHANNEL_B}:SAME`);
-    calls.length = 0;
-    await priv(client).ingestMessage(channelPost('34600@s.whatsapp.net', 'SAME'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    assert.equal(calls.filter(c => isHolderLookup(c.sql)).length, 0);
-    assert.equal(calls.find(c => isMessageInsert(c.sql))!.params[0], 'SAME');
-  } finally {
-    restore();
-  }
-});
-
-test('an unreadable holder lookup never stops the ingest: the bare id, as before', async () => {
-  useAccount('professional');
-  const { calls, restore } = stubPool(sql => (isHolderLookup(sql) ? new Error('db down') : []));
-  try {
-    const { client } = makeClient();
-    await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    assert.equal(calls.find(c => isMessageInsert(c.sql))!.params[0], 'professional:SAME');
-  } finally {
-    restore();
   }
 });
 
@@ -806,7 +751,6 @@ function statusPost(id: string): WAMessage {
 
 test('a revoke that finds no post is remembered: the post is stored and marked deleted when it arrives', async () => {
   for (const [chat, post] of [
-    [CHANNEL_B, channelPost(CHANNEL_B, 'REV')],
     ['status@broadcast', statusPost('REV')],
   ] as const) {
     useAccount('professional');
@@ -834,8 +778,8 @@ test('a revoke that found its row remembers nothing; a remembered one is used up
   const found = storingPool({ found: true });
   try {
     const { client } = makeClient();
-    await priv(client).handleInboundMutation(revokeOf(CHANNEL_B, 'REV'));
-    await priv(client).ingestMessage(channelPost(CHANNEL_B, 'REV'), {
+    await priv(client).handleInboundMutation(revokeOf('status@broadcast', 'REV'));
+    await priv(client).ingestMessage(statusPost('REV'), {
       source: 'live',
       publishEvent: false,
     });
@@ -847,9 +791,9 @@ test('a revoke that found its row remembers nothing; a remembered one is used up
   const none = storingPool();
   try {
     const { client } = makeClient();
-    await priv(client).handleInboundMutation(revokeOf(CHANNEL_B, 'REV'));
+    await priv(client).handleInboundMutation(revokeOf('status@broadcast', 'REV'));
     for (let times = 0; times < 2; times++) {
-      await priv(client).ingestMessage(channelPost(CHANNEL_B, 'REV'), {
+      await priv(client).ingestMessage(statusPost('REV'), {
         source: 'live',
         publishEvent: false,
       });
@@ -861,56 +805,6 @@ test('a revoke that found its row remembers nothing; a remembered one is used up
     );
   } finally {
     none.restore();
-  }
-});
-
-test('the same id in another channel is not marked; a chat that is neither a channel nor a status remembers nothing', async () => {
-  useAccount('professional');
-  const { calls, restore } = storingPool();
-  try {
-    const { client } = makeClient();
-    await priv(client).handleInboundMutation(revokeOf(CHANNEL_A, 'X'));
-    await priv(client).handleInboundMutation(revokeOf('34600@s.whatsapp.net', 'C1'));
-    await priv(client).ingestMessage(channelPost(CHANNEL_B, 'X'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    await priv(client).ingestMessage(channelPost('34600@s.whatsapp.net', 'C1'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    assert.equal(calls.filter(c => isRevokeUpdate(c.sql)).length, 2, 'only the two revokes');
-    await priv(client).ingestMessage(channelPost(CHANNEL_A, 'X'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    assert.equal(calls.filter(c => isRevokeUpdate(c.sql)).length, 3, 'its own channel is marked');
-  } finally {
-    restore();
-  }
-});
-
-test('channel A holds the bare id: the revoke of channel B finds no row, and B post (composed) is marked, not A', async () => {
-  useAccount('professional');
-  const { calls, restore } = storingPool({ holder: `professional:${CHANNEL_A}` });
-  try {
-    const { client } = makeClient();
-    await priv(client).handleInboundMutation(revokeOf(CHANNEL_B, 'SAME'));
-    await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
-      source: 'live',
-      publishEvent: false,
-    });
-    const updates = calls.filter(c => isRevokeUpdate(c.sql));
-    assert.deepEqual(
-      updates.map(c => c.params[0]),
-      [`professional:${CHANNEL_B}:SAME`, `professional:${CHANNEL_B}:SAME`]
-    );
-    assert.equal(
-      calls.find(c => isMessageInsert(c.sql))!.params[0],
-      `professional:${CHANNEL_B}:SAME`
-    );
-  } finally {
-    restore();
   }
 });
 
@@ -938,24 +832,18 @@ test('remembered revokes: used up once, forgotten after 24 h, at most 2000 (the 
   }
 });
 
-test('a channel post under a composed id does not touch the first channel payload; one with its bare id still writes it', async () => {
-  for (const [holder, payloads] of [
-    [`professional:${CHANNEL_A}`, 0],
-    [undefined, 1],
-    [`professional:${CHANNEL_B}`, 1],
-  ] as const) {
-    useAccount('professional');
-    const { calls, restore } = storingPool({ holder });
-    try {
-      const { client } = makeClient();
-      await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
-        source: 'live',
-        publishEvent: false,
-      });
-      assert.equal(calls.filter(c => isPayloadInsert(c.sql)).length, payloads, `holder ${holder}`);
-    } finally {
-      restore();
-    }
+test('isolated channel posts never overwrite a legacy retry payload', async () => {
+  useAccount('professional');
+  const { calls, restore } = storingPool();
+  try {
+    const { client } = makeClient();
+    await priv(client).ingestMessage(channelPost(CHANNEL_B, 'SAME'), {
+      source: 'live', publishEvent: false,
+    });
+    assert.equal(calls.filter(c => isPayloadInsert(c.sql)).length, 0);
+    assert.equal(calls.filter(c => /INSERT INTO whatsapp_novedades_messages/.test(c.sql)).length, 1);
+  } finally {
+    restore();
   }
 });
 
