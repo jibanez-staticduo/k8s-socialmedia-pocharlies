@@ -15,7 +15,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { writeNoSessionResponse } from './session-errors';
 import { randomUUID } from 'node:crypto';
-import { MCPServer } from './server';
+import { createMcpServer } from './runtime-server';
 import { publicPage } from './public-page';
 import {
   activateCurrentChatTurn,
@@ -159,17 +159,7 @@ async function main() {
   const redisClient = new Redis(config.redisUrl, redisOptionsFor(config));
   console.log('[SSE] Connected to Redis');
 
-  const mcpServer = new MCPServer(
-    dbPool,
-    redisClient,
-    config.openaiApiKey,
-    config.encryptionKey,
-    config.connectorSharedSecret,
-    config.connectorUrl,
-    config.redisUrl,
-    config.llmBaseUrl || undefined,
-    config.llmChatModel || undefined
-  );
+  const mcpServer = createMcpServer(dbPool, redisClient, config);
 
   const sessions = new Map<string, SessionRecord>();
 

@@ -1,8 +1,8 @@
 import { Pool } from 'pg';
 import { syncSocialAccountsBestEffort } from '../infrastructure/database/social-accounts';
 import Redis from 'ioredis';
-import { MCPServer } from './server';
 import { loadMcpRuntimeConfig, redisOptionsFor } from './runtime-config';
+import { createMcpServer } from './runtime-server';
 
 const config = loadMcpRuntimeConfig('stdio');
 
@@ -26,17 +26,7 @@ async function main() {
     await syncSocialAccountsBestEffort(dbPool);
 
     // Create MCP server
-    const server = new MCPServer(
-      dbPool,
-      redisClient,
-      config.openaiApiKey,
-      config.encryptionKey,
-      config.connectorSharedSecret,
-      config.connectorUrl,
-      config.redisUrl,
-      config.llmBaseUrl || undefined,
-      config.llmChatModel || undefined
-    );
+    const server = createMcpServer(dbPool, redisClient, config);
 
     // Run server
     await server.run();
