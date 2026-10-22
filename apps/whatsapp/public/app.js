@@ -270,6 +270,8 @@ function setConversationAvatar(chat = null) {
 // QA #87: el servidor pliega tildes (pg_trgm); la lista debe plegar igual o «ibanez» no encuentra nada.
 const foldSearch = value => value.toLocaleLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
 function renderChats() {
+  // QA #89/#97: «Destacados» es una vista de mensajes, no de chats.
+  if (featureUI?.isFeatureView?.() === 'starred') { $('chat-status').textContent = ''; void featureUI.starredView?.($('chats')); return; }
   const archivedView = featureUI?.isFeatureView?.() === 'archived';
   sidebarSearch?.viewChanged(archivedView);
   // UX #6.1: el buscador filtra también dentro de Archivados (antes se vaciaba).
