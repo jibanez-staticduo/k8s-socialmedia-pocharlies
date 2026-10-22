@@ -314,6 +314,7 @@ function renderChats() {
   $('chat-status').textContent = !state.chats.length ? (filter === 'archived' ? 'No hay chats archivados.' : 'Todavía no hay chats sincronizados para esta cuenta.') : !chats.length ? (filter === 'favorites' ? 'Aún no hay favoritos. Marca uno desde «⌄» en cualquier chat.' : 'No hay conversaciones que coincidan.') : '';
 }
 const chatLoads = new Map();
+const chatCache = new Map();
 async function loadChats({background = false} = {}) {
   if (!state.account || (background && state.chatLoading)) return;
   const account = state.account;
@@ -325,7 +326,14 @@ async function loadChats({background = false} = {}) {
   const running = chatLoads.get(scope);
   if (running) return running;
   const requestToken = ++state.chatRequestToken;
-  const previous = state.chatListScope === scope ? state.chats : [];
+  // QA velocidad 22-10: cambiar de cuenta costaba ~9 s (arranque frío cada vez).
+  // Se pinta enseguida la última lista conocida de ese ámbito y se revalida.
+  const remembered = chatCache.get(scope)?.chats || [];
+  const previous = state.chatListScope === scope ? state.chats : remembered;
+  if (previous.length && state.chatListScope !== scope) {
+    state.chats = previous; state.chatListScope = scope;
+    featureUI?.chatsChanged?.(state.chats); renderChats();
+  }
   const isCurrent = () => account === state.account && requestToken === state.chatRequestToken && archivedView === (featureUI?.isFeatureView?.() === 'archived');
   const run = (async () => {
     state.chatLoading = true;
@@ -334,7 +342,7 @@ async function loadChats({background = false} = {}) {
       await loadChatPages({previous, isCurrent,
         fetchPage: cursor => api(`/api/chats?${new URLSearchParams({account, limit: '100', ...(archivedView ? {archived: 'only'} : {}), ...(cursor ? {cursor} : {})})}`),
         onPage: (chats, hasMore) => {
-          state.chats = chats; state.chatListScope = scope;
+          state.chats = chats; state.chatListScope = scope; chatCache.set(scope, {chats});
           featureUI?.chatsChanged?.(state.chats);
           renderChats();
           if (hasMore) $('chat-status').textContent = 'Cargando más conversaciones…';
