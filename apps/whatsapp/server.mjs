@@ -1091,7 +1091,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
    * keep the spelling the provider used at the time, including the legacy
    * `@c.us`. Those two spellings are one phone number, so both are looked up;
    * without the alias a contact saved years ago would show no name at all. A
-   * `@lid` has no such alias and stays on its own address.
+   * `@lid` borrows its name through the conversation row that links it to its
+   * phone (wa_chat_id), the same lid_map the directory uses: the blocklist
+   * answers with the LID while participants keep the name under the phone.
    */
   async function storedContactNames(account, jids) {
     const names = new Map();
@@ -1107,6 +1109,26 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       const bare = value.startsWith(prefix) ? value.slice(prefix.length) : value;
       return bare.replace(/@c\.us$/, '@s.whatsapp.net');
     };
+    // QA #105: expand each requested address across the lid↔phone link so a
+    // name stored under the other spelling is still attributed to it.
+    const alias = new Map(jids.map(jid => [jid, jid]));
+    try {
+      const links = await query(
+        'SELECT id, wa_chat_id AS "waChatId" FROM conversations WHERE account=$1 AND COALESCE(is_group, false)=false AND (id = ANY($2::text[]) OR wa_chat_id = ANY($2::text[]))',
+        [account.accountId, storedIds],
+      );
+      for (const row of links) {
+        const pair = [storedAddress(row.jid), storedAddress(row.waChatId)].filter(Boolean);
+        for (const target of jids) {
+          if (!pair.includes(target)) continue;
+          for (const other of pair) {
+            if (other === target || alias.has(other)) continue;
+            alias.set(other, target);
+            storedIds.push(other, asLegacyPhone(other), `${prefix}${other}`, `${prefix}${asLegacyPhone(other)}`);
+          }
+        }
+      }
+    } catch { /* sin tabla de conversaciones el nombre cuesta, no la lista */ }
     const sources = [
       {
         sql: 'SELECT jid, name, push_name AS "pushName", NULL::text AS "waChatId" FROM whatsapp_contacts WHERE account=$1 AND jid = ANY($2::text[])',
@@ -1130,7 +1152,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       try { rows = await query(source.sql, source.args); } catch { continue; }
       for (const row of rows) {
         const known = [storedAddress(row.jid), storedAddress(row.waChatId)].filter(Boolean);
-        const jid = jids.find(target => known.includes(target));
+        const jid = known.map(address => alias.get(address)).find(Boolean);
         if (!jid || names.has(jid)) continue;
         const name = storedName(row.name, row.jid) || storedName(row.pushName, row.jid);
         if (name) names.set(jid, name);
@@ -1759,7 +1781,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         // política de borrado lo exige, bajar a max-age=0 + etag.
         if (response.status === 200 || response.status === 206) res.setHeader('cache-control', 'private, max-age=86400, immutable');
         if (!response.headers.get('content-encoding') && response.headers.has('content-length')) res.setHeader('content-length', response.headers.get('content-length'));
-        const safeInline = /^(image\/(jpeg|png|gif|webp)|audio\/|video\/)/.test(media.mime_type || '');
+        // QA #115.2: el PDF se ve (como la oficial); svg/html siguen attachment, pueden
+        // ejecutar guion con el type servido.
+        const safeInline = /^(image\/(jpeg|png|gif|webp)|application\/pdf|audio\/|video\/)/.test(media.mime_type || '');
         res.setHeader('content-type', safeInline ? media.mime_type : 'application/octet-stream');
         res.setHeader('content-disposition', `${safeInline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(media.file_name || 'attachment')}`);
         if (response.body) await pipeline(Readable.fromWeb(response.body), res);
@@ -1948,7 +1972,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const cacheKey = JSON.stringify([a.accountId, chat, q, searchScope, url.searchParams.get('cursor') || '']);
         const cached = searchCache.get(cacheKey);
         if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return json(200, cached.body);
-        const args = [a.accountId, `%${q}%`];
+        // QA 22-10: % y _ del término eran comodines SQL (buscar «%» casaba con todo).
+        // El patrón va parametrizado — no es inyección — pero hay que escapar los comodines.
+        const args = [a.accountId, `%${q.replace(/[\\%_]/g, '\\$&')}%`];
         const clauses = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_RETAINED_SQL, MESSAGE_VISIBLE_SQL, 'm.content ILIKE $2'];
         if (conversation) { args.push(await conversationReadIds(a, conversation)); clauses.push(`m.conversation_id=ANY($${args.length}::text[])`); }
         if (cursor) {

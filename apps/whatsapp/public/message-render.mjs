@@ -362,7 +362,7 @@ function attachmentSizeBytes(attachment) {
   return Number.isFinite(size) && size > 0 ? size : null;
 }
 
-function formatMediaSize(bytes) {
+export function formatMediaSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '';
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
@@ -828,6 +828,20 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
   const url = safeMessageUrl(attachmentUrl(attachment), baseUrl);
   const name = attachmentName(attachment);
   if (!url) {
+    // QA #113: un adjunto pendiente (fuera del outbox, aún sin fila en el servidor) no
+    // tiene URL; se pinta la tarjeta con el nombre y «Enviando…» en vez del error.
+    if (attachment?.pending) {
+      const card = makeElement(documentRef, 'div', 'attachment-document');
+      const icon = makeElement(documentRef, 'span', 'document-icon', MEDIA_PENDING_BADGES[getAttachmentKind(attachment)]);
+      icon.setAttribute('aria-hidden', 'true');
+      const details = makeElement(documentRef, 'span', 'document-details');
+      details.append(makeElement(documentRef, 'strong', 'document-name', name));
+      const size = attachmentSizeBytes(attachment);
+      details.append(makeElement(documentRef, 'span', 'document-size', size ? `${formatMediaSize(size)} · Enviando…` : 'Enviando…'));
+      card.append(icon, details);
+      container.append(card);
+      return container;
+    }
     appendAttachmentError(container, documentRef, 'Adjunto no disponible.');
     return container;
   }
@@ -1021,11 +1035,24 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
   return container;
 }
 
+// QA #111: la primera letra fuerte decide. Árabe, hebreo, siríaco, thaana,
+// n'ko y samaritano van a la derecha; el resto, a la izquierda. Vacío = no tocar.
+export function detectDirection(value) {
+  for (const character of String(value || '')) {
+    if (/[\u0590-\u08FF\uFB1D-\uFDCF\uFDF0-\uFDFF\uFE70-\uFEFF]/.test(character)) return 'rtl';
+    if (/[a-zA-Z\u00C0-\u024F]/.test(character)) return 'ltr';
+  }
+  return '';
+}
+
 function deliveryStatus(message) {
   const status = textValue(message?.status || message?.deliveryStatus).toLowerCase();
   if (status === 'sent') return { symbol: '\u2713', label: 'Enviado', className: 'status-sent' };
   if (status === 'delivered') return { symbol: '\u2713\u2713', label: 'Entregado', className: 'status-delivered' };
   if (['read', 'played'].includes(status)) return { symbol: '\u2713\u2713', label: status === 'played' ? 'Reproducido' : 'Le\u00eddo', className: 'status-read' };
+  // QA #109: sin estos dos estados un fallo de env\u00edo era invisible en el hilo.
+  if (status === 'pending') return { symbol: '\u23f3', label: 'Pendiente', className: 'status-pending' };
+  if (status === 'failed') return { symbol: '!', label: 'No enviado', className: 'status-failed' };
   return null;
 }
 
@@ -1214,7 +1241,10 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
   const text = textValue(message?.text ?? message?.content);
   if (text && !['poll', 'event'].includes(metadata.kind)) {
     const textElement = makeElement(documentRef, 'div', 'message-text');
+    textElement.setAttribute('dir', 'auto'); // QA #111: el navegador decide por el primer carácter fuerte.
     appendRichText(textElement, text, documentRef);
+    const direction = detectDirection(text);
+    if (direction) textElement.dir = direction;
     bubble.append(textElement);
   }
   const linkPreview = message?.linkPreview;

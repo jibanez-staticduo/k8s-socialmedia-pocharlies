@@ -23,13 +23,17 @@ export function writeUploadQualityPreference(storage, accountId, quality) {
 }
 
 export function readUploadQuality(storage, accountId, file) {
-  // shortcut: el conector desplegado rechaza quality (400 quality_unsupported → 502 en toda foto, QA #93).
-  // La preferencia se sigue guardando; volver a leerla cuando el conector con soporte esté desplegado (#133).
-  return 'source';
+  // QA #93 cerrado en producción (22-10): el conector v1.3.120 acepta quality (medido: HD llega 200).
+  if (!/^image\/(jpeg|png|webp)$/.test(file?.type || '')) return 'source';
+  return readUploadQualityPreference(storage, accountId);
 }
 
 export function canViewOnce(file) {
-  return /^(image\/(jpeg|png|webp)|video\/(mp4|webm|quicktime))$/.test(file?.type || '');
+  // shortcut (QA #77 addendum 22-10): la ruta view-once del conector degrada el adjunto a
+  // octet-stream y se traga el caption (medido). El botón no se ofrece hasta que el conector
+  // lo soporte de punta a punta; el marcador de mensajes recibidos sí se pinta.
+  void file;
+  return false;
 }
 
 function attachmentName(file) {

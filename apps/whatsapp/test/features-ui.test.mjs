@@ -354,7 +354,7 @@ test('QA #59: el diálogo de acciones del mensaje es un menú navegable con flec
 test('«Destacados» es una vista con estado vacío, no un diálogo (QA #89/#97)', async () => {
   const ui = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
   assert.match(ui, /async function renderStarredView\(container\)/);
-  assert.match(ui, /No hay mensajes destacados\./);
+  assert.match(ui, /Aún no has destacado ningún mensaje\. Abre el menú «⋯» de un mensaje y elige «Destacar»\./);
   assert.match(ui, /item\.onclick = \(\) => setView\(view\);/);
   assert.match(ui, /starredView: renderStarredView,/);
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
@@ -368,4 +368,87 @@ test('un miembro con chat abierto es un botón que lo abre (QA #97)', async () =
   assert.match(src, /row\.onclick = \(\) => \{ closeModal\(\); selectChat\(known\); \}/);
   const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
   assert.match(css, /button\.feature-member \{ width: 100%; border: 0;/);
+});
+
+test('los tres formularios de creación pintan el motivo en vez de callar (QA #107)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /function formValidator\(documentRef, form\) \{/);
+  assert.equal((src.match(/formValidator\(documentRef, form\)/g) || []).length, 4);
+  assert.match(src, /showError\('Indica el nombre del grupo y al menos un miembro\.'\)/);
+  assert.match(src, /name: values\.name\.trim\(\)\.slice\(0, 100\)/);
+  const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.feature-form-error \{ margin: 0; color: var\(--danger\);/);
+});
+
+test('el aviso de bloqueados cuenta lo filtrado y la ficha no pinta el LID (QA #105, UX #32.1)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /coinciden con la búsqueda\./);
+  assert.match(src, /Ningún contacto bloqueado coincide con esta búsqueda\./);
+  assert.doesNotMatch(src, /node\('small', '', member\.id \|\| 'Identidad no disponible'\)/);
+  assert.match(src, /if \(!memberName && member\.id\) copy\.append\(node\('small', '', member\.id\)\)/);
+});
+
+test('la galería usa <a href> reales y el panel de listas se llama «Listas» (QA #115.1, UX #33)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const card = url \? node\('a', 'feature-gallery-card'\)/);
+  assert.match(src, /card\.href = url; card\.target = '_blank'; card\.rel = 'noopener noreferrer';/);
+  assert.doesNotMatch(src, /card\.setAttribute\('role', 'link'\)/);
+  assert.match(src, /openModal\('Listas'/);
+  assert.match(src, /'Las listas se guardan en esta cuenta \(SocialMedia\)\.'/);
+  assert.doesNotMatch(src, /Actualizar listas/);
+});
+
+test('la galería avisa y ofrece reintentar cuando el servidor falla (QA #114)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /loadError = err;/);
+  assert.match(src, /'Reintentar', 'feature-button subtle'\)/);
+  assert.doesNotMatch(src, /items = localGallery\(kind\)/);
+});
+
+test('el clic derecho en una burbuja abre el menú del mensaje (QA #59 addendum)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /bubble\.oncontextmenu = event => \{ event\.preventDefault\(\); openMessageActions\(message, event\); \};/);
+});
+
+test('reenviar al chat abierto refresca el transcript (QA #116)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /if \(sent && targetChat === source\.chat\) refetchAfterEcho\(\);/);
+});
+
+test('los mensajes ajenos ofrecen «Eliminar para mí» con el alcance único (UX #36.1)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /add\('Eliminar para mí', item => \{ closeModal\(\); openDelete\(item, false\); \}/);
+  assert.match(src, /function openDelete\(message, mine = true\)/);
+  assert.match(src, /\.\.\.\(mine \? \[option\(documentRef, 'Eliminar para todos', 'everyone'\)\] : \[\]\)/);
+});
+
+test('los seis filtros del listado llevan recuento y aria-label con número (QA #84)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /counts\[view\] = filterChats\.filter\(chat => matchesChatView\(chat, view, local\)\)\.length/);
+  assert.match(src, /item\.setAttribute\('aria-label', `\$\{label\}: \$\{counts\[view\]\}`\)/);
+  assert.match(src, /entry\.setAttribute\('aria-label', `Archivados: \$\{counts\.archived\}`\)/);
+  assert.match(src, /filterChats = array\(chats\);\n\s*updateFilterCounts\(\);/);
+});
+test('el adjunto citado se nombra por tipo (nit QA 22-10)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /type\.startsWith\('video'\) \? 'Vídeo'/);
+  assert.match(src, /type === 'sticker' \? 'Sticker'/);
+  assert.match(src, /startsWith\('image'\) \? 'Foto'/);
+});
+test('los campos de teléfono piden pad numérico y enseñan el formato (UX #42.3/#43.1)', async () => {
+  const src = await readFile(new URL('../public/features-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /if \(placeholder\) input\.placeholder = placeholder;/);
+  assert.match(src, /'Número o identificador', 'tel', 'address', '', '\+34 600 000 000'/);
+  assert.match(src, /'Número o identificador', 'tel', 'memberId', '', '\+34 600 000 000'/);
+  assert.match(src, /'members', '', '\+34600112233, \+34600112244'/);
+  assert.doesNotMatch(src, /'Número o identificador', 'text'/);
+});
+test('la encuesta enseña el contador del tope al acercarse (UX #44.2)', async () => {
+  const src = await readFile(new URL('../public/poll-composer.mjs', import.meta.url), 'utf8');
+  assert.match(src, /span\.hidden = input\.value\.length < max - 25/);
+  assert.match(src, /counter\(question, 255\)/);
+  assert.match(src, /counter: counter\(input, 100\)/);
+  assert.match(src, /row\.label\.append\(row\.input, row\.counter\)/);
+  const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.poll-count \{ display:block; text-align:right;/);
 });

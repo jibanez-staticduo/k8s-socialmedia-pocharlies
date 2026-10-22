@@ -25,16 +25,12 @@ test('attachment and typed text form one media upload with a caption', () => {
   assert.equal(attachmentError({ name: 'foto.jpg', type: 'image/jpeg', size: MAX_ATTACHMENT_BYTES + 1 }), 'El archivo supera el límite de 10 MiB.');
 });
 
-test('view once is offered only for photos and videos and travels with that upload', () => {
-  for (const type of ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime']) {
-    assert.equal(canViewOnce({type}), true, type);
-  }
-  for (const type of ['image/gif', 'audio/mpeg', 'application/pdf']) {
+test('view once no se ofrece: la ruta del conector degrada el adjunto y traga el caption (QA #77 addendum)', () => {
+  for (const type of ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime', 'image/gif', 'audio/mpeg', 'application/pdf']) {
     assert.equal(canViewOnce({type}), false, type);
   }
-  const photo = {name:'private.jpg', type:'image/jpeg'};
-  assert.equal(uploadPayload(photo, 'AQID', '', '', 'source', true).viewOnce, true);
-  assert.equal('viewOnce' in uploadPayload(photo, 'AQID'), false);
+  // Nadie pasa viewOnce=true (el botón no se pinta); el payload nunca sale con el campo.
+  assert.equal('viewOnce' in uploadPayload({name:'private.jpg', type:'image/jpeg'}, 'AQID', 'hola'), false);
 });
 
 test('Safari recordings with AAC codec parameters can be staged', () => {
@@ -71,10 +67,10 @@ test('upload quality is chosen per account for still images and captured in the 
   const values = new Map([['wa-media-upload-quality', JSON.stringify({personal:'hd', secondary:'standard'})]]);
   const storage = {getItem: key => values.get(key) || null};
   const photo = {name:'foto.jpg', type:'image/jpeg'};
-  // QA #93: el conector vivo rechaza quality; la app manda 'source' (sin campo) pase lo que pase la preferencia.
-  for (const account of ['personal', 'secondary', 'other']) {
-    assert.equal(readUploadQuality(storage, account, photo), 'source', account);
-  }
+  // QA #93 cerrado en producción (22-10): el conector vivo acepta quality; la preferencia manda.
+  assert.equal(readUploadQuality(storage, 'personal', photo), 'hd');
+  assert.equal(readUploadQuality(storage, 'secondary', photo), 'standard');
+  assert.equal(readUploadQuality(storage, 'other', photo), 'standard');
   assert.equal(readUploadQuality(storage, 'personal', {name:'clip.mp4', type:'video/mp4'}), 'source');
   assert.equal(readUploadQuality(storage, 'personal', {name:'anim.gif', type:'image/gif'}), 'source');
   assert.equal(readUploadQuality(storage, 'personal', {name:'file.pdf', type:'application/pdf'}), 'source');
@@ -89,4 +85,16 @@ test('upload quality is chosen per account for still images and captured in the 
 test('el diálogo de adjuntos no filtra por extensión (QA #91)', async () => {
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(app, /\$\('attachment'\)\.accept = '';/);
+});
+// QA #113: la proyección del outbox lleva el adjunto (antes el pendiente se pintaba sin él).
+test('el pendiente del outbox proyecta su adjunto (QA #113)', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /attachments: \[\{name: item\.file\?\.name \|\| item\.fileName, mimeType: item\.file\?\.type \|\| '', size: item\.file\?\.size, pending: true\}\]/);
+  assert.match(app, /text: item\.text \|\| ''/);
+});
+
+test('varios adjuntos de un mismo envío salen a la vez, no en serie (QA #122)', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /async function sendPlannedMessages\(items\) \{\n(?:.*\n)*?\s*await Promise\.all\(items\.map\(async item => \{/);
+  assert.doesNotMatch(app, /async function sendPlannedMessages\(items\) \{\n\s*for \(const item of items\)/);
 });

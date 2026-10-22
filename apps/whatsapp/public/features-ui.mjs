@@ -486,12 +486,14 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
   return { load, dispose: () => { disposed = true; version += 1; clearScheduled(); } };
 }
 
-function field(documentRef, label, type = 'text', name = '', value = '') {
+function field(documentRef, label, type = 'text', name = '', value = '', placeholder = '') {
   const wrapper = makeElement(documentRef, 'label', 'feature-field');
   wrapper.append(makeElement(documentRef, 'span', '', label));
   const input = makeElement(documentRef, type === 'textarea' ? 'textarea' : 'input', '', type === 'textarea' ? undefined : '');
   input.name = name;
   input.value = value;
+  // UX #43.1: los campos de teléfono piden el pad numérico y enseñan el formato.
+  if (placeholder) input.placeholder = placeholder;
   if (type !== 'textarea') input.type = type;
   if (type === 'textarea') input.rows = 3;
   wrapper.append(input);
@@ -508,13 +510,32 @@ function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+// QA #107: los tres formularios de creación hacían `return` a secas con el
+// formulario vacío; el motivo se pinta aquí, en un punto, no en tres.
+function formValidator(documentRef, form) {
+  const error = makeElement(documentRef, 'p', 'feature-form-error');
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+  form.append(error);
+  return message => {
+    error.textContent = message || '';
+    error.hidden = !message;
+  };
+}
+
 function initials(value) {
   const parts = text(value).trim().split(/\s+/).filter(Boolean);
   return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : parts[0]?.slice(0, 2) || 'S').toUpperCase();
 }
 
 function messageText(message) {
-  return text(message?.text || message?.content).trim() || (array(message?.attachments).length ? 'Archivo adjunto' : 'Mensaje no disponible');
+  // Nit QA 22-10: la oficial distingue el adjunto citado por tipo; «Archivo adjunto»
+  // solo queda para lo que no se reconozca.
+  const attachment = array(message?.attachments)[0];
+  const type = text(attachment?.type || attachment?.fileType || attachment?.file_type).toLowerCase();
+  const kind = type.startsWith('video') ? 'Vídeo' : type.startsWith('audio') ? 'Audio'
+    : type === 'sticker' ? 'Sticker' : type.startsWith('image') ? 'Foto' : type === 'document' ? 'Documento' : 'Archivo adjunto';
+  return text(message?.text || message?.content).trim() || (array(message?.attachments).length ? kind : 'Mensaje no disponible');
 }
 
 function mediaUrl(item, baseUrl = 'http://localhost/') {
@@ -612,9 +633,36 @@ export function installFeatureUI({
 
   function prefs() { return store.read(runtime.account); }
 
+  // QA #84 (22-10): cada filtro enseña cuántos chats muestra. chatFilter es cliente (app.js),
+  // así que el array cargado siempre es completo — el recuento no cuesta un refetch.
+  const VIEW_FILTERS = [['Todos', 'all'], ['No leídos', 'unread'], ['Grupos', 'groups'], ['Chats destacados', 'favorites'], ['Destacados', 'starred']];
+  let filterChats = [];
+
+  function updateFilterCounts() {
+    if (!filterChats.length) return;
+    const local = prefs();
+    const counts = { starred: local.starredMessages.length };
+    for (const view of ['all', 'unread', 'groups', 'favorites', 'archived']) {
+      counts[view] = filterChats.filter(chat => matchesChatView(chat, view, local)).length;
+    }
+    for (const [label, view] of VIEW_FILTERS) {
+      const item = documentRef.querySelector(`[data-feature-view="${view}"]`);
+      if (!item) continue;
+      item.textContent = `${label} ${counts[view]}`;
+      item.setAttribute('aria-label', `${label}: ${counts[view]}`);
+    }
+    const entry = documentRef.getElementById('feature-archived-entry');
+    if (entry) {
+      const count = documentRef.getElementById('feature-archived-count');
+      if (count) count.textContent = ` ${counts.archived}`;
+      entry.setAttribute('aria-label', `Archivados: ${counts.archived}`);
+    }
+  }
+
   function savePrefs(updater) {
     const next = store.update(runtime.account, updater);
     runtime.currentView = next.view;
+    updateFilterCounts();
     return next;
   }
 
@@ -825,7 +873,11 @@ export function installFeatureUI({
     const avatar = node('span', 'feature-member-avatar');
     initialsAvatar(avatar, member.name || member.pushName || member.id, member.photoUrl || member.photo_url || member.avatarUrl);
     const copy = node('span', 'feature-member-copy');
-    copy.append(node('strong', '', member.name || member.pushName || member.id || 'Contacto'), node('small', '', member.id || 'Identidad no disponible'));
+    const memberName = member.name || member.pushName;
+    copy.append(node('strong', '', memberName || member.id || 'Contacto'));
+    // UX #32.1: sin nombre el dígito es lo único que identifica; con nombre, el
+    // JID/LID crudo sobra — la oficial nunca lo muestra.
+    if (!memberName && member.id) copy.append(node('small', '', member.id));
     if (bool(member.isAdmin) || bool(member.admin) || text(member.role).toLowerCase() === 'admin') copy.append(node('em', 'feature-admin', 'Administrador'));
     row.append(avatar, copy);
     const capabilities = info?.capabilities || {};
@@ -933,7 +985,7 @@ export function installFeatureUI({
       [chatIsArchived(info, prefs()) ? 'Desarchivar' : 'Archivar', 'archive'],
       [chatIsPinned(info, prefs()) ? 'Desfijar' : 'Fijar', 'pin'],
       [chatIsMuted(info, prefs()) ? 'Activar sonido' : 'Silenciar', 'mute'],
-      [chatIsFavorite(info, prefs()) ? 'Quitar de favoritos' : 'Añadir a favoritos', 'favorite'],
+      [chatIsFavorite(info, prefs()) ? 'Quitar chat destacado' : 'Destacar chat', 'favorite'],
       [Number(info.unread) > 0 || bool(info.unread) ? 'Marcar leído' : 'Marcar no leído', 'read'],
     ];
     for (const [label, action] of chatActions) {
@@ -996,7 +1048,7 @@ export function installFeatureUI({
 
   function openMemberForm() {
     const modal = openModal('Añadir miembro', { opener: documentRef.activeElement });
-    const address = field(documentRef, 'Número o identificador', 'text', 'memberId');
+    const address = field(documentRef, 'Número o identificador', 'tel', 'memberId', '', '+34 600 000 000');
     const submit = button(documentRef, 'Añadir', 'feature-button primary');
     submit.type = 'submit';
     const form = node('form', 'feature-form');
@@ -1011,11 +1063,6 @@ export function installFeatureUI({
     modal.body.append(form);
   }
 
-  function localGallery(kind) {
-    if (kind === 'links') return extractLinks(runtime.currentMessages);
-    return attachmentItems(runtime.currentMessages, kind);
-  }
-
   async function openGallery(kind) {
     const labels = { media: 'Fotos y vídeos', links: 'Enlaces', documents: 'Documentos' };
     const modal = openModal(labels[kind] || 'Galería', { wide: true });
@@ -1028,22 +1075,35 @@ export function installFeatureUI({
     modal.body.append(tabs, node('p', 'feature-loading', 'Cargando…'));
     let items = [];
     let cursor = null;
+    let loadError = null;
     const serverKind = kind === 'media' ? 'gallery' : kind;
     try {
       // QA #72: antes se pintaban los originales (9,2 MB/45 items) de una sola vez.
       const result = await request('/api/chats/media', undefined, { chat: runtime.chat, kind: serverKind, limit: 60 });
       items = array(result.items || result.media || result.results);
       cursor = result.nextCursor || null;
-    } catch {
-      items = localGallery(kind);
+    } catch (err) {
+      // QA #114: antes caía a localGallery (los mensajes cargados en pantalla) sin
+      // aviso → un 500 se parecía a «este chat tiene estos 4 elementos». Vacío + aviso.
+      loadError = err;
     }
     if (!runtime.modal || runtime.modal.body !== modal.body) return;
+    modal.body.querySelector('.feature-loading')?.remove();
+    if (loadError) {
+      modal.body.append(node('p', 'feature-muted', loadError.message || 'No se pudo cargar la galería.'));
+      const retry = button(documentRef, 'Reintentar', 'feature-button subtle');
+      retry.onclick = () => { closeModal(); openGallery(kind); };
+      modal.body.append(retry);
+      return;
+    }
     const list = node('div', `feature-gallery-grid ${kind === 'links' ? 'links' : ''}`);
     list.replaceChildren();
     if (!items.length) list.append(node('p', 'feature-muted', 'No hay elementos disponibles en este chat.'));
     const renderCard = item => {
-      const card = node('article', 'feature-gallery-card');
       const url = kind === 'links' ? safeWebUrl(item.url || item.href) : mediaUrl(item, windowRef?.location?.href || 'http://localhost/');
+      // QA #115.1: <a href> real → click medio, «copiar dirección» y destino en la barra
+      // de estado gratis; el Enter nativo cubre lo que hacía el role=link (QA #152).
+      const card = url ? node('a', 'feature-gallery-card') : node('article', 'feature-gallery-card');
       if (kind === 'media' && url && text(item.mimeType || item.mime_type).startsWith('image/')) {
         const image = node('img', '', text(item.name || 'Imagen'));
         // La rejilla usa el thumb (jpegThumbnail del payload); el original solo
@@ -1059,13 +1119,7 @@ export function installFeatureUI({
       copy.append(node('strong', '', item.name || item.fileName || item.file_name || item.title || item.url || 'Elemento'));
       if (item.timestamp) copy.append(node('small', '', new Date(item.timestamp).toLocaleDateString('es-ES')));
       card.append(copy);
-      // shortcut: role=link sin <a> no da click medio ni «abrir en pestaña»;
-      // el teclado sí queda cubierto. Si se pide, migrar la tarjeta a <a href>.
-      if (url) {
-        const open = () => windowRef?.open?.(url, '_blank', 'noopener,noreferrer');
-        card.setAttribute('role', 'link'); card.tabIndex = 0; card.onclick = open;
-        card.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } };
-      }
+      if (url) { card.href = url; card.target = '_blank'; card.rel = 'noopener noreferrer'; }
       list.append(card);
     };
     items.forEach(renderCard);
@@ -1260,6 +1314,8 @@ export function installFeatureUI({
         bubble.append(action);
       }
       action.onclick = event => { event.stopPropagation(); openMessageActions(message, event); };
+      // QA #59 addendum: clic derecho en la burbuja → el mismo menú (la oficial).
+      bubble.oncontextmenu = event => { event.preventDefault(); openMessageActions(message, event); };
       const quoted = bubble.querySelector('.message-reply-reference[data-reply-to-message-id]');
       if (quoted) quoted.onclick = async event => {
         event.stopPropagation();
@@ -1349,6 +1405,9 @@ export function installFeatureUI({
         if (!result) return;
         sent += 1;
       }
+      // QA #116: reenviar al chat abierto no refrescaba el transcript (solo el eco SSE
+      // tardío lo traía); el refresco diferido de la casa (QA #80) lo pinta en ~2,5 s.
+      if (sent && targetChat === source.chat) refetchAfterEcho();
       if (sent) { toast(`${sent} mensaje${sent === 1 ? '' : 's'} reenviado${sent === 1 ? '' : 's'}.`, 'success'); runtime.selectedMessageIds.clear(); closeModal(); enhanceMessages(); }
     };
     modal.body.append(form, node('p', 'feature-muted', 'La entrega depende de la confirmación del proveedor.'));
@@ -1371,10 +1430,11 @@ export function installFeatureUI({
     modal.body.append(form);
   }
 
-  function openDelete(message) {
+  function openDelete(message, mine = true) {
     const modal = openModal('Eliminar mensaje', { opener: documentRef.activeElement });
-    modal.body.append(node('p', '', 'Elige si quieres quitar el mensaje solo de tu historial o solicitar su eliminación para todos.'));
-    const scope = documentRef.createElement('select'); scope.setAttribute('aria-label', 'Alcance del borrado'); scope.append(option(documentRef, 'Eliminar para mí', 'me'), option(documentRef, 'Eliminar para todos', 'everyone'));
+    // UX #36.1: en un mensaje ajeno solo existe «para mí» (como la oficial); «para todos» es solo de los propios.
+    modal.body.append(node('p', '', mine ? 'Elige si quieres quitar el mensaje solo de tu historial o solicitar su eliminación para todos.' : 'El mensaje solo se quita de tu historial; tus contactos lo seguirán viendo.'));
+    const scope = documentRef.createElement('select'); scope.setAttribute('aria-label', 'Alcance del borrado'); scope.append(option(documentRef, 'Eliminar para mí', 'me'), ...(mine ? [option(documentRef, 'Eliminar para todos', 'everyone')] : []));
     const confirm = button(documentRef, 'Eliminar', 'feature-button danger');
     confirm.onclick = async () => { const result = await mutate('/api/messages/delete', { messageId: message.id, scope: scope.value }, { refreshMessages: true, success: 'Mensaje eliminado.' }); if (result) closeModal(); };
     modal.body.append(scope, confirm);
@@ -1470,6 +1530,9 @@ export function installFeatureUI({
     if (message.fromMe === true) {
       add('Editar', item => { closeModal(); openEdit(item); });
       add('Eliminar', item => { closeModal(); openDelete(item); }, 'feature-button danger');
+    } else {
+      // UX #36.1: los ajenos se pueden quitar del propio historial (el servidor ya lo admite: allowRevoked scope=me).
+      add('Eliminar para mí', item => { closeModal(); openDelete(item, false); }, 'feature-button danger');
     }
     modal.body.append(actions);
     actions.firstElementChild?.focus();
@@ -1564,6 +1627,8 @@ export function installFeatureUI({
     else branch('Silenciar notificaciones', [
       ['8 horas', () => perform('mute', { muted: true }, { durationMs: 8 * 60 * 60 * 1000 })],
       ['1 semana', () => perform('mute', { muted: true }, { durationMs: 7 * 24 * 60 * 60 * 1000 })],
+      // QA #101 (22-10): la oficial da 8 h / 1 semana / 1 año; faltaba la larga.
+      ['1 año', () => perform('mute', { muted: true }, { durationMs: 365 * 24 * 60 * 60 * 1000 })],
       // UX #26.1: sin durationMs el puente del conector silencia sin fin (controller.ts:2100).
       ['Siempre', () => perform('mute', { muted: true })],
     ]);
@@ -1572,7 +1637,7 @@ export function installFeatureUI({
     const unread = Number(chat.unread) > 0 || chat.unread === true;
     add(actions, unread ? 'Marcar como leído' : 'Marcar como no leído', () => perform(unread ? 'read' : 'unread', { unread: unread ? 0 : 1 }));
     const favorite = chatIsFavorite(chat, prefs());
-    add(actions, favorite ? 'Quitar de favoritos' : 'Añadir a favoritos', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
+    add(actions, favorite ? 'Quitar chat destacado' : 'Destacar chat', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
     const lists = prefs().lists.filter(list => !list.chatIds.includes(chat.id));
     branch('Añadir a la lista', [
       ...lists.map(list => [list.name, () => perform('list', null, { list: list.name, id: chat.id }, '/api/lists')]),
@@ -1677,7 +1742,7 @@ export function installFeatureUI({
     add(chatIsArchived(runtime.selectedChat, prefs()) ? 'Desarchivar' : 'Archivar', () => openChatAction('archive'));
     add(chatIsPinned(runtime.selectedChat, prefs()) ? 'Desfijar' : 'Fijar', () => openChatAction('pin'));
     add(chatIsMuted(runtime.selectedChat, prefs()) ? 'Activar sonido' : 'Silenciar', () => openChatAction('mute'));
-    add(chatIsFavorite(runtime.selectedChat, prefs()) ? 'Quitar de favoritos' : 'Añadir a favoritos', () => openChatAction('favorite'));
+    add(chatIsFavorite(runtime.selectedChat, prefs()) ? 'Quitar chat destacado' : 'Destacar chat', () => openChatAction('favorite'));
     add('Listas', openLists);
     add('Privacidad', openPrivacy);
     add('Exportar chat', openChatExport);
@@ -1722,7 +1787,9 @@ export function installFeatureUI({
   }
 
   function openLists() {
-    const modal = openModal('Favoritos y listas', { wide: true });
+    // UX #33.1: el panel solo contiene listas; los mensajes destacados tienen su
+    // propia vista (chip «Destacados»). «Favoritos» era una promesa vacía.
+    const modal = openModal('Listas', { wide: true });
     const account = runtime.account;
     const current = prefs();
     const form = node('form', 'feature-form');
@@ -1746,12 +1813,14 @@ export function installFeatureUI({
       } catch (error) { if (runtime.account === account) showError(error); }
       finally { if (runtime.account === account && runtime.modal?.body === modal.body) submit.disabled = false; }
     };
-    modal.body.append(form, node('p', 'feature-muted', 'Las listas se guardan para esta cuenta en SocialMedia.'));
-    const refresh = button(documentRef, 'Actualizar listas', 'feature-button subtle');
-    refresh.onclick = async () => { await refreshLists(account); if (runtime.account === account && runtime.modal?.body === modal.body) { closeModal(); openLists(); } };
-    modal.body.append(refresh);
+    // UX #33.2: la frase interpolada se leía cortada; el nombre de la app va entre paréntesis.
+    modal.body.append(form, node('p', 'feature-muted', 'Las listas se guardan en esta cuenta (SocialMedia).'));
     addSection(modal.body, 'Listas guardadas');
     if (!current.lists.length) modal.body.append(node('p', 'feature-muted', 'Todavía no hay listas.'));
+    // UX #33.3: el refresco manual va discreto, al final, sin competir con «Crear lista».
+    const refresh = button(documentRef, 'Actualizar', 'feature-button subtle');
+    refresh.onclick = async () => { await refreshLists(account); if (runtime.account === account && runtime.modal?.body === modal.body) { closeModal(); openLists(); } };
+    modal.body.append(refresh);
     for (const list of current.lists) {
       const row = node('div', 'feature-list-row'); row.append(node('strong', '', list.name), node('span', 'feature-muted', `${list.chatIds.length} chats`));
       const show = button(documentRef, 'Ver', 'feature-button subtle');
@@ -1796,7 +1865,7 @@ export function installFeatureUI({
       if (!isCurrent()) return;
       container.querySelector('.feature-load-more')?.remove();
       const items = array(result.items);
-      if (!items.length && !before) { container.replaceChildren(node('p', 'feature-muted', 'No hay mensajes destacados.')); return; }
+      if (!items.length && !before) { container.replaceChildren(node('p', 'feature-muted', 'Aún no has destacado ningún mensaje. Abre el menú «⋯» de un mensaje y elige «Destacar».')); return; }
       for (const item of items) {
         const row = button(documentRef, '', 'feature-search-result');
         row.append(node('strong', '', item.chatName || item.chatId || 'Conversación'), node('span', '', messageText(item)));
@@ -1815,14 +1884,16 @@ export function installFeatureUI({
     const modal = openModal('Nuevo contacto', { wide: true });
     const form = node('form', 'feature-form');
     const name = field(documentRef, 'Nombre', 'text', 'name');
-    const address = field(documentRef, 'Número o identificador', 'text', 'address');
+    const address = field(documentRef, 'Número o identificador', 'tel', 'address', '', '+34 600 000 000');
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
     form.append(name.wrapper, address.wrapper, submit);
+    const showError = formValidator(documentRef, form);
     form.onsubmit = async event => {
       event.preventDefault();
       const values = formData(form);
-      if (!values.name?.trim() || !values.address?.trim()) return;
+      if (!values.name?.trim() || !values.address?.trim()) { showError('Indica el nombre y el número o identificador.'); return; }
+      showError('');
       const result = await mutate('/api/contacts', { phone: values.address.trim(), displayName: values.name.trim() }, { refreshChats: true, success: 'Operación confirmada.', includeChat: false });
       if (result?.confirmed) closeModal();
     };
@@ -1833,15 +1904,17 @@ export function installFeatureUI({
     const modal = openModal('Nuevo grupo', { wide: true });
     const form = node('form', 'feature-form');
     const name = field(documentRef, 'Nombre', 'text', 'name');
-    const members = field(documentRef, 'Miembros (separados por comas)', 'text', 'members');
+    const members = field(documentRef, 'Miembros (separados por comas, p. ej. +34600112233)', 'text', 'members', '', '+34600112233, +34600112244');
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
     form.append(name.wrapper, members.wrapper, submit);
+    const showError = formValidator(documentRef, form);
     form.onsubmit = async event => {
       event.preventDefault();
       const values = formData(form);
-      const payload = { name: values.name.trim(), participants: values.members.split(',').map(item => item.trim()).filter(Boolean) };
-      if (!payload.name || !payload.participants.length) return;
+      const payload = { name: values.name.trim().slice(0, 100), participants: values.members.split(',').map(item => item.trim()).filter(Boolean) };
+      if (!payload.name || !payload.participants.length) { showError('Indica el nombre del grupo y al menos un miembro.'); return; }
+      showError('');
       const result = await mutate('/api/groups', payload, { refreshChats: true, success: 'Operación confirmada.', includeChat: false });
       const chat = result?.chat || result?.conversation;
       if (chat) { closeModal(); selectChat(chat); }
@@ -1858,10 +1931,12 @@ export function installFeatureUI({
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
     form.append(subject.wrapper, description.wrapper, submit);
+    const showError = formValidator(documentRef, form);
     form.onsubmit = async event => {
       event.preventDefault();
       const values = formData(form);
-      if (!values.subject?.trim()) return;
+      if (!values.subject?.trim()) { showError('Indica el nombre de la comunidad.'); return; }
+      showError('');
       const payload = { subject: values.subject.trim().slice(0, 100) };
       if (values.description?.trim()) payload.description = values.description.trim();
       const result = await mutate('/api/communities', payload, { refreshChats: true, success: 'Comunidad creada.', includeChat: false });
@@ -1906,11 +1981,11 @@ export function installFeatureUI({
     return runtime.contactDirectory;
   }
 
-  function openNewChat(initialType = 'chat') {
+  function openNewChat(initialType = 'chat', query = '') {
     closeModal();
     if (initialType === 'group') { newGroupForm(); return; }
     if (initialType === 'contact') { newContactForm(); return; }
-    contactDirectory()?.open({ opener: documentRef.activeElement });
+    contactDirectory()?.open({ opener: documentRef.activeElement, query });
   }
 
   function openPicker(initial = 'emoji') {
@@ -2023,7 +2098,7 @@ export function installFeatureUI({
       return;
     }
     const form = node('form', 'feature-form');
-    const fields = [field(documentRef, 'Nombre', 'text', 'name'), field(documentRef, 'Número o identificador', 'text', 'address')];
+    const fields = [field(documentRef, 'Nombre', 'text', 'name'), field(documentRef, 'Número o identificador', 'tel', 'address', '', '+34 600 000 000')];
     const submit = button(documentRef, 'Enviar contacto', 'feature-button primary');
     submit.type = 'submit';
     for (const item of fields) form.append(item.wrapper); form.append(submit);
@@ -2057,13 +2132,19 @@ export function installFeatureUI({
       const result = await request('/api/blocked-contacts', undefined, { account: scope.account, chat: '' });
       if (!isCurrent()) return;
       if (result.account !== scope.account || result.confirmed !== true || !Array.isArray(result.contacts)) throw new Error('Lista no confirmada por WhatsApp.');
-      notice.textContent = result.contacts.length ? `${result.contacts.length} contacto${result.contacts.length === 1 ? '' : 's'} bloqueado${result.contacts.length === 1 ? '' : 's'}.` : 'No hay contactos bloqueados.';
       search.hidden = result.contacts.length === 0;
       let visibleCount = 100;
       const render = () => {
         list.replaceChildren();
         const needle = search.value.trim().toLocaleLowerCase();
         const matches = result.contacts.filter(contact => `${text(contact?.name)} ${text(contact?.jid)}`.toLocaleLowerCase().includes(needle));
+        // QA #105: el aviso cuenta lo que se ve, no lo que hay; con filtro sin
+        // coincidencias la lista vacía necesita decirlo.
+        notice.textContent = needle
+          ? (matches.length
+            ? `${matches.length} de ${result.contacts.length} contactos bloqueados coinciden con la búsqueda.`
+            : 'Ningún contacto bloqueado coincide con esta búsqueda.')
+          : (result.contacts.length ? `${result.contacts.length} contacto${result.contacts.length === 1 ? '' : 's'} bloqueado${result.contacts.length === 1 ? '' : 's'}.` : 'No hay contactos bloqueados.');
         showMore.hidden = matches.length <= visibleCount;
         for (const contact of matches.slice(0, visibleCount)) {
         const jid = text(contact?.jid).trim();
@@ -2221,6 +2302,8 @@ export function installFeatureUI({
   }
 
   function chatListChanged(chats) {
+    filterChats = array(chats);
+    updateFilterCounts();
     const account = runtime.account;
     const firstSnapshot = !runtime.notificationSnapshots.has(account);
     if (firstSnapshot) runtime.notificationSnapshots.set(account, Date.now());
@@ -2286,11 +2369,11 @@ export function installFeatureUI({
     const sidebarHeader = documentRef.querySelector('.chat-sidebar-header');
     const sidebarActions = node('div', 'chat-sidebar-actions');
     const newChat = button(documentRef, '+', 'sidebar-action sidebar-action-new'); newChat.id = 'feature-new-chat'; newChat.setAttribute('aria-label', 'Nuevo chat'); newChat.title = 'Nuevo chat'; newChat.onclick = () => openNewChat();
-    const lists = button(documentRef, '☆', 'sidebar-action sidebar-action-favorites'); lists.id = 'feature-lists'; lists.setAttribute('aria-label', 'Favoritos y listas'); lists.title = 'Favoritos y listas'; lists.onclick = openLists;
+    const lists = button(documentRef, '☆', 'sidebar-action sidebar-action-favorites'); lists.id = 'feature-lists'; lists.setAttribute('aria-label', 'Listas'); lists.title = 'Listas'; lists.onclick = openLists;
     sidebarActions.append(newChat, lists); sidebarHeader?.append(sidebarActions);
     const search = documentRef.querySelector('.chat-sidebar > .search');
     const views = node('nav', 'feature-view-nav'); views.setAttribute('aria-label', 'Vistas de conversaciones');
-    for (const [label, view] of [['Todos', 'all'], ['No leídos', 'unread'], ['Grupos', 'groups'], ['Favoritos', 'favorites'], ['Destacados', 'starred']]) {
+    for (const [label, view] of VIEW_FILTERS) {
       const item = button(documentRef, label, 'feature-view-button'); item.dataset.featureView = view; item.setAttribute('aria-pressed', String(runtime.currentView === view)); item.onclick = () => setView(view); views.append(item);
     }
     search?.after(views);
@@ -2300,6 +2383,7 @@ export function installFeatureUI({
     sidebarHeader?.after(archiveTitle);
     const archiveEntry = button(documentRef, 'Archivados', 'feature-archive-entry'); archiveEntry.id = 'feature-archived-entry'; archiveEntry.setAttribute('aria-pressed', String(runtime.currentView === 'archived'));
     const archiveIcon = node('span', 'feature-archive-icon', '▤'); archiveIcon.setAttribute('aria-hidden', 'true'); archiveEntry.prepend(archiveIcon);
+    const archiveCount = node('span', 'feature-archive-count'); archiveCount.id = 'feature-archived-count'; archiveEntry.append(archiveCount);
     archiveEntry.onclick = () => setView('archived');
     views.after(archiveEntry);
     const archiveHint = node('p', 'feature-archive-hint', 'Estos chats permanecen archivados y no aparecen en la lista principal.'); archiveHint.id = 'feature-archived-hint'; archiveHint.hidden = true;
@@ -2529,6 +2613,8 @@ export function installFeatureUI({
     setView,
     isFeatureView: () => runtime.currentView,
     starredView: renderStarredView,
+    // QA #125: la lista ofrece «Chatear con +NNN» y aterriza en el directorio filtrado.
+    openNewChat,
     getState: () => ({ ...runtime, selectedMessageIds: new Set(runtime.selectedMessageIds) }),
   };
 }

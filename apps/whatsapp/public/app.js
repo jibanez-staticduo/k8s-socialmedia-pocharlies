@@ -7,12 +7,13 @@ const recoveryReady = import('./history-recovery.mjs').then(module => {
   historyRecoveryWaitMs = module.HISTORY_RECOVERY_WAIT_MS;
 });
 let mergeMessages;
+let compareMessages;
 let mergeRecentMessages;
 let pinnedFirst;
 let shouldSubmitMessageKey;
 let visibleOutgoingMessages;
 const historyReady = import('./chat-history.mjs').then(module => {
-  ({mergeMessages, mergeRecentMessages, pinnedFirst, shouldSubmitMessageKey, visibleOutgoingMessages} = module);
+  ({mergeMessages, compareMessages, mergeRecentMessages, pinnedFirst, shouldSubmitMessageKey, visibleOutgoingMessages} = module);
 });
 const $ = id => document.getElementById(id);
 function safeLocalStorage() { try { return globalThis.localStorage; } catch { return null; } }
@@ -229,7 +230,16 @@ function query(path, extra = {}) { return `${path}?${new URLSearchParams({accoun
 function context() { return {account: state.account, chat: state.chat, version: state.version}; }
 function current(ctx) { return ctx.version === state.version && ctx.account === state.account && ctx.chat === state.chat; }
 function updateControls() { const disabled = !state.account || !state.chat || !state.sending; for (const id of ['message', 'attach', 'record', 'send']) $(id).disabled = disabled; const emoji = $('feature-emoji'); if (emoji) emoji.disabled = disabled; const suggest = $('suggest'); suggest.disabled = !state.account || !state.chat || state.suggesting || state.busy; suggest.setAttribute('aria-busy', String(state.suggesting)); suggest.classList.toggle('is-busy', state.suggesting); $('record').disabled ||= state.busy || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder; $('sending-notice').hidden = state.sending; }
-function setTheme(value) { const theme = value === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : value; document.body.dataset.theme = theme; try { localStorage.setItem('wa-theme', value); } catch {} }
+// QA #108: data-theme también en <html> (la scrollbar y los controles nativos se pintan por el
+// root; body{color-scheme} no llega ahí) y el meta theme-color sigue al tema (en móvil claro la
+// barra del navegador salía oscura sobre una app beige).
+function setTheme(value) {
+  const theme = value === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : value;
+  document.body.dataset.theme = document.documentElement.dataset.theme = theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = theme === 'light' ? '#efeae2' : '#161717';
+  try { localStorage.setItem('wa-theme', value); } catch {}
+}
 try { const storedTheme = localStorage.getItem('wa-theme'); $('theme').value = ['dark', 'light', 'system'].includes(storedTheme) ? storedTheme : 'dark'; } catch { $('theme').value = 'dark'; }
 setTheme($('theme').value); $('theme').onchange = () => setTheme($('theme').value); matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTheme($('theme').value));
 function chatFilterValue() { return state.chatFilter; }
@@ -276,9 +286,15 @@ function renderChats() {
   sidebarSearch?.viewChanged(archivedView);
   // UX #6.1: el buscador filtra también dentro de Archivados (antes se vaciaba).
   const search = foldSearch($('search').value.trim());
+  // QA #125 (22-10): un término todo dígitos busca también por el número del chat
+  // (id de conversación o waChatId), no solo por el texto pintado.
+  const term = $('search').value.trim();
+  const digits = term.replace(/\D/g, '');
+  const numeric = /^\+?[\d\s]{5,}$/.test(term);
+  const numberMatches = chat => numeric && [chat.id, chat.waChatId].some(value => String(value ?? '').replace(/\D/g, '').includes(digits));
   const filter = chatFilterValue();
   state.chatFilter = filter;
-  const chats = pinnedFirst(state.chats.filter(chat => chatMatchesFilter(chat, filter) && foldSearch(`${chat.name || ''} ${chat.preview || ''}`).includes(search)));
+  const chats = pinnedFirst(state.chats.filter(chat => chatMatchesFilter(chat, filter) && (foldSearch(`${chat.name || ''} ${chat.preview || ''}`).includes(search) || numberMatches(chat))));
   $('chat-count').textContent = String(state.chats.length);
   // QA #74: la pestaña no avisaba de los no leídos (title fijo «SocialMedia»).
   const unreadTotal = state.chats.reduce((sum, chat) => sum + (chat.unread === true ? 1 : Math.max(0, Number(chat.unread) || 0)), 0);
@@ -302,8 +318,8 @@ function renderChats() {
     // QA 22-10: el favorito se filtraba pero no se veía en la fila de «Todos».
     if (featureUI?.isChatFavorite?.(chat) || chat.favorite === true || chat.isFavorite === true) {
       const fav = node('span', 'chat-fav');
-      fav.setAttribute('aria-label', 'Chat en favoritos');
-      fav.title = 'Chat en favoritos';
+      fav.setAttribute('aria-label', 'Chat destacado');
+      fav.title = 'Chat destacado';
       nameRow.append(fav);
     }
     if (chat.muted === true || chat.isMuted === true) {
@@ -319,7 +335,9 @@ function renderChats() {
     // UX #4.5: el nombre accesible de la fila se derivaba del DOM y la elipsis CSS
     // no oculta el texto al lector de pantalla: filas con mensajes largos =
     // etiquetas de párrafos enteros. Nombre + previsualización truncados a 120.
-    const rowLabel = `${chat.name || chat.id}: ${chat.preview || 'Sin mensajes disponibles'}`;
+    // QA #101 (22-10): el aria-label del botón manda sobre el badge interior, así que
+    // el silencio debe ir en la etiqueta de la fila o un lector la lee igual que una normal.
+    const rowLabel = `${chat.name || chat.id}: ${chat.preview || 'Sin mensajes disponibles'}${chat.muted === true || chat.isMuted === true ? ' · Silenciado' : ''}`;
     button.setAttribute('aria-label', rowLabel.length > 120 ? `${rowLabel.slice(0, 120)}…` : rowLabel);
     // QA #75: click con ratón (detail ≥1) no roba foco; Enter/espacio (detail 0)
     // abre y deja el cursor en el composer, como la oficial.
@@ -351,7 +369,18 @@ function renderChats() {
     row.append(button, menu, ...quicks);
     $('chats').append(row);
   }
-  $('chat-status').textContent = !state.chats.length ? (filter === 'archived' ? 'No hay chats archivados.' : 'Todavía no hay chats sincronizados para esta cuenta.') : !chats.length ? (filter === 'favorites' ? 'Aún no hay favoritos. Marca uno desde «⌄» en cualquier chat.' : 'No hay conversaciones que coincidan.') : '';
+  // QA #125: un número sin coincidencia en el listado no es un callejón — ofrece abrir
+  // el chat con ese número (el directorio ya sabe empezar chats por teléfono).
+  if (numeric && !chats.length && state.chats.length) {
+    const offer = node('button', 'chat-item');
+    offer.type = 'button';
+    offer.textContent = `Chatear con +${digits}`;
+    offer.onclick = () => featureUI?.openNewChat?.('chat', digits);
+    $('chats').append(offer);
+  }
+  // UX #39.2: cada filtro vacío enseña qué le falta y dónde se marca (la oficial).
+  const emptyFilters = {favorites: 'Aún no has destacado ningún chat. Toca «⌄» en cualquier chat y elige «Destacar chat».', unread: 'No tienes chats sin leer.', groups: 'Todavía no compartes ningún grupo.'};
+  $('chat-status').textContent = !state.chats.length ? (filter === 'archived' ? 'No hay chats archivados.' : 'Todavía no hay chats sincronizados para esta cuenta.') : !chats.length ? (emptyFilters[filter] || 'No hay conversaciones que coincidan.') : '';
 }
 const chatLoads = new Map();
 const chatCache = new Map();
@@ -482,7 +511,12 @@ function renderMessages() {
   const first = !state.signature;
   const remote = state.messages;
   const pending = visibleOutgoingMessages(remote, outgoingFor(state.account, state.chat));
-  const visible = remote.concat(pending.map(item => ({id: item.id, text: item.text || item.file?.name || item.fileName || '', fromMe: true, timestamp: item.timestamp, replyToMessageId: item.replyTo || null})));
+  // QA #113: el pendiente se pintaba sin adjunto (la proyección no llevaba attachments).
+  // Ahora la tarjeta «Enviando…» del renderer muestra el nombre; el texto del pie no
+  // duplica el nombre (antes caía a item.file.name como texto).
+  // QA 22-10: sort con compareMessages — un pendiente/fallido del outbox no debe quedar colgado
+  // por debajo de mensajes posteriores (se añadía al final sin mirar su timestamp).
+  const visible = remote.concat(pending.map(item => ({id: item.id, text: item.text || '', fromMe: true, timestamp: item.timestamp, replyToMessageId: item.replyTo || null, ...(item.file || item.fileName ? {attachments: [{name: item.file?.name || item.fileName, mimeType: item.file?.type || '', size: item.file?.size, pending: true}]} : {})}))).sort(compareMessages);
   const signature = JSON.stringify([visible, pending.map(item => [item.id, item.state])]);
   if (signature === state.signature) return;
   state.signature = signature;
@@ -925,14 +959,17 @@ $('composer').onsubmit = event => {
   void sendPlannedMessages(items);
 };
 async function sendPlannedMessages(items) {
-  for (const item of items) {
+  // QA #122 (22-10): en serie, 3 fotos del mismo acto tardaban ~34 s (huecos de 23 s).
+  // sendOptimistic no lanza (devuelve false), así que el Promise.all no traga errores.
+  // shortcut: el orden de llegada puede barajarse; el orden garantizado es el álbum (#236).
+  await Promise.all(items.map(async item => {
     if (item.file) {
       await sendOptimistic(item, '/api/upload', async () => attachmentTools.uploadPayload(item.file, await base64(item.file), item.caption, item.replyTo, item.quality, item.viewOnce));
     } else {
       const replyTo = item.replyTo;
       await sendOptimistic(item, replyTo ? '/api/messages/reply' : '/api/send', {text: item.text, ...(replyTo ? {replyTo, messageId: replyTo} : {})});
     }
-  }
+  }));
 }
 function enterToSendEnabled() { return safeLocalStorage()?.getItem('wa-enter-to-send') !== 'false'; }
 function updateMessageComposerHint(enabled = enterToSendEnabled()) {
@@ -950,11 +987,16 @@ function updateMessageComposerHint(enabled = enterToSendEnabled()) {
 updateMessageComposerHint();
 document.addEventListener('wa:enter-to-send-change', event => updateMessageComposerHint(event.detail?.enabled ?? enterToSendEnabled()));
 $('message').onkeydown = event => {
-  if (event.keyCode !== 229 && shouldSubmitMessageKey(event, enterToSendEnabled(), false)) {
+  if (event.keyCode !== 229 && shouldSubmitMessageKey(event, enterToSendEnabled())) {
     event.preventDefault();
     $('composer').requestSubmit();
   }
 };
+// QA #111: escribir en árabe o hebreo debe empezar por la derecha, como en la oficial.
+void rendererReady.then(({ detectDirection }) => {
+  const composer = $('message');
+  composer.addEventListener('input', () => { composer.dir = detectDirection(composer.value); });
+});
 function base64(blob) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(new Error('No se pudo leer el archivo.')); reader.readAsDataURL(blob); }); }
 let pendingFiles = [];
 function renderStagedFiles() {
@@ -1101,7 +1143,12 @@ $('record').onclick = async () => {
     stopRecordingTracks(stream);
     if (tokenIsCurrent) state.recordingToken++;
     if (state.stream === stream) clearRecordingState();
-    if (current(ctx) && tokenIsCurrent) error(`No se pudo acceder al micrófono: ${err.message}`);
+    // QA #126 (22-10): el DOMException.message viene en inglés crudo (familia #76/#60);
+    // el motivo se traduce por err.name y el texto del navegador nunca se interpola.
+    if (current(ctx) && tokenIsCurrent) {
+      const reasons = {NotFoundError: 'no hay ningún micrófono conectado.', NotAllowedError: 'permiso denegado.', NotReadableError: 'el micrófono está ocupado.'};
+      error(`No se pudo acceder al micrófono: ${reasons[err?.name] || 'comprueba el micrófono del dispositivo.'}`);
+    }
   }
 };
 $('recording-stop').onclick = () => { if (state.recorder?.state === 'recording') state.recorder.stop(); }; $('recording-cancel').onclick = cancelRecording; $('recording-send').onclick = async () => { if (!state.blob || state.busy || !state.sending) return; const ctx = context(); const blob = state.blob; const token = state.recordingToken; state.recordingSendToken ||= crypto.randomUUID(); try { const data = await base64(blob); if (!current(ctx) || token !== state.recordingToken) return; await sendPayload('/api/upload', {name:`nota-de-voz.${blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'}`,mimeType:blob.type,data,voice:true,sendToken:state.recordingSendToken}, cancelRecording); } catch (err) { if (current(ctx)) error(err.message); } };
