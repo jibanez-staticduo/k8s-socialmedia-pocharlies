@@ -258,10 +258,19 @@ function chatAvatar(chat) {
   else avatar.textContent = chatInitials(chat);
   return avatar;
 }
+// UX #45.2: la inicial es un grapheme completo (una bandera son dos code points).
+// app.js es script clásico y no puede importar public/text-initials.mjs: mismo criterio aquí.
+const chatGraphemes = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter('es', {granularity: 'grapheme'}) : null;
+function chatGraphemesOf(value) {
+  return chatGraphemes ? [...chatGraphemes.segment(value)].map(grapheme => grapheme.segment) : [...value];
+}
 function chatInitials(chat) {
   const value = String(chat?.name || chat?.id || 'SocialMedia').trim();
   const parts = value.split(/\s+/).filter(Boolean);
-  return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : parts[0]?.slice(0, 2) || 'S').toLocaleUpperCase();
+  if (!parts.length) return 'S';
+  return (parts.length > 1
+    ? chatGraphemesOf(parts[0])[0] + chatGraphemesOf(parts[1])[0]
+    : chatGraphemesOf(parts[0]).slice(0, 2).join('')).toLocaleUpperCase();
 }
 function setConversationAvatar(chat = null) {
   const avatar = document.querySelector('.conversation-avatar');
@@ -384,6 +393,18 @@ function renderChats() {
 }
 const chatLoads = new Map();
 const chatCache = new Map();
+// Jordi 22-10 (criterio de Dani: sin pantallas de carga): la última lista de cada
+// ámbito se guarda en localStorage y se pinta al abrir, incluso tras F5.
+const CHATS_CACHE_PREFIX = 'wa-chats-cache-v1:';
+try {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(CHATS_CACHE_PREFIX)) chatCache.set(key.slice(CHATS_CACHE_PREFIX.length), {chats: JSON.parse(localStorage.getItem(key))});
+  }
+} catch { /* caché corrupta: se rellena de la red */ }
+function rememberChats(scope, chats) {
+  try { localStorage.setItem(CHATS_CACHE_PREFIX + scope, JSON.stringify(chats)); } catch { /* cuota: la memoria de la sesión basta */ }
+}
 async function loadChats({background = false} = {}) {
   if (!state.account || (background && state.chatLoading)) return;
   const account = state.account;
@@ -410,11 +431,12 @@ async function loadChats({background = false} = {}) {
       const {loadChatPages} = await import('./chat-directory.mjs');
       await loadChatPages({previous, isCurrent,
         fetchPage: cursor => api(`/api/chats?${new URLSearchParams({account, limit: '100', ...(archivedView ? {archived: 'only'} : {}), ...(cursor ? {cursor} : {})})}`),
-        onPage: (chats, hasMore) => {
+        onPage: chats => {
           state.chats = chats; state.chatListScope = scope; chatCache.set(scope, {chats});
+          rememberChats(scope, chats);
           featureUI?.chatsChanged?.(state.chats);
-          renderChats();
-          if (hasMore) $('chat-status').textContent = 'Cargando más conversaciones…';
+          // Jordi 22-10: sin aviso «Cargando más conversaciones…»: la lista ya está
+          // pintada y crece sola; el aviso era ruido sobre contenido útil.
         },
       });
     } catch (err) {
