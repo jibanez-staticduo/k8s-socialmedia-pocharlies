@@ -106,6 +106,22 @@ test('la pestaña avisa de los no leídos (QA #74)', async () => {
   const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
   assert.match(html, /<title>WhatsApp<\/title>/);
 });
+test('el buscador del listado pliega tildes como el servidor (QA #87)', async () => {
+  const src = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(src.includes("value.toLocaleLowerCase().normalize('NFD').replace(/\\p{Diacritic}/gu, '')"));
+  assert.ok(src.includes("foldSearch(`${chat.name || ''} ${chat.preview || ''}`).includes(search)"));
+});
+test('el composer corta antes del 400 de longitud y avisa (QA #60)', async () => {
+  const src = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(src, /\$\('message'\)\.maxLength = 20000/);
+  assert.match(src, /charCount\.id = 'char-count'; charCount\.hidden = true/);
+  assert.match(src, /counter\.hidden = length < 19000; counter\.textContent = `\$\{length\}\/20000`/);
+});
+test('arrastrar ficheros se señala mientras dura el arrastre (QA #85)', async () => {
+  const src = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(src, /dropZone\.classList\.add\('is-over'\)/);
+  assert.match(src, /addEventListener\('dragleave', \(\) => dropZone\.classList\.remove\('is-over'\)\)/);
+});
 test('QA #82: el avatar 404 de un chat se cachea y no se vuelve a pedir', async () => {
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(app, /const avatarFailures = new Set\(\)/);
