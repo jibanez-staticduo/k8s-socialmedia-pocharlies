@@ -62,6 +62,13 @@ test('composer Enter preference honors Shift, composition, keyboard shortcuts an
   assert.equal(shouldSubmitMessageKey(key(), true, true), false);
 });
 
+test('hay botón «ir abajo» cuando el chat está lejos del final (QA 22-10)', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /aria-label', 'Ir al final del chat'/);
+  assert.match(app, /scrollTo\(\{top: \$\('messages'\)\.scrollHeight, behavior: 'smooth'\}\)/);
+  assert.match(app, /scrollBottom\.hidden = !state\.chat \|\| pane\.scrollHeight - pane\.scrollTop - pane\.clientHeight < 300/);
+});
+
 test('el favorito se marca en la fila y Favoritos vacío explica cómo marcarlo (QA 22-10)', async () => {
   const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.match(app, /featureUI\?\.isChatFavorite\?\.\(chat\)/);
