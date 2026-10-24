@@ -14,9 +14,11 @@ class FakeDb implements MigrationClient {
   rollbacks = 0;
   failOnBody: string | null = null;
   settings: string[] = [];
+  queries: string[] = [];
 
   async query(sql: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }> {
     const s = sql.trim();
+    this.queries.push(s);
     if (/^BEGIN$/i.test(s)) {
       this.openTx = true;
       return { rows: [] };
@@ -273,6 +275,32 @@ describe('SKIRM-261: the run never queues behind a lock', () => {
       "SET LOCAL lock_timeout = '10s'",
       "SET LOCAL client_connection_check_interval = '5s'",
     ]);
+    const advisory = db.queries.findIndex(sql => sql.startsWith('SELECT pg_advisory_xact_lock'));
+    for (const setting of db.settings) expect(db.queries.indexOf(setting)).toBeLessThan(advisory);
+  });
+
+  it('executes published 037 with the chosen cap while recording its original checksum', async () => {
+    const previous = process.env.MIGRATE_LOCK_TIMEOUT;
+    process.env.MIGRATE_LOCK_TIMEOUT = '300ms';
+    try {
+      const db = new FakeDb();
+      await runMigrations(db);
+      const file = '037_messages_deleted_at_column.sql';
+      const original = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
+      const execution = db.executed.find(sql =>
+        sql.includes('ADD COLUMN IF NOT EXISTS deleted_at')
+      );
+      expect(execution).toContain("SET LOCAL lock_timeout = '300ms';");
+      expect(execution).not.toContain("SET LOCAL lock_timeout = '10s';");
+      expect(db.ledger.find(row => row.file === file)?.checksum).toBe(
+        createHash('sha256').update(original).digest('hex')
+      );
+      await runMigrations(db);
+      expect(db.commits).toBe(2);
+    } finally {
+      if (previous === undefined) delete process.env.MIGRATE_LOCK_TIMEOUT;
+      else process.env.MIGRATE_LOCK_TIMEOUT = previous;
+    }
   });
 
   it('accepts MIGRATE_LOCK_TIMEOUT only as a plain duration', () => {

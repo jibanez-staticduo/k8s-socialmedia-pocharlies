@@ -186,21 +186,22 @@ try {
   await clearAttachments();
 
   // Apply replaces only that attachment while caption + siblings hold.
-  // QA #77 addendum: sin «Ver una vez» (el control no se ofrece hasta que el conector lo soporte).
+  // The compatible edited image retains its view-once selection.
   await page.locator('#attachment').setInputFiles([
     {name:'lote.png', mimeType:'image/png', buffer:red},
     {name:'otro.gif', mimeType:'image/gif', buffer:gifBuffer},
   ]);
+  await page.locator('.composer-view-once').click();
   await page.locator('#message').fill('Leyenda del lote');
   await openEditor();
   await page.locator('#photo-rotate-right').click();
   await page.locator('#photo-editor-apply').click();
   await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
-  assert.equal(await page.locator('.composer-view-once').count(), 0, 'view-once control must not appear after edit');
+  assert.equal(await page.locator('.composer-view-once').count(), 1, 'compatible edited image keeps view-once control');
   await page.locator('#composer').evaluate(form => form.requestSubmit());
   await page.waitForFunction(n => document.querySelectorAll('#messages [data-send-state="confirmed"]').length >= n, 7);
   const lote = uploads.find(item => item.name === 'lote-editada.jpg');
-  assert.equal('viewOnce' in lote, false, 'the payload must never carry viewOnce while the connector route degrades it');
+  assert.equal(lote.viewOnce, true, 'view-once selection survives editing');
   assert.equal(lote.caption, 'Leyenda del lote', 'caption not preserved through edit');
   const gifUpload = uploads.find(item => item.name === 'otro.gif');
   assert.equal(gifUpload.mimeType, 'image/gif');
@@ -316,6 +317,7 @@ try {
   await page.screenshot({path:path.join(outputDir, 'sticker-preview-mobile.png'), animations:'disabled'});
   for (const width of [320, 375, 430]) {
     await page.setViewportSize({width, height:700});
+    await page.waitForFunction(() => document.querySelector('.app-shell').getBoundingClientRect().bottom <= 701);
     const layout = await page.evaluate(() => ({width:window.innerWidth, scroll:document.documentElement.scrollWidth,
       dialog:document.querySelector('.feature-dialog').getBoundingClientRect().toJSON(),
       send:document.querySelector('.feature-sticker-preview + button').getBoundingClientRect().toJSON()}));

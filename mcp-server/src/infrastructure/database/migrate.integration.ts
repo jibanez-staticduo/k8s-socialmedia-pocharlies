@@ -31,13 +31,20 @@ const isAuthorSource = (file: string): boolean =>
     '023_whatsapp_chat_time_index.sql',
   ].includes(file);
 
-async function database(label: string): Promise<{ client: Client; url: string }> {
+async function database(
+  label: string,
+  template?: string
+): Promise<{ client: Client; url: string }> {
   assert.ok(process.env.DATABASE_URL, 'Use a disposable PostgreSQL DATABASE_URL');
   const url = new URL(process.env.DATABASE_URL);
   const admin = new Client({ connectionString: url.toString() });
   await admin.connect();
   const name = `schema_test_${label}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-  await admin.query(`CREATE DATABASE ${name}`);
+  assert.ok(
+    !template || /^[a-z][a-z0-9_]*$/.test(template),
+    'Use a plain disposable template name'
+  );
+  await admin.query(`CREATE DATABASE ${name}${template ? ` TEMPLATE ${template}` : ''}`);
   await admin.end();
   url.pathname = `/${name}`;
   const client = new Client({ connectionString: url.toString() });
@@ -1116,6 +1123,133 @@ test('SKIRM-261: a reader holding messages makes the run fail fast instead of qu
   } finally {
     delete process.env.MIGRATE_LOCK_TIMEOUT;
     await reader.end().catch(() => undefined);
+    await client.end();
+  }
+});
+
+test('the configured cap bounds advisory contention and rolls back before ledger creation', async () => {
+  const { client, url } = await database('advisory_cap');
+  const holder = new Client({ connectionString: url });
+  const previous = process.env.MIGRATE_LOCK_TIMEOUT;
+  try {
+    await holder.connect();
+    await holder.query('BEGIN');
+    await holder.query("SELECT pg_advisory_xact_lock(hashtext('socialmedia.schema-migrations'))");
+    await client.query("SET statement_timeout = '3s'");
+    process.env.MIGRATE_LOCK_TIMEOUT = '300ms';
+    const started = Date.now();
+    await assert.rejects(runMigrations(client), /lock timeout/);
+    assert.ok(Date.now() - started < 2500, 'advisory wait must obey the lock cap');
+    assert.equal(
+      (await client.query("SELECT to_regclass('schema_migrations') AS t")).rows[0].t,
+      null
+    );
+    assert.equal((await client.query('SHOW lock_timeout')).rows[0].lock_timeout, '0');
+    await holder.query('ROLLBACK');
+    await runMigrations(client);
+  } finally {
+    if (previous === undefined) delete process.env.MIGRATE_LOCK_TIMEOUT;
+    else process.env.MIGRATE_LOCK_TIMEOUT = previous;
+    await holder.end();
+    await client.end();
+  }
+});
+
+test('a fully ledgered UUID/512 NAS upgrade caps pending 037 and preserves ledger checksums on rerun', async () => {
+  const { client, url } = await database('nas_037_cap', process.env.NAS_MIGRATION_TEST_TEMPLATE);
+  const reader = new Client({ connectionString: url });
+  const previous = process.env.MIGRATE_LOCK_TIMEOUT;
+  const previousDimensions = process.env.EMBEDDING_DIMENSIONS;
+  try {
+    process.env.EMBEDDING_DIMENSIONS = '512';
+    await runMigrations(client);
+    await client.query(
+      "INSERT INTO schema_migrations(version,checksum,adopted) VALUES('legacy/nas/retained.sql','historical',true)"
+    );
+    const pending = [
+      '037_messages_deleted_at_column.sql',
+      '040_telegram_send_attempts.sql',
+      '041_participants_prefixed_account.sql',
+    ];
+    await client.query('DELETE FROM schema_migrations WHERE version = ANY($1::text[])', [pending]);
+    await client.query('DROP TABLE telegram_send_attempts');
+    const ledger = (
+      await client.query('SELECT version,checksum,adopted FROM schema_migrations ORDER BY version')
+    ).rows;
+    await reader.connect();
+    await reader.query('BEGIN');
+    await reader.query('LOCK TABLE messages IN ACCESS SHARE MODE');
+    await client.query("SET statement_timeout = '3s'");
+    process.env.MIGRATE_LOCK_TIMEOUT = '300ms';
+    const started = Date.now();
+    await assert.rejects(
+      runMigrations(client),
+      /Migration 037_messages_deleted_at_column.sql failed:.*lock timeout/
+    );
+    assert.ok(Date.now() - started < 2500, '037 must retain the configured cap');
+    assert.deepEqual(
+      (
+        await client.query(
+          'SELECT version,checksum,adopted FROM schema_migrations ORDER BY version'
+        )
+      ).rows,
+      ledger
+    );
+    assert.equal((await client.query('SHOW lock_timeout')).rows[0].lock_timeout, '0');
+    await reader.query('ROLLBACK');
+    await runMigrations(client);
+    const migrated = (
+      await client.query('SELECT version,checksum,adopted FROM schema_migrations ORDER BY version')
+    ).rows;
+    assert.equal(migrated.length, ledger.length + pending.length);
+    assert.equal(
+      migrated.find(row => row.version === '040_telegram_send_attempts.sql')?.adopted,
+      false
+    );
+    for (const row of ledger)
+      assert.deepEqual(
+        migrated.find(item => item.version === row.version),
+        row
+      );
+    for (const file of pending) {
+      assert.equal(
+        migrated.find(row => row.version === file)?.checksum,
+        createHash('sha256')
+          .update(readFileSync(join(dir, file)))
+          .digest('hex')
+      );
+    }
+    await runMigrations(client);
+    assert.deepEqual(
+      (
+        await client.query(
+          'SELECT version,checksum,adopted FROM schema_migrations ORDER BY version'
+        )
+      ).rows,
+      migrated
+    );
+    assert.equal(
+      (
+        await client.query(
+          "SELECT data_type FROM information_schema.columns WHERE table_name='messages' AND column_name='id'"
+        )
+      ).rows[0].data_type,
+      'uuid'
+    );
+    assert.equal(
+      (
+        await client.query(
+          "SELECT atttypmod FROM pg_attribute WHERE attrelid='message_embeddings'::regclass AND attname='embedding'"
+        )
+      ).rows[0].atttypmod,
+      512
+    );
+  } finally {
+    if (previous === undefined) delete process.env.MIGRATE_LOCK_TIMEOUT;
+    else process.env.MIGRATE_LOCK_TIMEOUT = previous;
+    if (previousDimensions === undefined) delete process.env.EMBEDDING_DIMENSIONS;
+    else process.env.EMBEDDING_DIMENSIONS = previousDimensions;
+    await reader.end();
     await client.end();
   }
 });

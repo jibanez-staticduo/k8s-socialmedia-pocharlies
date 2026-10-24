@@ -358,7 +358,7 @@ function renderChats() {
   $('chat-count').textContent = String(state.chats.length);
   // QA #74: la pestaña no avisaba de los no leídos (title fijo «SocialMedia»).
   const unreadTotal = state.chats.reduce((sum, chat) => sum + (chat.unread === true ? 1 : Math.max(0, Number(chat.unread) || 0)), 0);
-  document.title = unreadTotal ? `(${unreadTotal > 99 ? '99+' : unreadTotal}) WhatsApp` : 'WhatsApp';
+  document.title = unreadTotal ? `(${unreadTotal > 99 ? '99+' : unreadTotal}) SocialMedia` : 'SocialMedia';
   virtualChats = chats;
   if (chats.length > CHAT_VIRTUAL_MIN) {
     virtualRange = chatWindowRange(chats.length, $('chats').scrollTop, $('chats').clientHeight);
@@ -456,19 +456,10 @@ function renderChatsTail(chats, {numeric, digits, filter}) {
   $('chat-status').textContent = !state.chats.length ? (filter === 'archived' ? 'No hay chats archivados.' : 'Todavía no hay chats sincronizados para esta cuenta.') : !chats.length ? (emptyFilters[filter] || 'No hay conversaciones que coincidan.') : '';
 }
 const chatLoads = new Map();
-const chatCache = new Map();
-// Jordi 22-10 (criterio de Dani: sin pantallas de carga): la última lista de cada
-// ámbito se guarda en localStorage y se pinta al abrir, incluso tras F5.
-const CHATS_CACHE_PREFIX = 'wa-chats-cache-v1:';
-try {
-  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
-    const key = localStorage.key(index);
-    if (key?.startsWith(CHATS_CACHE_PREFIX)) chatCache.set(key.slice(CHATS_CACHE_PREFIX.length), {chats: JSON.parse(localStorage.getItem(key))});
-  }
-} catch { /* caché corrupta: se rellena de la red */ }
-function rememberChats(scope, chats) {
-  try { localStorage.setItem(CHATS_CACHE_PREFIX + scope, JSON.stringify(chats)); } catch { /* cuota: la memoria de la sesión basta */ }
-}
+let chatCache = new Map();
+const chatCacheReady = import('./chat-cache.mjs').then(({createChatCache}) => {
+  chatCache = createChatCache(safeLocalStorage(), document);
+});
 async function loadChats({background = false} = {}) {
   // Con la búsqueda del servidor activa, un refresco (SSE, eco) no debe pisar los
   // resultados; al vaciar el buscador se recarga la lista normal.
@@ -499,8 +490,8 @@ async function loadChats({background = false} = {}) {
         fetchPage: cursor => api(`/api/chats?${new URLSearchParams({account, limit: '100', ...(archivedView ? {archived: 'only'} : {}), ...(cursor ? {cursor} : {})})}`),
         onPage: chats => {
           state.chats = chats; state.chatListScope = scope; chatCache.set(scope, {chats});
-          rememberChats(scope, chats);
           featureUI?.chatsChanged?.(state.chats);
+          renderChats();
           // Jordi 22-10: sin aviso «Cargando más conversaciones…»: la lista ya está
           // pintada y crece sola; el aviso era ruido sobre contenido útil.
         },
@@ -1348,11 +1339,11 @@ const mediaLibraryReady = import('./media-library-ui.mjs').then(({installMediaLi
   }, onOpen: () => closeRailPanels(['library']) });
   return mediaLibraryUI;
 }).catch(err => { error(`No se pudo cargar el contenido multimedia: ${err.message}`); return null; });
-async function init() { try { await recoveryReady; await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await uploadQualityReady; await sidebarSearchReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await novedadesReady; await assistantReady; await liveReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; sidebarSearch?.accountChanged(); uploadQualityUI?.accountChanged(); assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); updateControls(); if (state.account) { await loadChats(); liveUpdates?.start(state.account); restoreLastChat(); } else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
+async function init() { try { await chatCacheReady; await recoveryReady; await historyReady; await rendererReady; await attachmentReady; await mediaReady; await accountRailReady; await draftReady; await uploadQualityReady; await sidebarSearchReady; await featureReady; await chatSelectionReady; await eventReady; await pinnedReady; await communitiesReady; await profileReady; await mediaLibraryReady; await novedadesReady; await assistantReady; await liveReady; } catch (err) { error(`No se pudo cargar la interfaz de mensajes: ${err.message}`); return; } updateControls(); $('chat-status').textContent = 'Cargando cuentas…'; const result = await Promise.allSettled([api('/api/accounts')]); if (result[0].status === 'fulfilled') { const data = result[0].value; restoreOutbox(data.outboxScope); state.sending = data.sendingEnabled === true; for (const account of data.accounts || []) $('account').append(new Option(account.label || account.id, account.id)); state.account = $('account').value; sidebarSearch?.accountChanged(); uploadQualityUI?.accountChanged(); assistant?.select(context()); accountRailTools.renderAccountRail($('account-rail'), data.accounts || [], state.account, switchAccount); featureUI?.accountChanged?.(state.account); communitiesUI?.accountChanged?.(); profileUI?.accountChanged?.(); mediaLibraryUI?.accountChanged?.(); novedadesUI?.accountChanged?.(); updateControls(); if (state.account) { await loadChats(); liveUpdates?.start(state.account); restoreLastChat(); } else $('chat-status').textContent = 'No hay cuentas configuradas.'; } else { $('chat-status').textContent = 'No se pudieron cargar las cuentas.'; error(result[0].reason.message); } }
 window.addEventListener('beforeunload', event => { if ([...state.outgoing.values()].flat().some(item => item.file && item.state !== 'confirmed')) { event.preventDefault(); event.returnValue = ''; } });
-document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
+document.addEventListener('click', event => { if (event.target.closest?.('a[href^="/auth/logout"]')) { document.dispatchEvent(new Event('socialmedia:logout')); try { sessionStorage.removeItem(OUTBOX_STORAGE_KEY); } catch {} } });
 window.addEventListener('pagehide', () => { liveUpdates?.stop(); cancelRecording(); cameraController?.close(); cancelAttachment(); });
 window.addEventListener('pageshow', event => { if (event.persisted && state.account) liveUpdates?.start(state.account); });
-// QA velocidad 1c: estáticos desde caché al instante (sw.js); sin SW el sitio sigue igual.
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+// Refresh code assets with the current deployment; the app still works without SW support.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', {updateViaCache: 'none'}).catch(() => {});
 init();

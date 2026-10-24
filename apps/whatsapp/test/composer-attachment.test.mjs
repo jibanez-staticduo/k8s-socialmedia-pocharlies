@@ -25,11 +25,15 @@ test('attachment and typed text form one media upload with a caption', () => {
   assert.equal(attachmentError({ name: 'foto.jpg', type: 'image/jpeg', size: MAX_ATTACHMENT_BYTES + 1 }), 'El archivo supera el límite de 10 MiB.');
 });
 
-test('view once no se ofrece: la ruta del conector degrada el adjunto y traga el caption (QA #77 addendum)', () => {
-  for (const type of ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime', 'image/gif', 'audio/mpeg', 'application/pdf']) {
+test('NAS view once is offered only for compatible images and videos', () => {
+  for (const type of ['image/jpeg', 'image/png', 'video/mp4']) {
+    assert.equal(canViewOnce({type}), true, type);
+  }
+  for (const type of ['image/webp', 'video/webm', 'video/quicktime', 'image/gif', 'audio/mpeg', 'application/pdf', 'image/svg+xml', 'video/avi', '']) {
     assert.equal(canViewOnce({type}), false, type);
   }
-  // Nadie pasa viewOnce=true (el botón no se pinta); el payload nunca sale con el campo.
+  assert.equal(canViewOnce(null), false);
+  assert.equal(uploadPayload({name:'private.jpg', type:'image/jpeg'}, 'AQID', 'hola', '', 'source', true).viewOnce, true);
   assert.equal('viewOnce' in uploadPayload({name:'private.jpg', type:'image/jpeg'}, 'AQID', 'hola'), false);
 });
 

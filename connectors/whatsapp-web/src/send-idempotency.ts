@@ -356,7 +356,9 @@ export async function recordSendFailure(
             WHERE account = $1 AND key_hash = $2 AND status = $4`
         : `UPDATE whatsapp_send_attempts SET error = $3, updated_at = NOW()
             WHERE account = $1 AND key_hash = $2 AND status = 'pending'`,
-      [connectorAccount(), idempotencyKeyHash(key), text, claimed ? 'pending' : 'prepared']
+      preNetwork
+        ? [connectorAccount(), idempotencyKeyHash(key), text, claimed ? 'pending' : 'prepared']
+        : [connectorAccount(), idempotencyKeyHash(key), text]
     );
   } catch (recordError) {
     console.warn(`send idempotency failure record failed: ${describeError(recordError)}`);

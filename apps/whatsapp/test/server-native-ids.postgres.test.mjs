@@ -79,7 +79,9 @@ for (const type of ['uuid', 'bigint']) {
       UI_AUTH_USERNAME:'operator', UI_AUTH_PASSWORD:'password', APP_PUBLIC_URL:'https://wa.example',
       APP_ENABLE_SENDING:'true', PERSONAL_SECRET:'fixture-only', MEDIA_ALLOWED_ORIGINS:'https://media.example'},
     registry:[{channel:'whatsapp', accountId:'personal', connectorUrl:'http://connector', secretEnv:'PERSONAL_SECRET'}],
-    fetchImpl: async url => String(url).startsWith('https://media.example/') ? new Response('stored-media') : Response.json({ok:true})});
+    fetchImpl: async url => String(url).startsWith('https://media.example/') ? new Response('stored-media')
+      : String(url).endsWith('/contacts/blocklist') ? Response.json({ account: 'personal', confirmed: true, blocked: ['12345@lid'] })
+        : Response.json({ok:true})});
     await new Promise(resolve => app.server.listen(0,'127.0.0.1',resolve));
     const base = `http://127.0.0.1:${app.server.address().port}`;
     const get = path => fetch(base+path, {headers:{authorization:auth}});
@@ -149,6 +151,28 @@ for (const type of ['uuid', 'bigint']) {
     }
     for (const path of ['/api/media/not-an-id','/api/media/thumb/not-an-id','/api/media/link-thumb/not-an-id'])
       assert.equal((await get(`${path}?${suffix}`)).status,404);
+    // Real SQL three-valued logic must retain documents without attachment/type metadata.
+    const documentIds = type === 'uuid' ? [uuid(70), uuid(71), uuid(72)] : ['70', '71', '72'];
+    for (const [index, documentId] of documentIds.entries()) {
+      await client.query(`INSERT INTO messages(id, account, conversation_id, wa_message_id, content, message_type, wa_timestamp)
+        VALUES($1,'personal','chat@g.us',$2,'legacy document','DOCUMENT','2026-10-01')`, [documentId, `document-${index}`]);
+    }
+    const documentAttachmentIds = type === 'bigint' ? [uuid(700), uuid(701)] : ['700', '701'];
+    await client.query(`INSERT INTO attachments(id,message_id,mime_type,file_type) VALUES($1,$2,NULL,NULL),($3,$4,'video/mp4','VIDEO')`,
+      [documentAttachmentIds[0],documentIds[1],documentAttachmentIds[1],documentIds[2]]);
+    const documents = await (await get(`/api/chats/media?${suffix}&kind=documents`)).json();
+    assert.deepEqual(documents.items.map(row=>row.messageId).sort(),['document-0','document-1']);
+    const withVideoDocument = await (await get(`/api/chats/media?${suffix}&kind=gallery`)).json();
+    assert(withVideoDocument.items.some(row=>row.messageId==='document-2'));
+    assert(!withVideoDocument.items.some(row=>['document-0','document-1'].includes(row.messageId)));
+    // A LID returned by the connector must resolve the saved name on its linked phone.
+    await client.query(`CREATE TABLE whatsapp_contacts(account text, jid text, name text, push_name text);
+      INSERT INTO conversations(id,account,name,wa_chat_id,is_group) VALUES('12345@lid','personal','12345@lid','34600111222@s.whatsapp.net',false);
+      INSERT INTO whatsapp_contacts VALUES('personal','34600111222@s.whatsapp.net','Saved phone name',NULL),
+        ('other','34600111222@s.whatsapp.net','Foreign name',NULL)`);
+    const blocked = await get('/api/blocked-contacts?account=personal');
+    assert.equal(blocked.status,200,await blocked.clone().text());
+    assert.deepEqual((await blocked.json()).contacts,[{jid:'12345@lid',name:'Saved phone name'}]);
     const deletion = {account:'personal',chat:'chat@g.us',messageId:ids[0],scope:'everyone'};
     assert.equal((await post({...deletion,messageId:ids[1],scope:'me'})).status,200);
     const localFirst = (await client.query('SELECT metadata,is_deleted,status FROM messages WHERE id=$1',[ids[1]])).rows[0];

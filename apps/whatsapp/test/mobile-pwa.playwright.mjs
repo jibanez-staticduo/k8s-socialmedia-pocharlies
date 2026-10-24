@@ -49,7 +49,7 @@ try {
     const data = url.pathname === '/api/accounts'
       ? {accounts: [{id: 'personal', label: 'Personal'}, {id: 'secondary', label: 'Secundaria'}], sendingEnabled: true}
       : url.pathname === '/api/chats'
-        ? {chats: [{id: `${account}-chat`, name: account === 'personal' ? 'Ana' : 'Bruno', preview: 'Hola', unread: 0, pinned: true, archived: url.searchParams.get('archived') === 'only'}]}
+        ? {chats: [{id: `${account}-chat`, name: account === 'personal' ? 'Ana' : 'Bruno', preview: 'Hola', unread: 3, pinned: true, archived: url.searchParams.get('archived') === 'only'}]}
         : url.pathname === '/api/novedades/status/authors' ? {account, authors: []}
         : url.pathname === '/api/messages' ? {messages: [{id: 'one', text: 'Hola', timestamp: '2026-09-28T10:00:00Z'}, {id: 'two', text: `https://example.com/${'unbroken'.repeat(90)}`, timestamp: '2026-09-28T10:01:00Z'}, {id: 'image-current', type: 'IMAGE', timestamp: '2026-09-28T10:02:00Z', attachments: [{id: 'attachment-current', name: 'current.png', mimeType: 'image/png', url: `/api/media/attachment-current?account=${account}&chat=${account}-chat`}]}]}
           : url.pathname === '/api/chats/media' ? {account, chat: url.searchParams.get('chat'), items: url.searchParams.get('cursor')
@@ -64,6 +64,7 @@ try {
   const url = `http://127.0.0.1:${server.address().port}`;
   await page.goto(url);
   await page.waitForFunction(() => document.querySelectorAll('#account option').length === 2 && document.querySelectorAll('#chats .chat-item').length === 1);
+  assert.equal(await page.title(), '(3) SocialMedia');
   // Headless engines do not expose an iPhone notch/home indicator. Exercise
   // the same safe-area inputs explicitly instead of silently testing zeroes.
   await page.addStyleTag({content: ':root { --mobile-safe-area-top: 59px; --mobile-safe-area-bottom: 34px; }'});
@@ -84,8 +85,8 @@ try {
     touchIcon: document.querySelector('link[rel="apple-touch-icon"]')?.getAttribute('href'),
   }));
   assert(metadata.viewport.includes('width=device-width') && metadata.viewport.includes('viewport-fit=cover'));
-  // QA #34 (WCAG 1.4.4): el zoom del sistema debe quedar disponible.
-  assert(!metadata.viewport.includes('user-scalable') && !metadata.viewport.includes('maximum-scale'));
+  // NAS keeps page scale fixed; the media viewer owns its localized zoom.
+  assert(metadata.viewport.includes('user-scalable=no') && metadata.viewport.includes('maximum-scale=1'));
   assert.equal(metadata.capable, 'yes');
   assert(metadata.touchIcon);
   const manifestResponse = await page.request.get(new URL(manifest, url).href);
@@ -326,9 +327,9 @@ try {
   const installedContext = await browser.newContext({...phone, viewport: {...phone.screen, height: canvasHeight}});
   const installed = await installedContext.newPage();
   installed.on('pageerror', error => errors.push(error.message));
-  await installed.addInitScript(() => {
+  await installed.addInitScript(layoutHeight => {
     let metrics = null;
-    const fullHeight = innerHeight;
+    const fullHeight = layoutHeight;
     const viewport = visualViewport;
     const nativeHeight = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(viewport), 'height').get;
     const nativeTop = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(viewport), 'offsetTop').get;
@@ -342,7 +343,7 @@ try {
       metrics = value;
       viewport.dispatchEvent(new Event('resize'));
     };
-  });
+  }, canvasHeight);
   await installed.route('**/api/**', fixtureRoute);
   await installed.goto(url);
   await installed.waitForFunction(() => document.querySelectorAll('#chats .chat-item').length === 1);
@@ -353,10 +354,11 @@ try {
   if (process.env.UI_SCREENSHOT_PATH) await installed.screenshot({path: `${process.env.UI_SCREENSHOT_PATH}-installed-list.png`});
   await installed.locator('#chats .chat-item').first().tap();
   async function installedComposer(label, expectedGap = 34, top = 0, bottom = canvasHeight) {
+    // The 40px textarea is centered beside the 44px composer buttons.
     await installed.waitForFunction(({top, bottom, expectedGap}) => {
       const shell = document.querySelector('.app-shell').getBoundingClientRect();
       const input = document.querySelector('#message').getBoundingClientRect();
-      return Math.abs(shell.top - top) <= 1 && Math.abs(shell.bottom - bottom) <= 1 && Math.abs(input.bottom - (bottom - expectedGap)) <= 1;
+      return Math.abs(shell.top - top) <= 1 && Math.abs(shell.bottom - bottom) <= 1 && Math.abs(input.bottom - (bottom - expectedGap - (input.height === 40 ? 2 : 0))) <= 1;
     }, {top, bottom, expectedGap});
     const controls = await installed.locator('#message').evaluate(element => {
       const r = element.getBoundingClientRect();

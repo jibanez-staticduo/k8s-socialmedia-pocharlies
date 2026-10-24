@@ -109,6 +109,19 @@ test('QA velocidad: estáticos y JSON grandes salen gzip si el cliente lo acepta
   assert.equal(chats.status, 200);
   assert.equal(chats.headers['content-encoding'], 'gzip');
   assert.ok(JSON.parse(gunzipSync(chats.body)).chats.length === 40);
+  assert.equal(chats.headers['cache-control'], 'private, no-cache');
+  assert.equal(chats.headers.vary, 'cookie, authorization, accept-encoding');
+  assert.ok(chats.headers.etag);
+  const unchanged = await raw('/api/chats?account=personal', { 'accept-encoding': 'gzip', 'if-none-match': chats.headers.etag });
+  assert.equal(unchanged.status, 304);
+  assert.equal(unchanged.headers.etag, chats.headers.etag);
+  assert.equal(unchanged.headers['cache-control'], chats.headers['cache-control']);
+  assert.equal(unchanged.headers.vary, chats.headers.vary);
+  assert.equal(unchanged.body.length, 0);
+  const identity = await raw('/api/chats?account=personal', { 'if-none-match': chats.headers.etag });
+  assert.equal(identity.status, 200);
+  assert.notEqual(identity.headers.etag, chats.headers.etag, 'strong validators distinguish encoded representations');
+  assert.equal((await raw('/api/chats?account=personal', { authorization: '', 'if-none-match': chats.headers.etag })).status, 401);
   // Un JSON pequeño (health) no merece el coste de comprimir.
   assert.equal((await raw('/health', {'accept-encoding': 'gzip'})).headers['content-encoding'], undefined);
 });
@@ -133,8 +146,8 @@ test('authenticated media preserves partial responses for audio seeking and reje
   const path = `/api/media/${id}?account=personal&chat=personal-chat`;
   const response = await request(path, null, { range: 'bytes=2-5', 'if-range': '"fixture"' });
   assert.equal(response.status, 206);
-  // QA velocidad: attachments es inmutable por id; sin esto el scroll volvía a bajar cada foto.
-  assert.equal(response.headers.get('cache-control'), 'private, max-age=86400, immutable');
+  // Partial bodies remain reusable only after authorization and visibility revalidation.
+  assert.equal(response.headers.get('cache-control'), 'private, no-cache');
   assert.equal(response.headers.get('content-range'), 'bytes 2-5/10');
   assert.equal(response.headers.get('accept-ranges'), 'bytes');
   assert.equal(response.headers.get('content-length'), '4');
@@ -430,8 +443,8 @@ test('thumbnail fallback is account and chat scoped and serves only bounded JPEG
   const response = await request(path);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-type'), 'image/jpeg');
-  // QA velocidad: la miniatura del payload es inmutable por id → cacheable.
-  assert.equal(response.headers.get('cache-control'), 'private, max-age=86400, immutable');
+  // Thumbnail bytes can be cached but every reuse must revalidate their visibility.
+  assert.equal(response.headers.get('cache-control'), 'private, no-cache');
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), jpeg);
   thumbnail = { __socialmedia_type: 'Uint8Array', value: jpeg.toString('base64') };
   assert.deepEqual(Buffer.from(await (await request(path)).arrayBuffer()), jpeg);
@@ -918,7 +931,7 @@ test('/api/chats revalida con ETag: el ciclo sin cambios responde 304 (#160, #14
   assert.equal(response.status, 200);
   const etag = response.headers.get('etag');
   assert.match(etag, /^"[A-Za-z0-9_-]{16,}"$/);
-  assert.equal(response.headers.get('cache-control'), 'no-cache');
+  assert.equal(response.headers.get('cache-control'), 'private, no-cache');
   const revalidated = await request('/api/chats?account=personal', null, { 'if-none-match': etag });
   assert.equal(revalidated.status, 304);
   assert.equal(revalidated.headers.get('etag'), etag);

@@ -558,7 +558,7 @@ test('search cursor pages tied timestamps without duplicates and stays bound to 
   do {
     const response = await request(base + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''));
     assert.equal(response.status, 200);
-    if (!cursor) assert.equal(response.headers.get('cache-control'), 'private, max-age=30', 'la búsqueda debe ser cacheable (QA 22-10)');
+    if (!cursor) assert.equal(response.headers.get('cache-control'), 'private, no-cache', 'search must revalidate against current visibility');
     const page = await response.json();
     seen.push(...page.results.map(row => row.id));
     cursor = page.nextCursor;
@@ -573,13 +573,13 @@ test('search cursor pages tied timestamps without duplicates and stays bound to 
   assert.equal(seen.at(-1), 'wa-0');
 });
 
-test('QA #100: re-buscar el mismo término no vuelve a la BD en 60 s', async t => {
+test('search queries current database visibility on every repeated request', async t => {
   const { request, calls } = await fixture(t);
   const first = await (await request('/api/search?account=personal&scope=all&q=cachetest')).json();
   const before = calls.filter(call => /ILIKE/.test(call.sql)).length;
   assert.ok(before >= 1, 'la primera búsqueda debe ir a la BD');
   const second = await (await request('/api/search?account=personal&scope=all&q=cachetest')).json();
-  assert.equal(calls.filter(call => /ILIKE/.test(call.sql)).length, before, 'la repetición sale de la caché');
+  assert.equal(calls.filter(call => /ILIKE/.test(call.sql)).length, before + 1, 'repeated search checks connector changes in the database');
   assert.deepEqual(second.results, first.results);
 });
 

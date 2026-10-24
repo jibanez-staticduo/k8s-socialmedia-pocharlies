@@ -445,6 +445,7 @@ export function initializeSettings(documentRef = document, storage = globalThis.
       try { globalThis.sessionStorage?.removeItem('wa-unconfirmed-outbox-v1'); } catch {}
       // Ir a /auth/login a secas reentraba por el SSO vivo: el IdP cierra aquí (QA #12).
       const body = await response.json().catch(() => ({}));
+      documentRef.dispatchEvent(new Event('socialmedia:logout'));
       globalThis.location.assign(body?.logoutUrl || '/auth/login');
     } catch (error) {
       logoutError.textContent = error.message || 'No se pudo cerrar la sesión.';

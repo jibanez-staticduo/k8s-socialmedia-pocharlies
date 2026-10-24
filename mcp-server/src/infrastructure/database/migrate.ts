@@ -165,7 +165,6 @@ export async function runMigrations(
   const lockTimeout = migrationLockTimeout();
   await client.query('BEGIN');
   try {
-    await client.query("SELECT pg_advisory_xact_lock(hashtext('socialmedia.schema-migrations'))");
     // SKIRM-261: the run is ONE transaction, so every lock it takes is held
     // until COMMIT. Never wait in the lock queue: a waiting DDL makes every
     // later INSERT on that table wait behind it (prod ingest stalled ~20 min on
@@ -173,6 +172,7 @@ export async function runMigrations(
     // leave its backend running either.
     await client.query(`SET LOCAL lock_timeout = '${lockTimeout}'`);
     await client.query("SET LOCAL client_connection_check_interval = '5s'");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('socialmedia.schema-migrations'))");
     await client.query(
       `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (version text PRIMARY KEY, checksum text NOT NULL, adopted boolean NOT NULL DEFAULT false, applied_at timestamptz NOT NULL DEFAULT now())`
     );
@@ -286,7 +286,17 @@ export async function runMigrations(
               'DROP TRIGGER IF EXISTS messages_realtime_update_hint ON public.messages'
             );
           }
-          await client.query(sql);
+          // Published 037 owns a historical timeout. Override only its runtime
+          // copy so its ALTER and later DDL obey the caller's cap; hash the
+          // original bytes above so existing ledgers remain valid.
+          const executionSql =
+            file === '037_messages_deleted_at_column.sql'
+              ? sql.replace(
+                  /^SET LOCAL lock_timeout = '10s';$/m,
+                  `SET LOCAL lock_timeout = '${lockTimeout}';`
+                )
+              : sql;
+          await client.query(executionSql);
         } catch (error) {
           throw new Error(
             `Migration ${file} failed: ${error instanceof Error ? error.message : String(error)}`

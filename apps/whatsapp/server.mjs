@@ -42,10 +42,6 @@ const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
 const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
 const MAX_PAGE_SIZE = 200;
-// QA #100: re-buscar el mismo término volvía a la BD (2,9 s; el trgm trae miles de
-// filas y el heap fetch manda). Una página de búsqueda no cambia en 60 s.
-const SEARCH_CACHE_TTL_MS = 60_000;
-const searchCache = new Map();
 // A change stream must speak before NPM's 240s read timeout closes it, and a
 // stalled browser must not grow the write queue without bound.
 const REALTIME_HEARTBEAT_MS = 15000;
@@ -876,16 +872,12 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     };
   }
   function sendAvatar(req, res, avatar) {
-    // QA velocidad 3: el no-store global hacía que cada re-render de la lista
-    // bajara otra vez los avatares (157 peticiones y 7,6 MB medidos en una
-    // apertura). La imagen de perfil cambia rara vez: 24 h en el navegador.
-    // shortcut: si un contacto cambia su foto y debe verse antes, se baja el
-    // max-age o se revalida por SSE; el ETag ya permite el 304 barato.
+    // Reuse bytes only after this request has passed authentication and scope checks.
     const cacheable = (avatar.status || 200) === 200;
     const etag = `"${createHash('sha1').update(avatar.bytes).digest('base64url')}"`;
     if (cacheable && req?.headers?.['if-none-match'] === etag) {
       res.statusCode = 304;
-      res.setHeader('cache-control', 'private, max-age=86400');
+      privateRevalidation(res);
       res.setHeader('etag', etag);
       return res.end();
     }
@@ -895,7 +887,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     res.setHeader('content-type', safeImageType(avatar.contentType));
     res.setHeader('content-disposition', `inline; filename*=UTF-8''${encodeURIComponent(avatar.fileName || 'avatar')}`);
     if (cacheable) {
-      res.setHeader('cache-control', 'private, max-age=86400');
+      privateRevalidation(res);
       res.setHeader('etag', etag);
     }
     res.end(avatar.bytes);
@@ -903,12 +895,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   async function avatarResponse(req, res, account, chat) {
     try { await avatarSource(req, res, account, chat); }
     catch (error) {
-      // QA #14b: el handler global contesta los 404 con no-store y cada
-      // re-render re-bajaba el mismo avatar ausente (58 peticiones en media
-      // hora). Un avatar que no existe no aparece de un render a otro: el 404
-      // se cachea 5 min en el navegador; si pone foto, se ve al expirar.
       if (error?.code !== 'AVATAR_UNAVAILABLE') throw error;
-      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'private, max-age=300' });
+      privateRevalidation(res);
+      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: error.message, code: error.code }));
     }
   }
@@ -1125,7 +1114,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const alias = new Map(jids.map(jid => [jid, jid]));
     try {
       const links = await query(
-        'SELECT id, wa_chat_id AS "waChatId" FROM conversations WHERE account=$1 AND COALESCE(is_group, false)=false AND (id = ANY($2::text[]) OR wa_chat_id = ANY($2::text[]))',
+        'SELECT id AS jid, wa_chat_id AS "waChatId" FROM conversations WHERE account=$1 AND COALESCE(is_group, false)=false AND (id = ANY($2::text[]) OR wa_chat_id = ANY($2::text[]))',
         [account.accountId, storedIds],
       );
       for (const row of links) {
@@ -1458,9 +1447,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   const GZIP_TEXT = /\.(?:js|mjs|css|html|json|webmanifest|svg)$/;
   const acceptsGzip = req2 => /\bgzip\b/.test(req2.headers['accept-encoding'] || '');
   const gzippedStatic = new Map();
+  function privateRevalidation(res) {
+    res.setHeader('cache-control', 'private, no-cache');
+    res.setHeader('vary', 'cookie, authorization');
+  }
   const server = http.createServer(async (req, res) => {
-    const gzipJson = (status, body) => {
-      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-encoding': 'gzip', vary: 'accept-encoding' });
+    const gzipJson = (status, body, headers = {}) => {
+      const vary = [...new Set([res.getHeader('vary'), headers.vary, 'accept-encoding'].filter(Boolean).flatMap(value => String(value).toLowerCase().split(/,\s*/)))].join(', ');
+      res.writeHead(status, { ...headers, 'content-type': 'application/json; charset=utf-8', 'content-encoding': 'gzip', vary });
       res.end(gzipSync(body));
     };
     const json = (status, value) => {
@@ -1472,10 +1466,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     // Con ETag el ciclo sin cambios cuesta un 304, no 42.5 KB. no-cache: se revalida siempre, nunca sirve viejo.
     const conditionalJson = (status, value) => {
       const body = JSON.stringify(value);
-      const etag = `"${createHash('sha256').update(body).digest('base64url').slice(0, 22)}"`;
-      const headers = { etag, 'cache-control': 'no-cache' };
+      const compressed = body.length > 1024 && acceptsGzip(req);
+      const etag = `"${createHash('sha256').update(body).update(compressed ? 'gzip' : 'identity').digest('base64url').slice(0, 22)}"`;
+      const headers = { etag, 'cache-control': 'private, no-cache', vary: 'cookie, authorization, accept-encoding' };
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
-      if (body.length > 1024 && acceptsGzip(req)) return gzipJson(status, body);
+      if (compressed) return gzipJson(status, body, headers);
       res.writeHead(status, { ...headers, 'content-type': 'application/json; charset=utf-8' });
       res.end(body);
     };
@@ -1676,6 +1671,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(url.searchParams.get('account'));
         return json(200, await readContactDirectory({ account: a.accountId, params: url.searchParams, query, sendingEnabled: sendingEnabled(env) }));
       }
+      // CONTRACT: http.whatsapp-app.chats-list.v1
       if (req.method === 'GET' && path === '/api/chats') {
         const a = accountParam(url.searchParams.get('account'));
         const requestedArchive = url.searchParams.get('archived');
@@ -1825,8 +1821,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const bytes = jpegThumbnailBytes(rows[0]?.thumbnail);
         if (!bytes) throw fail(404, 'Media not found');
         res.setHeader('content-type', 'image/jpeg');
-        // Miniatura del payload del mensaje: inmutable por id (QA velocidad).
-        res.setHeader('cache-control', 'private, max-age=86400, immutable');
+        privateRevalidation(res);
+        const etag = `"${createHash('sha256').update(bytes).digest('base64url')}"`;
+        res.setHeader('etag', etag);
+        if (req.headers['if-none-match'] === etag) { res.statusCode = 304; return res.end(); }
         res.end(bytes);
         return;
       }
@@ -1847,17 +1845,15 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           headers.range = range;
           if (req.headers['if-range']) headers['if-range'] = req.headers['if-range'];
         }
-        const response = await remote(upstream.url, { headers }, 30000, [416]);
+        if (!range && req.headers['if-none-match']) headers['if-none-match'] = req.headers['if-none-match'];
+        const response = await remote(upstream.url, { headers }, 30000, [304, 416]);
         res.statusCode = response.status;
         // Preserve byte ranges so native audio/video controls can seek.
         for (const name of ['accept-ranges', 'content-range', 'etag', 'last-modified']) {
           const value = response.headers.get(name); if (value) res.setHeader(name, value);
         }
-        // QA velocidad: la fila de attachments es inmutable por id; sin esto el scroll
-        // volvía a bajar cada foto (el visor libera la copia al salir de vista).
-        // shortcut: un mensaje borrado deja su copia del día en el navegador; si la
-        // política de borrado lo exige, bajar a max-age=0 + etag.
-        if (response.status === 200 || response.status === 206) res.setHeader('cache-control', 'private, max-age=86400, immutable');
+        if ([200, 206, 304].includes(response.status)) privateRevalidation(res);
+        if (response.status === 304) { res.end(); return; }
         if (!response.headers.get('content-encoding') && response.headers.has('content-length')) res.setHeader('content-length', response.headers.get('content-length'));
         // QA #115.2: el PDF se ve (como la oficial); svg/html siguen attachment, pueden
         // ejecutar guion con el type servido.
@@ -1985,7 +1981,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         }
         if (['image', 'video'].includes(kind)) { args.push(kind.toUpperCase()); clauses.push(`m.message_type=$${args.length}`); }
         // QA #96: un vídeo o un audio mandado como documento es vídeo/audio, no DOC (file_type manda, mime de respaldo).
-        const videoDoc = "(m.message_type='DOCUMENT' AND (a.file_type='VIDEO' OR a.mime_type LIKE 'video/%'))";
+        const videoDoc = "(m.message_type='DOCUMENT' AND COALESCE(a.file_type='VIDEO' OR a.mime_type LIKE 'video/%', false))";
         if (kind === 'gallery') { clauses.push(`(m.message_type IN ('IMAGE','VIDEO') OR ${videoDoc})`); }
         if (['document', 'documents'].includes(kind)) clauses.push(`m.message_type='DOCUMENT' AND NOT ${videoDoc}`);
         if (['link', 'links'].includes(kind)) clauses.push("m.content ~* 'https?://[^[:space:]]+'");
@@ -2057,9 +2053,6 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const cursorScope = { account: a.accountId, chat, queryHash: createHash('sha256').update(q).digest('hex'), searchScope };
         const schema = await getDatabaseSchema(query);
         const cursor = url.searchParams.has('cursor') ? decodeSearchCursor(url.searchParams.get('cursor'), cursorScope, schema) : null;
-        const cacheKey = JSON.stringify([a.accountId, chat, q, searchScope, url.searchParams.get('cursor') || '']);
-        const cached = searchCache.get(cacheKey);
-        if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return json(200, cached.body);
         // QA 22-10: % y _ del término eran comodines SQL (buscar «%» casaba con todo).
         // El patrón va parametrizado — no es inyección — pero hay que escapar los comodines.
         const args = [a.accountId, `%${q.replace(/[\\%_]/g, '\\$&')}%`];
@@ -2095,9 +2088,6 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           args
         );
         const page = rows.slice(0, limit);
-        // QA 22-10: re-buscar el mismo término volvía a la BD (no-store global).
-        // Una página de búsqueda no cambia en 30 s; el navegador la reutiliza.
-        res.setHeader('cache-control', 'private, max-age=30');
         const body = { account: a.accountId, query: q, chat, results: page.map(item => ({
           id: item.wa_message_id || item.id,
           messageId: item.wa_message_id || item.id,
@@ -2115,9 +2105,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           type: item.message_type,
           timestamp: item.wa_timestamp,
         })), nextCursor: rows.length > limit ? encodeSearchCursor(page.at(-1), cursorScope) : null };
-        searchCache.set(cacheKey, { at: Date.now(), body });
-        if (searchCache.size > 200) for (const [key, entry] of searchCache) if (Date.now() - entry.at > SEARCH_CACHE_TTL_MS) searchCache.delete(key);
-        return json(200, body);
+        // Connector writes can revoke visibility without notifying this app instance.
+        return conditionalJson(200, body);
       }
       if (req.method === 'GET' && (path === '/api/chats/avatar' || /^\/api\/chats\/[^/]+\/avatar$/.test(path) || path === '/api/avatar')) {
         const a = accountParam(url.searchParams.get('account'));
@@ -2506,9 +2495,6 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       // CONTRACT: http.whatsapp-app.messages-delete.v1
       if (req.method === 'POST' && (path === '/api/messages/reply' || path === '/api/messages/react' || path === '/api/messages/forward' || path === '/api/messages/edit' || path === '/api/messages/delete' || path === '/api/message-actions' || path === '/api/messages/action' || path === '/api/messages/actions')) {
         const body = await bodyJSON(req);
-        // Any message mutation can change what /api/search must answer (deletion,
-        // edit), so the 60 s result cache dies here rather than serving a stale body.
-        searchCache.clear();
         const a = accountParam(body.account); const chat = safeChatId(body.chat || body.chatId);
         const pathAction = path.match(/^\/api\/messages\/(reply|react|forward|edit|delete)$/)?.[1];
         const action = String(body.action || pathAction || '').toLowerCase();

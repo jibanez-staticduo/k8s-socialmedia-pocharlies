@@ -29,11 +29,7 @@ export function readUploadQuality(storage, accountId, file) {
 }
 
 export function canViewOnce(file) {
-  // shortcut (QA #77 addendum 22-10): la ruta view-once del conector degrada el adjunto a
-  // octet-stream y se traga el caption (medido). El botón no se ofrece hasta que el conector
-  // lo soporte de punta a punta; el marcador de mensajes recibidos sí se pinta.
-  void file;
-  return false;
+  return /^(image\/(jpeg|png)|video\/mp4)$/.test(file?.type || '');
 }
 
 function attachmentName(file) {

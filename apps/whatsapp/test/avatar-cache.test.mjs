@@ -77,7 +77,7 @@ async function fixture(t, { env = {}, fetchImpl, conversations } = {}) {
 
 // QA velocidad 3: el no-store global hacía que cada apertura bajara los 157
 // avatares otra vez (7,6 MB medidos). Ahora son cacheables con ETag/304.
-test('avatars are cacheable: private max-age, etag, and 304 on revalidation', async t => {
+test('avatars require private revalidation and retain cheap ETag responses', async t => {
   let calls = 0;
   const { request } = await fixture(t, {
     fetchImpl: async () => {
@@ -87,7 +87,7 @@ test('avatars are cacheable: private max-age, etag, and 304 on revalidation', as
   });
   const first = await request('/api/chats/same-chat/avatar?account=personal');
   assert.equal(first.status, 200);
-  assert.equal(first.headers.get('cache-control'), 'private, max-age=86400');
+  assert.equal(first.headers.get('cache-control'), 'private, no-cache');
   const etag = first.headers.get('etag');
   assert.match(etag, /^"[A-Za-z0-9_-]{16,}"$/);
   const revalidated = await request('/api/chats/same-chat/avatar?account=personal', { headers: { 'if-none-match': etag } });
@@ -167,9 +167,8 @@ test('unavailable avatars use a short negative cache and retry after its TTL', a
   release();
   const first = await firstPromise;
   assert.ok(first.every(response => response.status === 404));
-  // QA #14b: el 404 debe ser cacheable por el navegador (no-store lo re-bajaba
-  // en cada re-render: 58 peticiones del mismo avatar ausente en media hora).
-  assert.equal(first[0].headers.get('cache-control'), 'private, max-age=300');
+  // The server negative cache avoids provider traffic while HTTP still checks authorization.
+  assert.equal(first[0].headers.get('cache-control'), 'private, no-cache');
   assert.equal(calls, 1);
   assert.equal((await request('/api/chats/same-chat/avatar?account=personal')).status, 404);
   assert.equal(calls, 1);

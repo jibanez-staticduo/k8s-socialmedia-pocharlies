@@ -73,6 +73,8 @@ function stubAttempts(options: { missing?: boolean } = {}): {
   const respond = async (sql: string, params: any[]) => {
     calls.push({ sql, params });
     if (!/whatsapp_send_attempts/.test(sql)) return { rows: [], rowCount: 0 };
+    const bindCount = Math.max(...Array.from(sql.matchAll(/\$(\d+)/g), match => Number(match[1])));
+    assert.equal(params.length, bindCount, 'match PostgreSQL bind parameter count');
     if (options.missing) {
       throw Object.assign(new Error('relation "whatsapp_send_attempts" does not exist'), {
         code: '42P01',
