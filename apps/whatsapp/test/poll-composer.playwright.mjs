@@ -22,14 +22,14 @@ try {
   const page = await browser.newPage({viewport:{width:900,height:850}}); const errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(()=>window.ready);
-  // Pregunta vacía: sin validación nativa el submit corre y pollDraft responde (QA #13).
-  await page.getByRole('button',{name:'Enviar encuesta',exact:true}).click();
+  // Pregunta vacía: el botón se deshabilita hasta tener pregunta y opciones (QA #10);
+  // el alert de pollDraft queda para lo que el estado no muestra (repetidas).
+  assert(await page.getByRole('button',{name:'Enviar encuesta',exact:true}).isDisabled(), 'Empty composer must disable send');
   assert.equal(await page.evaluate(()=>calls.length),0,'Empty question must not submit');
-  assert.match(await page.getByRole('alert').textContent(), /pregunta/i);
   await page.getByLabel('Pregunta',{exact:true}).fill('Que comida elegimos?');
   await page.getByLabel('Opci\u00f3n 1',{exact:true}).fill('Pasta, ensalada');
   await page.getByLabel('Opci\u00f3n 2',{exact:true}).fill('Arroz');
-  await page.getByRole('button',{name:'A\u00f1adir opci\u00f3n',exact:true}).click();
+  await page.getByRole('button',{name:'A\u00f1adir otra opci\u00f3n',exact:true}).click();
   await page.getByLabel('Opci\u00f3n 3',{exact:true}).fill('Sopa');
   await page.getByRole('button',{name:'Subir opci\u00f3n 3',exact:true}).click();
   assert.equal(await page.getByLabel('Opci\u00f3n 2',{exact:true}).inputValue(),'Sopa');
@@ -41,6 +41,9 @@ try {
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     if(process.env.UI_OUTPUT_DIR){await mkdir(process.env.UI_OUTPUT_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.UI_OUTPUT_DIR,`poll-compose-${theme}-${width}.png`)});}
   }
+  // UX #8.7: WhatsApp abre la encuesta con votación única (el toggle, apagado).
+  assert.equal(await page.getByRole('switch',{name:'Permitir varias respuestas'}).isChecked(), false);
+  await page.getByRole('switch',{name:'Permitir varias respuestas'}).check();
   await page.getByRole('switch',{name:'Permitir varias respuestas'}).uncheck();
   await page.getByRole('button',{name:'Enviar encuesta',exact:true}).click();
   await page.evaluate(()=>form.requestSubmit());
@@ -64,8 +67,8 @@ try {
   await page.getByRole('button',{name:'Enviar encuesta',exact:true}).click();
   assert.equal(await page.evaluate(()=>calls.length),3,'Duplicate options never send');
   await page.getByLabel('Opci\u00f3n 2',{exact:true}).fill('Verduras');
-  for(let i=2;i<12;i++) await page.getByRole('button',{name:'A\u00f1adir opci\u00f3n',exact:true}).click();
-  assert(await page.getByRole('button',{name:'A\u00f1adir opci\u00f3n',exact:true}).isDisabled());
+  for(let i=2;i<12;i++) await page.getByRole('button',{name:'A\u00f1adir otra opci\u00f3n',exact:true}).click();
+  assert(await page.getByRole('button',{name:'A\u00f1adir otra opci\u00f3n',exact:true}).isDisabled());
   assert.equal(await page.locator('.poll-option-row').count(),12);
   assert.deepEqual(errors,[]);
   console.log('Poll composer: option rows, ordering, removal, limits, multiple choices, retry tokens, duplicate prevention, context guard and four layouts pass');

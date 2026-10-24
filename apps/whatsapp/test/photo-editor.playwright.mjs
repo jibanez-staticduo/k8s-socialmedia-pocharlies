@@ -185,22 +185,22 @@ try {
   assert.equal(originalUpload.data, originalB64, 'cancelled original bytes changed');
   await clearAttachments();
 
-  // Apply replaces only that attachment while caption + view-once + siblings hold.
+  // Apply replaces only that attachment while caption + siblings hold.
+  // QA #77 addendum: sin «Ver una vez» (el control no se ofrece hasta que el conector lo soporte).
   await page.locator('#attachment').setInputFiles([
     {name:'lote.png', mimeType:'image/png', buffer:red},
     {name:'otro.gif', mimeType:'image/gif', buffer:gifBuffer},
   ]);
-  await page.getByRole('button', {name:'Ver una vez: lote.png'}).click();
   await page.locator('#message').fill('Leyenda del lote');
   await openEditor();
   await page.locator('#photo-rotate-right').click();
   await page.locator('#photo-editor-apply').click();
   await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
-  assert.equal(await page.getByRole('button', {name:'Ver una vez: lote-editada.jpg'}).getAttribute('aria-pressed'), 'true', 'view-once lost after edit');
+  assert.equal(await page.locator('.composer-view-once').count(), 0, 'view-once control must not appear after edit');
   await page.locator('#composer').evaluate(form => form.requestSubmit());
   await page.waitForFunction(n => document.querySelectorAll('#messages [data-send-state="confirmed"]').length >= n, 7);
   const lote = uploads.find(item => item.name === 'lote-editada.jpg');
-  assert.equal(lote.viewOnce, true, 'edited upload lost view-once');
+  assert.equal('viewOnce' in lote, false, 'the payload must never carry viewOnce while the connector route degrades it');
   assert.equal(lote.caption, 'Leyenda del lote', 'caption not preserved through edit');
   const gifUpload = uploads.find(item => item.name === 'otro.gif');
   assert.equal(gifUpload.mimeType, 'image/gif');
@@ -282,24 +282,24 @@ try {
   await clearAttachments();
   await page.setViewportSize({width:390, height:844});
   await page.locator('#attach').click();
-  await page.getByRole('menuitem', {name:'Nuevo sticker'}).click();
-  await page.getByLabel('Subir sticker').setInputFiles({name:'no-imagen.txt', mimeType:'text/plain', buffer:Buffer.from('no')});
+  await page.getByRole('menuitem', {name:'Nueva pegatina'}).click();
+  await page.getByLabel('Subir pegatina').setInputFiles({name:'no-imagen.txt', mimeType:'text/plain', buffer:Buffer.from('no')});
   assert.equal(await page.locator('#photo-editor-overlay').isHidden(), true, 'a non-image must not open sticker creation');
-  assert.equal(await page.getByRole('button', {name:'Enviar sticker'}).isDisabled(), true);
-  await page.getByLabel('Subir sticker').setInputFiles({name:'foto-grande.png', mimeType:'image/png', buffer:Buffer.concat([red, Buffer.alloc(11 * 1024 * 1024)])});
+  assert.equal(await page.getByRole('button', {name:'Enviar pegatina'}).isDisabled(), true);
+  await page.getByLabel('Subir pegatina').setInputFiles({name:'foto-grande.png', mimeType:'image/png', buffer:Buffer.concat([red, Buffer.alloc(11 * 1024 * 1024)])});
   await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
   await page.locator('#photo-editor-cancel').click();
   await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
-  await page.getByLabel('Subir sticker').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
+  await page.getByLabel('Subir pegatina').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
   await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
   await page.waitForFunction(() => document.querySelector('.photo-editor-stage')?.dataset.loaded === '1');
-  assert.equal(await page.locator('.photo-editor-header h2').textContent(), 'Crear sticker');
+  assert.equal(await page.locator('.photo-editor-header h2').textContent(), 'Crear pegatina');
   assert.equal(stickerSends.length, 0);
   await page.keyboard.press('Escape');
   await page.locator('#photo-editor-overlay').waitFor({state:'hidden'});
-  assert(await page.getByRole('dialog', {name:'Emoji, GIF y stickers'}).isVisible(), 'Escape should leave the picker open');
-  assert.equal(await page.getByRole('button', {name:'Enviar sticker'}).isDisabled(), true);
-  await page.getByLabel('Subir sticker').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
+  assert(await page.getByRole('dialog', {name:'Emoji, GIF y pegatinas'}).isVisible(), 'Escape should leave the picker open');
+  assert.equal(await page.getByRole('button', {name:'Enviar pegatina'}).isDisabled(), true);
+  await page.getByLabel('Subir pegatina').setInputFiles({name:'sticker-origen.png', mimeType:'image/png', buffer:red});
   await page.locator('#photo-editor-overlay:not([hidden])').waitFor({state:'visible'});
   await page.waitForFunction(() => document.querySelector('.photo-editor-stage')?.dataset.loaded === '1');
   await page.locator('#photo-tab-text').click();
@@ -325,7 +325,7 @@ try {
       `send button escapes at ${width}px`);
   }
   const stickerResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/messages/compose');
-  await page.evaluate(() => { const send = [...document.querySelectorAll('button')].find(button => button.textContent === 'Enviar sticker'); send.click(); send.click(); });
+  await page.evaluate(() => { const send = [...document.querySelectorAll('button')].find(button => button.textContent === 'Enviar pegatina'); send.click(); send.click(); });
   await stickerResponse;
   assert.equal(stickerSends.length, 1, 'rapid double click must send only once');
   const sticker = stickerSends[0];

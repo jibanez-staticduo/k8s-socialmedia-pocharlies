@@ -4,6 +4,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {
   CONTACT_DIRECTORY_ACTIONS,
   CONTACT_DIRECTORY_LIMIT,
@@ -13,6 +14,7 @@ import {
   contactEntryHint,
   createContactDirectoryClient,
   directoryStatusLabel,
+  filterDirectoryEntries,
   normalizeContactEntry,
   typedPhoneTarget,
 } from '../public/contact-directory-ui.mjs';
@@ -115,7 +117,7 @@ test('every row says what pressing it will do', () => {
   assert.equal(contactEntryHint(open), 'Abre el chat existente');
   assert.equal(contactEntryHint({ ...open, archived: true }), 'Abre un chat archivado');
   assert.equal(contactEntryHint({ canOpen: false, canStart: true }), 'Empieza un chat sin enviar nada');
-  assert.equal(contactEntryHint({ canOpen: false, canStart: true }, { sendingEnabled: false }), 'Envío desactivado en el servidor');
+  assert.equal(contactEntryHint({ canOpen: false, canStart: true }, { sendingEnabled: false }), 'Envío desactivado');
   assert.equal(contactEntryHint({ canOpen: false, canStart: false }), 'Sin número sincronizado');
   assert.equal(contactEntryHint(null), '');
 });
@@ -134,16 +136,16 @@ test('the status line reports the real identity count and its age', () => {
   assert.equal(directoryStatusLabel(null), '');
   const grouped = /^[0-9.,\u00A0 ]*$/;
   const line = directoryStatusLabel({ sync: { identities: 1340 } });
-  assert.match(line, /^1[.,\u00A0 ]?340 identidades sincronizadas en esta cuenta\.$/);
+  assert.match(line, /^1[.,\u00A0 ]?340 contactos sincronizados en esta cuenta\.$/);
   assert.match(line.match(/^[^ ]+/)[0], grouped);
   const large = directoryStatusLabel({ sync: { identities: 12340 } });
-  assert.match(large, /^12[.,\u00A0 ]?340 identidades sincronizadas en esta cuenta\.$/);
+  assert.match(large, /^12[.,\u00A0 ]?340 contactos sincronizados en esta cuenta\.$/);
   assert.match(directoryStatusLabel({ query: 'maria', total: 2, sync: { identities: 1340 } }),
-    /^2 coincidencias entre 1[.,\u00A0 ]?340 identidades sincronizadas/);
+    /^2 coincidencias entre 1[.,\u00A0 ]?340 contactos sincronizados/);
   assert.match(directoryStatusLabel({ sync: { identities: 7, latestSyncAt: '2026-09-27T10:00:00.000Z' } }),
-    /^7 identidades sincronizadas en esta cuenta · sincronizado el \d/);
-  assert.equal(directoryStatusLabel({ sync: { identities: 7, latestSyncAt: 'not-a-date' } }), '7 identidades sincronizadas en esta cuenta.');
-  assert.equal(directoryStatusLabel({ query: '  ', sync: { identities: 0 } }), '0 identidades sincronizadas en esta cuenta.');
+    /^7 contactos sincronizados en esta cuenta · sincronizado el \d/);
+  assert.equal(directoryStatusLabel({ sync: { identities: 7, latestSyncAt: 'not-a-date' } }), '7 contactos sincronizados en esta cuenta.');
+  assert.equal(directoryStatusLabel({ query: '  ', sync: { identities: 0 } }), '0 contactos sincronizados en esta cuenta.');
 });
 
 function payload(overrides = {}) {
@@ -232,4 +234,33 @@ test('the client keeps only usable entries and normalizes the cursor', async () 
   assert.deepEqual(page.entries.map(entry => entry.key), ['chat:1']);
   assert.equal(page.hasMore, true);
   assert.equal(page.nextCursor, 'cursor-2');
+});
+
+test('el filtro local pliega tildes y los números buscan por dígitos (QA #103)', () => {
+  const entries = [
+    { key: 'a', label: 'Ibáñez', sublabel: '', phone: '+34600111222' },
+    { key: 'b', label: 'Ana', sublabel: 'Cliente', phone: null },
+  ];
+  assert.deepEqual(filterDirectoryEntries(entries, 'ibanez').map(e => e.key), ['a']);
+  assert.deepEqual(filterDirectoryEntries(entries, 'cliente').map(e => e.key), ['b']);
+  assert.deepEqual(filterDirectoryEntries(entries, '600 111').map(e => e.key), ['a']);
+  assert.equal(filterDirectoryEntries(entries, '').length, 2);
+});
+
+test('la misma página repetida sale de la caché sin re-pedir (QA #103)', async () => {
+  let calls = 0;
+  const client = createContactDirectoryClient({
+    api: async () => { calls += 1; return payload(); },
+    getAccount: () => account,
+  });
+  await client.page({ q: 'an' });
+  await client.page({ q: 'an' });
+  assert.equal(calls, 1);
+  await client.page({ q: 'bea' });
+  assert.equal(calls, 2);
+});
+test('open({query}) prellena el buscador del directorio (QA #125)', async () => {
+  const src = await readFile(new URL('../public/contact-directory-ui.mjs', import.meta.url), 'utf8');
+  assert.match(src, /function open\(\{ opener = null, query = '' \} = \{\}\)/);
+  assert.match(src, /if \(state\.queryInput\) input\.value = state\.queryInput;/);
 });

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import http from 'node:http';
+import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createApp } from '../server.mjs';
@@ -23,6 +25,20 @@ test('chat API returns scoped continuation cursors and rejects malformed paginat
   assert.equal((await request(`/api/chats?account=personal&archived=only&cursor=${first.nextCursor}`)).status,400);
   assert.equal((await request('/api/chats?account=personal&limit=501')).status,400);
   assert.equal((await request('/api/chats?account=personal&cursor=garbage')).status,400);
+});
+test('/api/chats con q filtra en el servidor y escapa el patrón LIKE (UX #62.2)', async t => {
+  const calls = [];
+  const db = {query:async (sql,args) => { calls.push({sql,args}); return {rows:[{id:'chat-lola',name:'Lola',preview:'hola',previewType:'TEXT',archived:false,_sortTimestamp:'2026-09-27 12:00:00.123456'}]}; }};
+  const {request} = await fixture(t,{db});
+  const body = await (await request('/api/chats?account=personal&q=lola')).json();
+  assert.deepEqual(body.chats.map(chat => chat.id), ['chat-lola']);
+  assert.equal(body.nextCursor, null);
+  const chatCalls = calls.filter(({sql}) => /FROM conversations c/.test(sql));
+  assert.match(chatCalls[0].sql, /ILIKE \$3/);
+  assert.deepEqual(chatCalls[0].args, ['personal', false, '%lola%', 101]);
+  await request('/api/chats?account=personal&q=100%25_');
+  const escaped = calls.filter(({sql}) => /FROM conversations c/.test(sql)).at(-1);
+  assert.deepEqual(escaped.args, ['personal', false, '%100\\%\\_%', 101]);
 });
 async function fixture(t, extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'whatsapp-test-')); const calls = [];
@@ -60,6 +76,41 @@ test('UI modules are served with a browser executable MIME type and require auth
   const font = await request('/fonts/roboto-latin-wght-normal.woff2');
   assert.equal(font.status, 200);
   assert.equal(font.headers.get('content-type'), 'font/woff2');
+  // QA velocidad: sin ETag el navegador no puede revalidar y bajaba los 2,33 MB de
+  // public/ en cada navegación (el no-store global heredado).
+  assert.equal(response.headers.get('cache-control'), 'private, max-age=300');
+  const etag = response.headers.get('etag');
+  assert.match(etag, /^"[A-Za-z0-9_-]{16,}"$/);
+  assert.equal((await request('/message-render.mjs', null, { 'if-none-match': etag })).status, 304);
+  // El HTML del shell sigue no-store: es el que apunta a los assets.
+  const shell = await request('/');
+  assert.equal(shell.status, 200);
+  assert.equal(shell.headers.get('cache-control'), 'no-store');
+});
+test('QA velocidad: estáticos y JSON grandes salen gzip si el cliente lo acepta', async t => {
+  const rows = Array.from({length: 40}, (_, i) => ({id: `chat-${i}`, name: `Contacto con un nombre largo de prueba ${i}`, preview: 'texto de previsualización repetido para pasar del umbral', previewType: 'TEXT', archived: false, _sortTimestamp: '2026-09-27 12:00:00.123456'}));
+  const db = {query: async (sql, args) => ({rows: /FROM conversations c/.test(sql) ? rows : []})};
+  const { app, request } = await fixture(t, {db});
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  // fetch descomprime a escondidas: el crudo se pide con node:http.
+  const raw = (path, headers = {}) => new Promise((resolve, reject) => {
+    http.get(base + path, {headers: {authorization: auth, ...headers}}, res => {
+      const chunks = []; res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks)}));
+    }).on('error', reject);
+  });
+  const asset = await raw('/message-render.mjs', {'accept-encoding': 'gzip'});
+  assert.equal(asset.headers['content-encoding'], 'gzip');
+  assert.equal(asset.headers.vary, 'accept-encoding');
+  assert.ok(asset.body.subarray(0, 2).equals(Buffer.from([0x1f, 0x8b])));
+  assert.ok(gunzipSync(asset.body).length > asset.body.length);
+  assert.equal((await raw('/message-render.mjs')).headers['content-encoding'], undefined);
+  const chats = await raw('/api/chats?account=personal', {'accept-encoding': 'gzip'});
+  assert.equal(chats.status, 200);
+  assert.equal(chats.headers['content-encoding'], 'gzip');
+  assert.ok(JSON.parse(gunzipSync(chats.body)).chats.length === 40);
+  // Un JSON pequeño (health) no merece el coste de comprimir.
+  assert.equal((await raw('/health', {'accept-encoding': 'gzip'})).headers['content-encoding'], undefined);
 });
 test('authenticated media preserves partial responses for audio seeking and rejects invalid ranges', async t => {
   const id = '11111111-1111-1111-1111-111111111111';
@@ -82,6 +133,8 @@ test('authenticated media preserves partial responses for audio seeking and reje
   const path = `/api/media/${id}?account=personal&chat=personal-chat`;
   const response = await request(path, null, { range: 'bytes=2-5', 'if-range': '"fixture"' });
   assert.equal(response.status, 206);
+  // QA velocidad: attachments es inmutable por id; sin esto el scroll volvía a bajar cada foto.
+  assert.equal(response.headers.get('cache-control'), 'private, max-age=86400, immutable');
   assert.equal(response.headers.get('content-range'), 'bytes 2-5/10');
   assert.equal(response.headers.get('accept-ranges'), 'bytes');
   assert.equal(response.headers.get('content-length'), '4');
@@ -368,7 +421,8 @@ test('thumbnail fallback is account and chat scoped and serves only bounded JPEG
   let thumbnail = JSON.parse(JSON.stringify({ imageMessage: { jpegThumbnail: jpeg } })).imageMessage.jpegThumbnail;
   const db = { query: async (sql, args) => {
     if (/FROM conversations/.test(sql)) return { rows: args[1] === 'personal-chat' ? [{ id: 'personal-chat' }] : [] };
-    if (/SELECT p\.message_payload->'imageMessage'/.test(sql)) return { rows: args[1] === 'personal' && args[2]?.includes('personal-chat') ? [{ thumbnail }] : [] };
+    // UX #63: la SQL ahora es COALESCE(imageMessage|videoMessage) — el stub casa el nuevo prefijo.
+    if (/SELECT COALESCE\(p\.message_payload->'imageMessage'/.test(sql)) return { rows: args[1] === 'personal' && args[2]?.includes('personal-chat') ? [{ thumbnail }] : [] };
     return { rows: [] };
   } };
   const { request } = await fixture(t, { db });
@@ -376,7 +430,8 @@ test('thumbnail fallback is account and chat scoped and serves only bounded JPEG
   const response = await request(path);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-type'), 'image/jpeg');
-  assert.equal(response.headers.get('cache-control'), 'no-store');
+  // QA velocidad: la miniatura del payload es inmutable por id → cacheable.
+  assert.equal(response.headers.get('cache-control'), 'private, max-age=86400, immutable');
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), jpeg);
   thumbnail = { __socialmedia_type: 'Uint8Array', value: jpeg.toString('base64') };
   assert.deepEqual(Buffer.from(await (await request(path)).arrayBuffer()), jpeg);
@@ -391,9 +446,9 @@ test('an image without a stored attachment exposes its scoped thumbnail in messa
       id, waMessageId: 'provider-image', text: null, fromMe: true,
       timestamp: new Date('2026-09-23T14:09:36Z'), type: 'IMAGE', metadata: null,
     }] };
-    if (/SELECT m\.id FROM messages m JOIN whatsapp_message_payloads/.test(sql)) {
+    if (/SELECT m\.id, m\.message_type FROM messages m\s+WHERE/.test(sql)) {
       assert.deepEqual(args, [[id], 'personal', ['personal-chat']]);
-      return { rows: [{ id }] };
+      return { rows: [{ id, message_type: 'IMAGE' }] };
     }
     return { rows: [] };
   } };
@@ -790,7 +845,7 @@ test('reject removes a scoped proposal without sending; emergency gate blocks ap
 test('upstream timeout returns explicit uncertainty', async t => {
   const { request } = await fixture(t, { fetchImpl: async () => { throw new DOMException('timeout', 'TimeoutError'); } });
   const response = await request('/api/send', { account: 'personal', chat: 'personal-chat', text: 'hello' });
-  assert.equal(response.status, 502); assert.match((await response.json()).error, /not confirmed/);
+  assert.equal(response.status, 502); assert.match((await response.json()).error, /no está confirmada/);
 });
 test('model catalog excludes non-chat metadata and exposes configured default', async t => {
   const { request } = await fixture(t, { env: { LITELLM_BASE_URL: 'http://models/v1', LITELLM_API_KEY: 'key', APP_AI_DEFAULT_MODEL: 'chat-a' }, fetchImpl: async url => {
@@ -856,4 +911,45 @@ test('access log records method, path (query stripped) and status; /health is no
   assert(!access.includes('account=personal'), 'query must not be logged (avoids leaking the callback code/token)');
   assert(/^GET \/api\/chats 200 \d+ms$/.test(access), `unexpected access line: ${access}`);
   assert(!lines.some(l => l.includes(' /health ')), '/health must not be logged (probe spam)');
+});
+test('/api/chats revalida con ETag: el ciclo sin cambios responde 304 (#160, #142)', async t => {
+  const { request } = await fixture(t);
+  const response = await request('/api/chats?account=personal');
+  assert.equal(response.status, 200);
+  const etag = response.headers.get('etag');
+  assert.match(etag, /^"[A-Za-z0-9_-]{16,}"$/);
+  assert.equal(response.headers.get('cache-control'), 'no-cache');
+  const revalidated = await request('/api/chats?account=personal', null, { 'if-none-match': etag });
+  assert.equal(revalidated.status, 304);
+  assert.equal(revalidated.headers.get('etag'), etag);
+});
+function exportDb(rows, attachments = []) {
+  return { query: async sql => {
+    if (/FROM conversations c/.test(sql)) return { rows: [{ id: '34600112234@s.whatsapp.net', name: 'Chat', wa_chat_id: null, is_group: false, archived: false, unread: 0 }] };
+    if (/LIMIT 50001/.test(sql)) return { rows };
+    if (/FROM attachments a JOIN messages m/.test(sql)) return { rows: attachments };
+    return { rows: [] };
+  } };
+}
+test('/api/chat-export devuelve toda la conversación en una consulta y deriva el nombre del adjunto (#95)', async t => {
+  const stamp = new Date('2026-10-01T10:00:00.000Z');
+  const db = exportDb([
+    { id: '11111111-1111-1111-1111-111111111111', text: 'hola', fromMe: false, timestamp: stamp, type: 'TEXT', senderName: 'Ana' },
+    { id: '22222222-2222-2222-2222-222222222222', text: null, fromMe: true, timestamp: stamp, type: 'IMAGE', senderName: null },
+  ], [{ message_id: '22222222-2222-2222-2222-222222222222', mime_type: 'image/jpeg', file_name: '', file_type: 'IMAGE' }]);
+  const { request } = await fixture(t, { db });
+  const response = await request('/api/chat-export?account=personal&chat=34600112234%40s.whatsapp.net');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.nextCursor, null);
+  assert.deepEqual(body.messages[0], {
+    id: '11111111-1111-1111-1111-111111111111', text: 'hola', timestamp: stamp.toISOString(),
+    fromMe: false, senderName: 'Ana', type: 'TEXT', attachments: [],
+  });
+  assert.deepEqual(body.messages[1].attachments, [{ name: 'foto-2026-10-01.jpg', mimeType: 'image/jpeg' }]);
+});
+test('/api/chat-export responde 413 si la conversación pasa de 50 000 mensajes, nunca trunca (#95)', async t => {
+  const rows = Array.from({ length: 50001 }, (_, i) => ({ id: String(i + 1), text: 'x', fromMe: false, timestamp: new Date(), type: 'TEXT', senderName: null }));
+  const { request } = await fixture(t, { db: exportDb(rows) });
+  assert.equal((await request('/api/chat-export?account=personal&chat=34600112234%40s.whatsapp.net')).status, 413);
 });

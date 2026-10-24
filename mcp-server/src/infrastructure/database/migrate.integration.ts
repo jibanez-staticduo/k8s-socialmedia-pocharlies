@@ -1012,6 +1012,114 @@ test('upgrade imports prod 001-020 ledger, retains bigint rows, and preserves al
   }
 });
 
+test('SKIRM-257: the hand-made prod message table without deleted_at runs 038 and keeps metadata revocations', async () => {
+  const { client } = await database('prod_no_deleted_at');
+  try {
+    await stageProduction(client, true);
+    // The deployed table never had 001's column (42703 measured on prod, 23-10).
+    await client.query('ALTER TABLE messages DROP COLUMN deleted_at');
+    await client.query(
+      "INSERT INTO conversations(id,account,name) VALUES('prod:peer','personal','Peer')"
+    );
+    await client.query(
+      `INSERT INTO messages(conversation_id,wa_message_id,wa_timestamp,direction,sender_wa_id,message_type,
+         platform,is_deleted,metadata)
+       VALUES('prod:peer','revoked',now(),'INBOUND','prod:peer','TEXT','whatsapp',true,
+         '{"deleted_at":"2026-10-20T13:00:00Z"}')`
+    );
+    await runMigrations(client);
+    await runMigrations(client);
+    const row = (
+      await client.query(
+        `SELECT to_char(deleted_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS deleted_at, metadata->>'deleted_at' AS meta
+           FROM messages WHERE wa_message_id='revoked'`
+      )
+    ).rows[0];
+    assert.equal(row.meta, '2026-10-20T13:00:00Z');
+    assert.equal(row.deleted_at, '2026-10-20T13:00:00');
+    assert.equal(
+      (await client.query('SELECT count(*) FROM schema_migrations')).rows[0].count,
+      String(migrationFiles().length)
+    );
+  } finally {
+    await client.end();
+  }
+});
+
+test('SKIRM-261: a prefixed participant filed under another account does not abort 039 on prod data', async () => {
+  const { client } = await database('prod_contacts_collision');
+  try {
+    await stageProduction(client, true);
+    // Prod still holds the author's read-only view, ledgered with the author files.
+    await client.query('DROP TABLE whatsapp_contacts');
+    await client.query(readFileSync(join(dir, '022_whatsapp_contacts_view.sql'), 'utf8'));
+    await client.query(
+      `INSERT INTO _migrations(file) VALUES('021_whatsapp_novedades_channels.sql'),
+         ('022_whatsapp_contacts_view.sql'),('023_whatsapp_chat_time_index.sql')`
+    );
+    await client.query(
+      `INSERT INTO social_accounts(id,channel,account_key,label,legacy_namespace) VALUES
+         ('telegram:personal','telegram','personal','personal','personal'),
+         ('telegram:professional','telegram','professional','professional','professional')
+       ON CONFLICT DO NOTHING`
+    );
+    // Measured on prod (23-10): the professional row was written with account='personal',
+    // so the view yields (personal, tg_3401402332) twice.
+    await client.query(
+      `INSERT INTO participants(id,account,account_id,external_id,name) VALUES
+         ('tg_3401402332','personal','telegram:personal','tg_3401402332','Sauvage Club'),
+         ('professional:tg_3401402332','personal','telegram:professional','tg_3401402332','Sauvage Club')`
+    );
+    await runMigrations(client);
+    await runMigrations(client);
+    assert.deepEqual(
+      (
+        await client.query(
+          "SELECT account,jid FROM whatsapp_contacts WHERE jid='tg_3401402332' ORDER BY account"
+        )
+      ).rows,
+      [
+        { account: 'personal', jid: 'tg_3401402332' },
+        { account: 'professional', jid: 'tg_3401402332' },
+      ]
+    );
+    assert.equal(
+      (await client.query("SELECT account FROM participants WHERE id='professional:tg_3401402332'"))
+        .rows[0].account,
+      'professional'
+    );
+  } finally {
+    await client.end();
+  }
+});
+
+test('SKIRM-261: a reader holding messages makes the run fail fast instead of queueing ingest behind it', async () => {
+  const { client, url } = await database('lock_timeout');
+  const reader = new Client({ connectionString: url });
+  try {
+    await stageProduction(client, true);
+    await reader.connect();
+    // The orphaned sandbox COPY of 23-10: an open AccessShareLock on messages.
+    await reader.query('BEGIN');
+    await reader.query('LOCK TABLE messages IN ACCESS SHARE MODE');
+    process.env.MIGRATE_LOCK_TIMEOUT = '300ms';
+    const started = Date.now();
+    await assert.rejects(runMigrations(client), /lock timeout/);
+    assert.ok(Date.now() - started < 10_000, 'the run must not wait for the reader');
+    assert.equal(
+      (await client.query("SELECT to_regclass('public.telegram_send_attempts') AS t")).rows[0].t,
+      null,
+      'the failed run rolls back completely'
+    );
+    await reader.query('ROLLBACK');
+    await runMigrations(client);
+  } finally {
+    delete process.env.MIGRATE_LOCK_TIMEOUT;
+    await reader.end().catch(() => undefined);
+    await client.end();
+  }
+});
+
 test('legacy NAS send attempts retain token hashes and timestamps and accept prod inserts', async () => {
   const { client } = await database('send_legacy');
   try {

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import { attachmentCaptionError, attachmentError, canViewOnce, filesFromClipboard, MAX_ATTACHMENT_BYTES, readUploadQuality, readUploadQualityPreference, uploadPayload, writeUploadQualityPreference } from '../public/composer-attachment.mjs';
 
 test('clipboard image and document items become attachments without requiring a file picker', () => {
@@ -24,16 +25,12 @@ test('attachment and typed text form one media upload with a caption', () => {
   assert.equal(attachmentError({ name: 'foto.jpg', type: 'image/jpeg', size: MAX_ATTACHMENT_BYTES + 1 }), 'El archivo supera el límite de 10 MiB.');
 });
 
-test('view once is offered only for photos and videos and travels with that upload', () => {
-  for (const type of ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime']) {
-    assert.equal(canViewOnce({type}), true, type);
-  }
-  for (const type of ['image/gif', 'audio/mpeg', 'application/pdf']) {
+test('view once no se ofrece: la ruta del conector degrada el adjunto y traga el caption (QA #77 addendum)', () => {
+  for (const type of ['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime', 'image/gif', 'audio/mpeg', 'application/pdf']) {
     assert.equal(canViewOnce({type}), false, type);
   }
-  const photo = {name:'private.jpg', type:'image/jpeg'};
-  assert.equal(uploadPayload(photo, 'AQID', '', '', 'source', true).viewOnce, true);
-  assert.equal('viewOnce' in uploadPayload(photo, 'AQID'), false);
+  // Nadie pasa viewOnce=true (el botón no se pinta); el payload nunca sale con el campo.
+  assert.equal('viewOnce' in uploadPayload({name:'private.jpg', type:'image/jpeg'}, 'AQID', 'hola'), false);
 });
 
 test('Safari recordings with AAC codec parameters can be staged', () => {
@@ -44,13 +41,20 @@ test('Safari recordings with AAC codec parameters can be staged', () => {
     assert.notEqual(attachmentError({name: 'voice.m4a', type, size: 24}), '');
   }
 });
-test('unsupported files cannot be staged; document MIME must match extension', () => {
-  assert.equal(attachmentError({ name: 'script.js', type: 'text/javascript', size: 10 }), 'Este tipo de archivo no se puede enviar.');
-  assert.equal(attachmentError({ name: 'informe.docx', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 10 }), '');
-  assert.equal(attachmentError({ name: 'informe.pdf', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', size: 10 }), 'El nombre del archivo no coincide con su tipo.');
+// QA #91: WhatsApp manda cualquier fichero como documento; antes era lista cerrada de 6 MIME.
+test('cualquier fichero entra como documento; solo los medios se validan por MIME', () => {
+  for (const file of [
+    { name: 'datos.csv', type: 'text/csv', size: 10 },
+    { name: 'documento.odt', type: 'application/vnd.oasis.opendocument.text', size: 10 },
+    { name: 'archive.tar.gz', type: 'application/gzip', size: 10 },
+    { name: 'informe', type: '', size: 10 },
+    { name: 'script.js', type: 'text/javascript', size: 10 },
+  ]) assert.equal(attachmentError(file), '', file.name);
+  assert.equal(uploadPayload({ name: '', type: 'application/pdf' }, 'AQID').name, 'documento');
   assert.equal(attachmentError({ name: '', type: 'image/png', size: 10 }), '');
   assert.equal(uploadPayload({ name: '', type: 'image/png' }, 'AQID').name, 'imagen.png');
-  assert.equal(attachmentError({ name: 'texto.txt', type: 'text/plain', size: 10 }), '');
+  assert.equal(attachmentError({ name: 'mal.png', type: 'image/svg+xml', size: 10 }), 'Este tipo de archivo no se puede enviar.');
+  assert.equal(attachmentError({ name: 'a/b.png', type: 'image/png', size: 10 }), 'El nombre del archivo no es válido.');
 });
 
 test('audio with text is blocked while a caption on image remains valid', () => {
@@ -63,6 +67,7 @@ test('upload quality is chosen per account for still images and captured in the 
   const values = new Map([['wa-media-upload-quality', JSON.stringify({personal:'hd', secondary:'standard'})]]);
   const storage = {getItem: key => values.get(key) || null};
   const photo = {name:'foto.jpg', type:'image/jpeg'};
+  // QA #93 cerrado en producción (22-10): el conector vivo acepta quality; la preferencia manda.
   assert.equal(readUploadQuality(storage, 'personal', photo), 'hd');
   assert.equal(readUploadQuality(storage, 'secondary', photo), 'standard');
   assert.equal(readUploadQuality(storage, 'other', photo), 'standard');
@@ -75,4 +80,21 @@ test('upload quality is chosen per account for still images and captured in the 
   assert.equal(readUploadQualityPreference(mutableStorage, 'secondary'), 'hd');
   assert.equal(readUploadQualityPreference(mutableStorage, 'personal'), 'hd');
   assert.equal(writeUploadQualityPreference(mutableStorage, 'secondary', 'source'), false);
+});
+// QA #91: el accept del <input> del shell (bajo contrato) se abre desde JS para que el diálogo deje elegir cualquier fichero.
+test('el diálogo de adjuntos no filtra por extensión (QA #91)', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /\$\('attachment'\)\.accept = '';/);
+});
+// QA #113: la proyección del outbox lleva el adjunto (antes el pendiente se pintaba sin él).
+test('el pendiente del outbox proyecta su adjunto (QA #113)', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /attachments: \[\{name: item\.file\?\.name \|\| item\.fileName, mimeType: item\.file\?\.type \|\| '', size: item\.file\?\.size, pending: true\}\]/);
+  assert.match(app, /text: item\.text \|\| ''/);
+});
+
+test('varios adjuntos de un mismo envío salen a la vez, no en serie (QA #122)', async () => {
+  const app = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(app, /async function sendPlannedMessages\(items\) \{\n(?:.*\n)*?\s*await Promise\.all\(items\.map\(async item => \{/);
+  assert.doesNotMatch(app, /async function sendPlannedMessages\(items\) \{\n\s*for \(const item of items\)/);
 });

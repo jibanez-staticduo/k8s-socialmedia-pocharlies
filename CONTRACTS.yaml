@@ -286,7 +286,10 @@ contracts:
     The WhatsApp message id is derived from (account, key) (`3EB0` + 18 hex). While the table is missing
     the key is ignored and the send goes out. The header/field names, the replay semantics, the two 409
     failureClass values and the no-key-is-legacy rule are contract: changing any is breaking — a new `.v2`
-    entry beside this one.'
+    entry beside this one. QA #49 (22-10): a failure that provably never reached the network — Baileys''
+    media upload, ''Media upload failed on all hosts'', which precedes the message post by construction —
+    moves the claimed row to ''failed'' and stays retryable; the 409 send_outcome_uncertain is reserved
+    for post-network outcomes.'
 - id: http.whatsapp-connector.messages-react.v1
   kind: http-route
   value: /messages/react
@@ -463,7 +466,7 @@ contracts:
     question, metadata.poll {question, options, selectableCount}); its secret stays in whatsapp_message_payloads.
     The path, the body fields, the 200 shape and the failureClass values are contract: changing any is
     breaking — a new `.v2` entry beside this one. Also consumed by the MCP tool social_send_poll (mcp-server/src/mcp/server.ts
-    canonicalSendPoll; added later, surface unchanged).'
+    canonicalSendPoll; added later, surface unchanged). Consumer apps/whatsapp/server.mjs (whatsapp-app composer) sent values/startDate/endDate, never accepted by a live connector; migrated to the declared names (QA #78, 22-10).'
 - id: http.whatsapp-connector.messages-poll-vote.v1
   kind: http-route
   value: /messages/poll/vote
@@ -524,7 +527,7 @@ contracts:
     description, startTime, endTime (ms), location, joinLink, isCanceled, extraGuestsAllowed}). The path,
     the body fields, the 200 shape and the failureClass values are contract: changing any is breaking
     — a new `.v2` entry beside this one. Also consumed by the MCP tool social_send_event (mcp-server/src/mcp/server.ts
-    canonicalSendEvent; added later, surface unchanged).'
+    canonicalSendEvent; added later, surface unchanged). Consumer apps/whatsapp/server.mjs (whatsapp-app composer) sent startDate/endDate, never accepted by a live connector; migrated to the declared names (QA #78, 22-10).'
 - id: http.whatsapp-connector.messages-event-respond.v1
   kind: http-route
   value: /messages/event/respond
@@ -737,6 +740,32 @@ contracts:
     on VOICE/AUDIO rows (their content is the transcription). The pairing pool (telegram-pairing) never
     publishes it. The subject, the field names and the source values are contract: changing any is breaking
     — a new `.v2` entry beside this one.'
+- id: http.telegram-connector.send-idempotency.v1
+  kind: http-route
+  value: Idempotency-Key
+  role: provider
+  files:
+  - connectors/telegram/src/api/controller.ts
+  - connectors/telegram/src/api/public-routes.ts
+  - connectors/telegram/src/send-idempotency.ts
+  - mcp-server/src/infrastructure/database/migrations/040_telegram_send_attempts.sql
+  status: active
+  note: 'DGX-1235 B2 (i). Opt-in send idempotency on POST /api/v1/messages/:chatId and POST /api/public/send/:chatId
+    of the house Telegram connectors, consumed by correo-bridge POST /envios (correo.connector.v1). Same key rules
+    as http.whatsapp-connector.send-idempotency.v1: header `Idempotency-Key` and/or body field `idempotencyKey`
+    (same value if both; a string of at most 200 characters, blank = absent; otherwise 400 {error, failureClass:
+    "invalid_request"}); without a key both routes answer exactly what they answered before. With a key, one row
+    per (CONNECTOR_ACCOUNT, sha256(key)) in telegram_send_attempts (migration 040; the raw key is never stored):
+    the same key with the same request answers the record without sending again, 200 {success: true, messageId,
+    sentAt, deduplicated: true} (a first send adds sentAt and deduplicated: false); the same key with a different
+    request is 409 {error, failureClass: "idempotency_key_reused"}; an earlier attempt whose outcome is unknown
+    (timeout, dropped connection, a 5xx from Telegram) is 409 {error, failureClass: "send_outcome_uncertain",
+    messageId?} and is never resent; an RPC refusal from Telegram (4xx, FLOOD_WAIT) moves the attempt to failed
+    and the same key sends again. Difference with WhatsApp on purpose: with a key and the table unreachable (or no
+    DATABASE_URL) the answer is 503 {error, failureClass: "idempotency_unavailable"} and NOTHING is sent. The
+    message random_id is derived from (account, key) (mtcute sendText randomId), so Telegram itself rejects a
+    duplicate (RANDOM_ID_DUPLICATE). The header/field names, the replay semantics, the 409/503 failureClass values
+    and the no-key-is-legacy rule are contract: changing any is breaking — a new `.v2` entry beside this one.'
 - id: http.telegram-connector.messages-send.v1
   kind: http-route
   value: /messages/:chatId
@@ -1104,7 +1133,9 @@ contracts:
   - connectors/whatsapp-web/src/api/controller.ts
   status: active
   note: 'POST /api/v1/chats/presence/read of the house WhatsApp connectors (fase 3 / PR-8), consumed by
-    dgx-messages (/messages → contact presence in the chat header). HMAC-signed body {conversationId,
+    dgx-messages (/messages → contact presence in the chat header) and by apps/whatsapp/server.mjs
+    (GET /api/presence → subtítulo del chat directo; la GET parametrizada que la app llamaba antes nunca
+    existió en un conector vivo, QA #27, 22-10 — superficie sin cambios). HMAC-signed body {conversationId,
     participant?} (participant: phone or user jid, for one member of a group). A read: no sending gate;
     503 disconnected. Presence lives in the connector''s memory only (from WhatsApp''s presence.update;
     60 s for online / offline, 8 s for typing / recording; cleared on every reconnect) and is looked up
@@ -1360,7 +1391,7 @@ contracts:
     when none)}], count, readAt, cached}. Names read only from conversations / participants; a pairing
     client (ingest off) answers the bare identities. The path and the 200 shape are contract: changing
     either is breaking — a new `.v2` entry beside this one. Also consumed by the MCP tool social_list_blocked
-    (mcp-server/src/mcp/server.ts canonicalListBlocked; added later, surface unchanged).'
+    (mcp-server/src/mcp/server.ts canonicalListBlocked; added later, surface unchanged). Also consumed by apps/whatsapp/server.mjs (GET /api/contact-block derives the per-chat state from this list; the per-chat GET the app used to call never existed on a live connector, QA #13, 22-10). El panel de bloqueados de la app (server.mjs storedContactNames) atribuye el nombre a un @lid bloqueado vía la fila de conversations que lo vincula a su teléfono (wa_chat_id), mismo patrón lid_map del directorio; la forma del 200 no cambia (QA #105, 22-10).'
 - id: http.whatsapp-connector.groups-invite.v1
   kind: http-route
   value: /groups/invite
@@ -1957,7 +1988,9 @@ contracts:
     retry: each owner attempt retains its original model/effort snapshot. Model options are sent
     to the native session lock and run/completion request; default sends an empty options object
     to clear a prior explicit reasoning override. The provider may clamp reasoning levels; the
-    catalog must not claim a distinct unsupported wire level or expose credentials.'
+    catalog must not claim a distinct unsupported wire level or expose credentials. El texto
+    legible de los errores 502/503 no es contrato (copia para el usuario, traducida al castellano
+    en QA #13 22-10); lo congelado es la ruta, la autenticación y los códigos de estado.'
 - id: http.whatsapp-app.hermes-stop.v1
   kind: http-route
   value: /api/ai/stop
@@ -1979,7 +2012,9 @@ contracts:
     Settlement checks the current ledger run under the session lock so an old stop cannot overwrite
     a later retry. Failed results add sanitized error and retryable fields; only a proven unknown
     provider failure before execution permits explicit retryFailedRun on the same owner turn,
-    preserving its delivery request ID and using a separate run-submission idempotency key.'
+    preserving its delivery request ID and using a separate run-submission idempotency key. El texto
+    legible de los errores 502/503 no es contrato (copia para el usuario, traducida al castellano
+    en QA #13 22-10); lo congelado es la ruta, la autenticación y los códigos de estado.'
 - id: http.whatsapp-app.favicon.v1
   kind: http-route
   value: /favicon.ico
@@ -1990,7 +2025,26 @@ contracts:
   status: active
   note: 'GET and HEAD are public before OIDC login and return 200 image/x-icon.
     GET returns a multi-resolution ICO; HEAD has the same MIME and content length.
-    Query parameters may version the icon without changing the route.'
+    Query parameters may version the icon without changing the route. index.html
+    esta listado porque el shell apunta el icono (link rel=icon): lo que es
+    contrato aqui es esa referencia y la ruta; el texto del banner, el meta
+    viewport del shell y el orden del estado de carga bajo la lista no forman
+    parte de esta entrada (SC-2760, 22-10); tampoco la copia de la sección
+    «Atajos» (QA #104 documenta el mapa featureShortcut), ni la redacción del switch
+    «Documentos» de descarga automática (copia del panel, QA 22-10; el valor por defecto
+    apagado es conducta del store, no de esta entrada). El icono es ahora de marca (burbuja
+    verde WhatsApp, ICO multi-resolución 16/32/48); la ruta, el MIME y la
+    referencia del shell no cambian. El <title> pasa a «WhatsApp» y la app lo
+    reemplaza por «(N) WhatsApp» con no leídos (QA #74) — el título no es
+    contrato. La etiqueta aria-expanded de los botones del rail Estados/Canales
+    tampoco (estado de selección del shell, UX #59). La sección «Privacidad» del
+    popover de Ajustes (botón settings-privacy) es markup del shell que abre el
+    modal existente: no es contrato (UX #60, 23-10). El control de Tema pasa de
+    <select> a radios segmentadas (mismo localStorage wa-theme y mismas
+    conductas): el control tampoco es contrato (UX #61.2, 23-10). La proyección
+    añade posterUrl a los adjuntos de vídeo y /api/media/thumb/ sirve también el
+    jpegThumbnail de VIDEO (antes solo IMAGE): la respuesta se amplía sin cambiar
+    valor ni ruta existentes — no es contrato (UX #63, 23-10).'
 - id: http.hindsight.socialmedia-bank.v1
   kind: http-route
   value: /v1/default/banks/{bank_id}
@@ -2297,7 +2351,10 @@ contracts:
     GET /auth/callback de la app whatsapp.e-dani.com: cierre del flujo OIDC
     (codigo + state -> sesion). El 403 (sub fuera de OIDC_ALLOWED_SUBJECTS) se
     contesta en HTML con el enlace de logout del issuer, no en JSON: quien
-    navega necesita cerrar la sesion SSO equivocada (Dani, 19-10).
+    navega necesita cerrar la sesion SSO equivocada (Dani, 19-10). El 400
+    (enlace caducado o state/nonce invalido) tambien es HTML, con «Volver a
+    entrar» que reinicia el flujo: nunca JSON desnudo al navegador (UX #1.1,
+    22-10).
   exception:
     reason: >-
       Log de acceso y eventos de auth (QA #77): se anade console.log dentro del
@@ -2323,7 +2380,50 @@ contracts:
     casa, linaje NAS) por id para usar el índice — el cast por texto sobre
     80k filas de un grupo pasaba de los 10 s del statement_timeout en frío
     (57014, medido 20-10) —; con ids uuid (el desplegador original) por
-    texto (42883 si se fija un tipo, medido 20-10).
+    texto (42883 si se fija un tipo, medido 20-10). Desde 22-10 la
+    proyección de metadata normaliza la forma almacenada por el conector
+    (claves en singular contact/poll/event → {kind,…}, phones[0] → phone,
+    isCanceled → isCancelled) y deriva viewOnce del message_type
+    (QA #79/#77): aditivo, filas que antes salían con metadata {} salen
+    ahora con su payload. Desde 23-10 la respuesta lleva ETag fuerte y
+    cache-control no-cache (tambien en GET /api/chats): un If-None-Match
+    igual responde 304 sin cuerpo — aditivo, el 200 sigue igual (#160/#142).
+    Desde 23-10 (gzip, #266) los JSON >1 KiB y los estaticos de texto salen
+    con content-encoding gzip y vary accept-encoding cuando el cliente los
+    acepta — variante de representacion HTTP: la forma del 200 no cambia;
+    quien llame sin accept-encoding (o un proxy que la quite) recibe el
+    crudo de siempre.
+- id: http.whatsapp-app.chats-list.v1
+  kind: http-route
+  value: /api/chats
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/chats de la app whatsapp.e-dani.com: pagina de conversaciones de
+    una cuenta (cursor opuesto, limite <=500) con nombre legible, avatar
+    proxied, fijado/silenciado y favoritos. Desde 23-10 (UX #62.2) admite q:
+    filtra el servidor por nombre, id, wa_chat_id y alias PN (ILIKE escapado,
+    tope 100 caracteres) y responde una sola pagina con nextCursor null —
+    aditivo: sin q el comportamiento es el de siempre. La app la llama con q
+    para el buscador del lateral, que antes solo filtraba la pagina cargada.
+- id: http.whatsapp-app.chat-export.v1
+  kind: http-route
+  value: /api/chat-export
+  role: provider
+  files:
+    - apps/whatsapp/server.mjs
+  status: active
+  note: >-
+    GET /api/chat-export de la app whatsapp.e-dani.com (QA velocidad #95): la
+    conversacion entera en una sola consulta para el export TXT —
+    {messages, nextCursor: null} con filas {id, text, timestamp, fromMe,
+    senderName, type, attachments:[{name, mimeType}]} (forma de
+    /api/messages sin reacciones, citas ni previews; las miniaturas
+    previewOnly no salen: el transcript ya las descartaba). Tope 50 000
+    mensajes igual que el cliente: por encima 413 «Export overflow», nunca
+    truncado.
 - id: http.whatsapp-app.messages-delete.v1
   kind: http-route
   value: /api/messages/delete
@@ -2334,8 +2434,17 @@ contracts:
   note: >-
     POST /api/messages/delete de la app whatsapp.e-dani.com (scope me|
     everyone). El espejo local escribe la revocacion en metadata
-    (deleted_for_me / deleted_at como texto): la casa no tiene columna
-    deleted_at (42703 medido 20-10); el conector es la fuente de verdad.
+    (deleted_for_me / deleted_at como texto). La casa no tenía columna
+    deleted_at (42703 medido 20-10); desde SKIRM-257 (037) existe, nula,
+    solo para que corra la 038: la fuente de verdad sigue siendo metadata
+    y el conector.
+    Esta entrada cubre la ruta batched de acciones (reply, react, forward,
+    edit, delete y alias): el espejo de edicion escribe content,
+    is_edited y updated_at, nunca edited_at como columna (42703, QA #5
+    22-10); la hora de edicion vive en metadata->>'edited_at'.
+    Un rechazo 4xx del conector sigue respondiendo 502 (la accion no quedo
+    confirmada) pero con su motivo y failureClass en el cuerpo (QA #10,
+    22-10): sin ello el navegador solo veia "Upstream returned HTTP 400".
 - id: http.whatsapp-app.logout.v1
   kind: http-route
   value: /auth/logout
@@ -2360,7 +2469,22 @@ contracts:
     whatsapp.e-dani.com. El id es bigint (o uuid legacy): nunca validar solo
     por patrón uuid (QA #6). La referencia sale solo de attachments.file_url
     — storage_key no existe en la casa (42703, QA #12) — y mediaRequest
-    entiende refs s3:// contra S3_ENDPOINT/S3_BUCKET.
+    entiende refs s3:// contra S3_ENDPOINT/S3_BUCKET. Los 200/206 llevan
+    cache-control private, max-age=86400, immutable (la fila de attachments es
+    inmutable por id; sin ella el scroll volvía a bajar cada foto, QA
+    velocidad 22-10); los 4xx siguen sin caché. /api/chats/media añade por
+    item `thumbUrl` (GET /api/media/thumb/<id de mensaje>, jpegThumbnail del
+    payload): la rejilla de la galería pinta el thumb y el original solo al
+    abrir — 9,2 MB/45 items a cientos de KB (QA #72). Campo aditivo; el
+    envelope y el cursor no cambian. Desde QA #96 la clasificación mira el
+    adjunto: un DOCUMENT con file_type/mime de vídeo entra en la galería y sale
+    de «Documentos», y uno de audio sale con `kind: audio` (valores aditivos
+    del campo kind). En /api/messages, `attachments[].name` deriva de
+    file_type/mime + fecha cuando file_name está vacío (QA #99); los nombres
+    explícitos no cambian. content-disposition: inline para
+    image/jpeg|png|gif|webp, application/pdf (se ve, como la oficial, QA
+    #115.2), audio/* y video/*; attachment para el resto (svg y html pueden
+    ejecutar guion con el type servido).
 - id: http.whatsapp-app.search.v1
   kind: http-route
   value: /api/search
@@ -2374,7 +2498,15 @@ contracts:
     m.content con ILIKE y necesita el índice trigram
     idx_messages_content_trgm (migración 002); sin él es seq scan y
     revienta el statement_timeout (57014). chatName sale legible
-    (readableChatName), nunca el jid crudo (QA #10).
+    (readableChatName), nunca el jid crudo (QA #10). Desde QA 22-10 la
+    respuesta se sirve con cache-control private, max-age=30 (re-buscar el
+    mismo término no vuelve a la BD; 30 s de antigüedad aceptables). Desde
+    QA #100 hay además caché de resultado en el proceso (60 s por
+    cuenta+término+ámbito+cursor): el trgm de un término común trae miles de
+    filas y el heap fetch costaba 2,9 s repetida. Toda mutación de mensaje
+    (reply/react/forward/edit/delete) vacía esa caché: un mensaje borrado o
+    editado no puede seguir saliendo en la búsqueda. El envelope y el cursor
+    son contrato; la cabecera de caché no lo es.
 - id: http.whatsapp-app.chat-details.v1
   kind: http-route
   value: /api/chat-details
@@ -2392,4 +2524,72 @@ contracts:
     avatarUrl solo con foto guardada (null = iniciales): forzar la URL del
     proxy en cada fila disparaba ~1 peticion por chat al abrir (985 medidas,
     931x404 + 54x502 del conector); la busqueda al proveedor queda para la
-    cabecera del chat abierto.
+    cabecera del chat abierto. Los 200 de avatar (chats y contacts) salen con
+    cache-control private max-age=86400 + ETag y responden 304 a
+    if-none-match (QA velocidad 3, 22-10: el no-store global hacia bajar 7,6 MB
+    de avatares en cada apertura); los 404 de avatar salen con private
+    max-age=300 (QA 14b, 22-10: el no-store del handler global re-bajaba el
+    mismo avatar ausente 58 veces en media hora; un avatar que no existe no
+    aparece de un render a otro, y si pone foto se ve al expirar el
+    max-age); los demas 404 y los 5xx siguen no-store. capabilities gana un
+    tercer flag aditivo changeSettings (announce/restrict de la ficha de grupo,
+    UX #49.2, 23-10: solo administradores; la forma del resto no cambia). name
+    puede salir null cuando no hay nombre util (UX #32.1/#56.2, 23-10: el jid/LID
+    crudo dejo de ser nombre visible; con telefono guardado sale +E164; la ficha
+    pinta «Grupo»/«Contacto»; el id crudo sigue en chat).
+- id: correo.connector.v1
+  kind: http-route
+  value: /hilos/{hilo_ref}
+  role: provider
+  files:
+  - connectors/correo-bridge/src/lectura.ts
+  status: active
+  note: 'DGX-1235 B1. correo-bridge serves the read routes of correo.connector.v1, the contract the correo
+    core defines and calls (pocharlies-org/correo-core openapi/correo.connector.v1.yaml, publisher there):
+    GET /mensajes/{ref} and GET /hilos/{hilo_ref}?limite= (1-50, default 30, oldest to newest), HMAC V2
+    with the key of the connector (X-Correo-Key-Id wa-*/tg-*, X-Correo-Timestamp ±60 s, X-Correo-Signature
+    over "<ts>.<METHOD> <raw path?query>\n<body>"), 401/404/422/502 with {error, detalle} and never the text
+    or the identity. MensajeLeido {ref, hilo_ref, direccion, ts, texto ≤4096, adjuntos [{tipo}] ≤20}. Reading
+    marks nothing as read. POST /envios (B2) is correo.connector-envios.v1. In the other direction the bridge POSTs /v2/mensajes/{conector}
+    of correo.ingest.v2 with the key of that connector''s producer. A breaking change is correo.connector.v2
+    on both sides.'
+- id: correo.connector-envios.v1
+  kind: http-route
+  value: /envios
+  role: provider
+  files:
+  - connectors/correo-bridge/src/envios.ts
+  status: active
+  note: 'DGX-1235 B2. correo-bridge serves POST /envios of correo.connector.v1 (pocharlies-org/correo-core
+    openapi/correo.connector.v1.yaml, publisher there; caller CanalHttp.enviar), HMAC V2 with the key of the
+    connector like the read routes. Closed body {destino_ref, texto, sha256, idempotencia}: destino_ref canonical
+    for the channel of the key that signed, texto 1-4096 characters, sha256 of texto in UTF-8, idempotencia
+    ^[A-Za-z0-9_.:-]{1,200}$. Answers 200 {ref, ts, deduplicado}, 409 idempotencia_reutilizada / resultado_incierto,
+    422 no_procesable / primer_contacto (no inbound message among the last 50 of the conversation; the connector
+    is not called), 403 envio_desactivado (ENABLE_OUTBOUND not true, or the connector''s sending gate), 502
+    canal_no_responde, 401 unsigned; {error, detalle} never carries the text, the identity or the key. It stores
+    nothing: it hands texto to POST /api/v1/messages/send of the WhatsApp connector (conversationId = destino_ref
+    as is) or POST /api/v1/messages/:chatId of the Telegram one, with idempotencia as Idempotency-Key
+    (http.whatsapp-connector.send-idempotency.v1, http.telegram-connector.send-idempotency.v1). The ref is the
+    one the outbound echo brings to POST /v2/mensajes. A breaking change is correo.connector.v2 on both sides.'
+- id: nats.correo-bridge.whatsapp-message-received.v1
+  kind: routing-key
+  value: whatsapp.MessageReceived
+  role: consumer
+  files:
+  - connectors/correo-bridge/src/filter.ts
+  status: active
+  note: 'DGX-1235 B1. correo-bridge consumes the core-NATS subject the WhatsApp connectors publish (MessageReceivedEvent
+    of shared/src/types/events.ts), queue group correo-bridge, and reads only account, conversationId, waMessageId,
+    waTimestamp, senderWaId, fromMe and, for the tracking opt-in control message, content (never forwarded).
+    Renaming the subject or those fields breaks it.'
+- id: nats.correo-bridge.telegram-message-received.v1
+  kind: routing-key
+  value: telegram.MessageReceived
+  role: consumer
+  files:
+  - connectors/correo-bridge/src/filter.ts
+  status: active
+  note: 'DGX-1235 B1. correo-bridge consumes the core-NATS subject the Telegram connectors publish (TelegramMessageReceivedEvent),
+    queue group correo-bridge, and reads only account, conversationId, chatType, telegramMessageId, telegramTimestamp,
+    senderTelegramId and isOutbound. Renaming the subject or those fields breaks it.'

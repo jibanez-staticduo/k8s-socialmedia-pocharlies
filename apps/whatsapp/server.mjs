@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Readable } from 'node:stream';
@@ -12,7 +13,7 @@ import pg from 'pg';
 import { utcDatabaseTypes } from './lib/database-time.mjs';
 import { getDatabaseSchema, useDatabaseSchema, validDatabaseId } from './lib/database-schema.mjs';
 import { checkOrigin, sendingEnabled, signedHeaders, required, uploadBytes, isValidBase64, fail } from './lib/security.mjs';
-import { AppAuth, TRANSACTION_COOKIE, parseCookie, safeReturnTo, unauthorizedHtml } from './lib/auth.mjs';
+import { AppAuth, TRANSACTION_COOKIE, callbackErrorHtml, parseCookie, safeReturnTo, unauthorizedHtml } from './lib/auth.mjs';
 import { mediaRequest } from './lib/media.mjs';
 import { readMediaLibrary } from './lib/media-library.mjs';
 import { readChatDirectory } from './lib/chat-directory.mjs';
@@ -41,6 +42,10 @@ const root = dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
 const MAX_AVATAR_BYTES = 4 * 1024 * 1024;
 const MAX_PAGE_SIZE = 200;
+// QA #100: re-buscar el mismo término volvía a la BD (2,9 s; el trgm trae miles de
+// filas y el heap fetch manda). Una página de búsqueda no cambia en 60 s.
+const SEARCH_CACHE_TTL_MS = 60_000;
+const searchCache = new Map();
 // A change stream must speak before NPM's 240s read timeout closes it, and a
 // stalled browser must not grow the write queue without bound.
 const REALTIME_HEARTBEAT_MS = 15000;
@@ -506,12 +511,23 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
   async function remote(url, options, timeout = 30000, acceptedStatuses = []) {
     try { const result = await fetchImpl(url, { ...options, redirect: 'error', signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout) });
       if (!result.ok && !acceptedStatuses.includes(result.status)) {
-        const error = fail(502, `Upstream returned HTTP ${result.status}`);
+        // QA #10: el conector habla en su cuerpo (error/failureClass). Se
+        // conserva el 502 (la accion no quedo confirmada: semantica de las
+        // rutas de estado) pero el motivo viaja al navegador: sin ello
+        // cualquier 400 era "Upstream returned HTTP 400" ininterpretable.
+        const body = await result.json().catch(() => null);
+        const reason = body && typeof body === 'object' ? cleanProviderValue(body.error, 300) : null;
+        const failureClass = body && typeof body === 'object' ? cleanProviderValue(body.failureClass, 64) : null;
+        const error = fail(502, reason || `El servicio de WhatsApp devolvió HTTP ${result.status}`);
         error.upstreamStatus = result.status;
+        if (reason || failureClass) {
+          error.code = cleanProviderValue(body.code, 64) || 'UPSTREAM_REJECTED';
+          if (failureClass) error.details = { failureClass };
+        }
         throw error;
       }
       return result;
-    } catch (e) { if (e.status) throw e; throw fail(502, 'Upstream unavailable or timed out; action is not confirmed'); }
+    } catch (e) { if (e.status) throw e; throw fail(502, 'El servicio de WhatsApp no responde o ha agotado el tiempo de espera; la acción no está confirmada'); }
   }
   async function recoverHermesAnswer(hermesId, marker) {
     const response = await remote(`${hermesApiBaseUrl(env.HERMES_API_URL)}/api/sessions/${encodeURIComponent(hermesId)}/messages?limit=500&order=latest`, {
@@ -641,6 +657,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       return withType(chat, chat.previewType || latest?.message_type);
     });
   }
+  // QA #99: file_name llega vacío en ~98 % de los adjuntos; el nombre de descarga se deriva del tipo.
+  const downloadNames = { PHOTO: 'foto', IMAGE: 'foto', VIDEO: 'video', VOICE: 'audio', AUDIO: 'audio', STICKER: 'sticker', DOCUMENT: 'documento' };
+  const downloadExts = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'application/pdf': 'pdf' };
   async function readMessageRows(account, chat, { before, limit, around }) {
     const conversation = await conversationFor(account, chat);
     const readIds = await conversationReadIds(account, conversation);
@@ -730,16 +749,25 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     ) : [];
     const attachedIds = new Set(attachments.map(item => item.message_id));
     const missingImages = rows.filter(row => row.type === 'IMAGE' && !attachedIds.has(row.id)).map(row => row.id);
-    const thumbnails = missingImages.length ? await query(
-      `SELECT m.id FROM messages m JOIN whatsapp_message_payloads p
-         ON p.wa_message_id=m.wa_message_id AND p.account=m.account
+    // UX #63: una sola consulta de payloads — previsualización de imágenes sin adjunto y póster de los vídeos.
+    const thumbIds = [...new Set([...missingImages, ...rows.filter(row => row.type === 'VIDEO').map(row => row.id)])];
+    const thumbs = thumbIds.length ? await query(
+      // EXISTS (no JOIN): el JOIN con el OR IMAGE/VIDEO invierte el orden en el planner y pierde messages_pkey (rojo en CI 23-10).
+      `SELECT m.id, m.message_type FROM messages m
         WHERE m.id=ANY($1::${messageIdType}[]) AND m.account=$2 AND m.conversation_id=ANY($3::text[])
           AND m.platform='whatsapp' AND ${MESSAGE_RETAINED_SQL}
-          AND jsonb_typeof(p.message_payload->'imageMessage'->'jpegThumbnail') IN ('string','object')
-          AND pg_column_size(p.message_payload->'imageMessage'->'jpegThumbnail') <= 300000`,
-      [missingImages, account.accountId, readIds]
+          AND ((m.message_type='IMAGE' AND EXISTS (SELECT 1 FROM whatsapp_message_payloads p
+                WHERE p.account=m.account AND p.wa_message_id=m.wa_message_id
+                  AND jsonb_typeof(p.message_payload->'imageMessage'->'jpegThumbnail') IN ('string','object')
+                  AND pg_column_size(p.message_payload->'imageMessage'->'jpegThumbnail') <= 300000))
+            OR (m.message_type='VIDEO' AND EXISTS (SELECT 1 FROM whatsapp_message_payloads p
+                WHERE p.account=m.account AND p.wa_message_id=m.wa_message_id
+                  AND jsonb_typeof(p.message_payload->'videoMessage'->'jpegThumbnail') IN ('string','object')
+                  AND pg_column_size(p.message_payload->'videoMessage'->'jpegThumbnail') <= 300000)))`,
+      [thumbIds, account.accountId, readIds]
     ) : [];
-    const thumbnailIds = new Set(thumbnails.map(item => item.id));
+    const thumbnailIds = new Set(thumbs.filter(item => item.message_type === 'IMAGE').map(item => item.id));
+    const posterIds = new Set(thumbs.filter(item => item.message_type === 'VIDEO').map(item => item.id));
     const textIds = rows.filter(row => row.type === 'TEXT' && /https?:\/\//i.test(row.text || '')).map(row => row.id);
     const previewRows = textIds.length ? await query(
       `SELECT m.id, p.message_payload->'extendedTextMessage' AS preview_payload
@@ -781,7 +809,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       } : {}),
       ...(row.replyToMessageId ? { replyPreview: projectReplyPreview({ replyToMessageId: row.replyToMessageId, replyType, replyText, replySenderName, replyAvailable, replyLocallyDeleted }, metadata, conversation) } : {}),
       metadata: {
-        ...publicMessageMetadata(metadata),
+        ...publicMessageMetadata(metadata, row.type),
         ...(row.type === 'POLL' && pollResults.has(optionalProviderMessageId(row.waMessageId))
           ? { results: pollResults.get(optionalProviderMessageId(row.waMessageId)) } : {}),
       },
@@ -796,8 +824,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       attachments: attachments.filter(item => item.message_id === row.id).map(item => ({
         id: String(item.id),
         url: `/api/media/${encodeURIComponent(item.id)}?account=${encodeURIComponent(account.accountId)}&chat=${encodeURIComponent(chat)}`,
+        ...(posterIds.has(row.id) ? { posterUrl: `/api/media/thumb/${encodeURIComponent(row.id)}?account=${encodeURIComponent(account.accountId)}&chat=${encodeURIComponent(chat)}` } : {}),
         mimeType: item.mime_type || 'application/octet-stream',
-        name: item.file_name || 'attachment',
+        name: item.file_name || `${downloadNames[item.file_type] || 'archivo'}-${new Date(row.timestamp).toISOString().slice(0, 10)}.${downloadExts[(item.mime_type || '').toLowerCase()] || 'bin'}`,
         type: item.file_type || null,
         size: item.file_size || null,
         caption: item.caption || null,
@@ -846,15 +875,44 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       fileName: media.file_name || 'avatar',
     };
   }
-  function sendAvatar(res, avatar) {
+  function sendAvatar(req, res, avatar) {
+    // QA velocidad 3: el no-store global hacía que cada re-render de la lista
+    // bajara otra vez los avatares (157 peticiones y 7,6 MB medidos en una
+    // apertura). La imagen de perfil cambia rara vez: 24 h en el navegador.
+    // shortcut: si un contacto cambia su foto y debe verse antes, se baja el
+    // max-age o se revalida por SSE; el ETag ya permite el 304 barato.
+    const cacheable = (avatar.status || 200) === 200;
+    const etag = `"${createHash('sha1').update(avatar.bytes).digest('base64url')}"`;
+    if (cacheable && req?.headers?.['if-none-match'] === etag) {
+      res.statusCode = 304;
+      res.setHeader('cache-control', 'private, max-age=86400');
+      res.setHeader('etag', etag);
+      return res.end();
+    }
     res.statusCode = avatar.status || 200;
     for (const [name, value] of Object.entries(avatar.headers || {})) res.setHeader(name, value);
     res.setHeader('content-length', avatar.bytes.length);
     res.setHeader('content-type', safeImageType(avatar.contentType));
     res.setHeader('content-disposition', `inline; filename*=UTF-8''${encodeURIComponent(avatar.fileName || 'avatar')}`);
+    if (cacheable) {
+      res.setHeader('cache-control', 'private, max-age=86400');
+      res.setHeader('etag', etag);
+    }
     res.end(avatar.bytes);
   }
   async function avatarResponse(req, res, account, chat) {
+    try { await avatarSource(req, res, account, chat); }
+    catch (error) {
+      // QA #14b: el handler global contesta los 404 con no-store y cada
+      // re-render re-bajaba el mismo avatar ausente (58 peticiones en media
+      // hora). Un avatar que no existe no aparece de un render a otro: el 404
+      // se cachea 5 min en el navegador; si pone foto, se ve al expirar.
+      if (error?.code !== 'AVATAR_UNAVAILABLE') throw error;
+      res.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'private, max-age=300' });
+      res.end(JSON.stringify({ error: error.message, code: error.code }));
+    }
+  }
+  async function avatarSource(req, res, account, chat) {
     const conversation = await conversationFor(account, chat);
     const providerChat = providerChatId(conversation);
     const source = conversation.avatar_url
@@ -864,14 +922,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     const cached = getAvatarCacheEntry(cacheKey, source);
     if (cached) {
       if (cached.negative) throw featureError(404, 'AVATAR_UNAVAILABLE', 'Avatar is unavailable for this chat');
-      sendAvatar(res, cached);
+      sendAvatar(req, res, cached);
       return;
     }
     const inflightKey = `${cacheKey}\u0000${source}`;
     const pending = avatarInflight.get(inflightKey);
     if (pending) {
       const avatar = await pending;
-      sendAvatar(res, avatar);
+      sendAvatar(req, res, avatar);
       return;
     }
     const load = async () => {
@@ -900,7 +958,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
     try {
       const avatar = await request;
       setAvatarCacheEntry(cacheKey, source, avatar, avatarCacheConfig.ttlMs);
-      sendAvatar(res, avatar);
+      sendAvatar(req, res, avatar);
     } catch (error) {
       if (error?.code === 'AVATAR_UNAVAILABLE') setAvatarCacheEntry(cacheKey, source, { negative: true }, avatarCacheConfig.negativeTtlMs);
       throw error;
@@ -1044,7 +1102,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
    * keep the spelling the provider used at the time, including the legacy
    * `@c.us`. Those two spellings are one phone number, so both are looked up;
    * without the alias a contact saved years ago would show no name at all. A
-   * `@lid` has no such alias and stays on its own address.
+   * `@lid` borrows its name through the conversation row that links it to its
+   * phone (wa_chat_id), the same lid_map the directory uses: the blocklist
+   * answers with the LID while participants keep the name under the phone.
    */
   async function storedContactNames(account, jids) {
     const names = new Map();
@@ -1060,6 +1120,26 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       const bare = value.startsWith(prefix) ? value.slice(prefix.length) : value;
       return bare.replace(/@c\.us$/, '@s.whatsapp.net');
     };
+    // QA #105: expand each requested address across the lid↔phone link so a
+    // name stored under the other spelling is still attributed to it.
+    const alias = new Map(jids.map(jid => [jid, jid]));
+    try {
+      const links = await query(
+        'SELECT id, wa_chat_id AS "waChatId" FROM conversations WHERE account=$1 AND COALESCE(is_group, false)=false AND (id = ANY($2::text[]) OR wa_chat_id = ANY($2::text[]))',
+        [account.accountId, storedIds],
+      );
+      for (const row of links) {
+        const pair = [storedAddress(row.jid), storedAddress(row.waChatId)].filter(Boolean);
+        for (const target of jids) {
+          if (!pair.includes(target)) continue;
+          for (const other of pair) {
+            if (other === target || alias.has(other)) continue;
+            alias.set(other, target);
+            storedIds.push(other, asLegacyPhone(other), `${prefix}${other}`, `${prefix}${asLegacyPhone(other)}`);
+          }
+        }
+      }
+    } catch { /* sin tabla de conversaciones el nombre cuesta, no la lista */ }
     const sources = [
       {
         sql: 'SELECT jid, name, push_name AS "pushName", NULL::text AS "waChatId" FROM whatsapp_contacts WHERE account=$1 AND jid = ANY($2::text[])',
@@ -1083,7 +1163,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       try { rows = await query(source.sql, source.args); } catch { continue; }
       for (const row of rows) {
         const known = [storedAddress(row.jid), storedAddress(row.waChatId)].filter(Boolean);
-        const jid = jids.find(target => known.includes(target));
+        const jid = known.map(address => alias.get(address)).find(Boolean);
         if (!jid || names.has(jid)) continue;
         const name = storedName(row.name, row.jid) || storedName(row.pushName, row.jid);
         if (name) names.set(jid, name);
@@ -1371,8 +1451,34 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       };
     }
   }
+  // QA velocidad: ni la app ni Traefik comprimían (medido 23-10): el navegador bajaba
+  // los 2,33 MB de public/ y el JSON de /api/chats (42,5 KB) en crudo. Solo texto: la
+  // media ya viene comprimida y el SSE se transmite. Caché por fichero: son inmutables
+  // dentro del pod; si cambia el contenido cambia el ETag y se regenera la entrada.
+  const GZIP_TEXT = /\.(?:js|mjs|css|html|json|webmanifest|svg)$/;
+  const acceptsGzip = req2 => /\bgzip\b/.test(req2.headers['accept-encoding'] || '');
+  const gzippedStatic = new Map();
   const server = http.createServer(async (req, res) => {
-    const json = (status, value) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); };
+    const gzipJson = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-encoding': 'gzip', vary: 'accept-encoding' });
+      res.end(gzipSync(body));
+    };
+    const json = (status, value) => {
+      const body = JSON.stringify(value);
+      if (body.length > 1024 && acceptsGzip(req)) return gzipJson(status, body);
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); res.end(body);
+    };
+    // #160/#142: SSE re-avisa y el cliente re-pide /api/chats y /api/messages en cada ciclo.
+    // Con ETag el ciclo sin cambios cuesta un 304, no 42.5 KB. no-cache: se revalida siempre, nunca sirve viejo.
+    const conditionalJson = (status, value) => {
+      const body = JSON.stringify(value);
+      const etag = `"${createHash('sha256').update(body).digest('base64url').slice(0, 22)}"`;
+      const headers = { etag, 'cache-control': 'no-cache' };
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+      if (body.length > 1024 && acceptsGzip(req)) return gzipJson(status, body);
+      res.writeHead(status, { ...headers, 'content-type': 'application/json; charset=utf-8' });
+      res.end(body);
+    };
     const redirect = (location, setCookie) => {
       const headers = { location };
       if (setCookie) headers['set-cookie'] = Array.isArray(setCookie) ? setCookie : [setCookie];
@@ -1425,6 +1531,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (error?.status === 403) {
             res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
             return res.end(unauthorizedHtml(auth.publicUrl, auth.issuer));
+          }
+          // UX #1.1: el 400 (enlace caducado/inválido) también es navegable.
+          if (error?.status === 400) {
+            res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+            return res.end(callbackErrorHtml());
           }
           throw error;
         }
@@ -1570,7 +1681,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const requestedArchive = url.searchParams.get('archived');
         const includeArchived = requestedArchive === 'true' || requestedArchive === '1' || requestedArchive === 'only';
         const onlyArchived = requestedArchive === 'only' || requestedArchive === 'true' || requestedArchive === '1';
-        const page = await readChatDirectory({ query, account: a.accountId, archived: onlyArchived, cursor: url.searchParams.get('cursor'), limit: url.searchParams.get('limit') });
+        const page = await readChatDirectory({ query, account: a.accountId, archived: onlyArchived, cursor: url.searchParams.get('cursor'), limit: url.searchParams.get('limit'), q: url.searchParams.get('q') });
         let chats = page.chats;
         chats = chats.map(chat => {
           const { avatar_url: _avatarUrl, avatarUrl: _storedAvatarUrl, ...safeChat } = chat;
@@ -1597,7 +1708,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           const remoteState = providerState.get(providerChatId(chat));
           return { ...chat, pinned: remoteState?.pinned ?? (localState.pinned === true), muted: remoteState?.muted ?? (localState.muted === true), favorite: local.favorites.includes(chat.id) };
         });
-        return json(200, { chats, archived: includeArchived, nextCursor: page.nextCursor });
+        return conditionalJson(200, { chats, archived: includeArchived, nextCursor: page.nextCursor });
       }
       if (req.method === 'GET' && (path === '/api/chats/archived' || path === '/api/archived-chats')) {
         const a = accountParam(url.searchParams.get('account'));
@@ -1612,7 +1723,48 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (req.method === 'GET' && path === '/api/messages') {
         const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
         const result = await readMessageRows(a, chat, { before: url.searchParams.get('before'), limit: url.searchParams.get('limit') });
-        return json(200, { messages: result.messages, nextCursor: result.nextCursor });
+        return conditionalJson(200, { messages: result.messages, nextCursor: result.nextCursor });
+      }
+      // QA #95 (velocidad): el export bajaba 200 mensajes × hasta 250 páginas en serie. Esta ruta
+      // devuelve la conversación entera en una sola consulta — forma de fila de /api/messages sin
+      // enriquecer (el transcript solo usa texto, remitente, tipo y adjuntos; las miniaturas
+      // previewOnly se descartan igual que hacía el cliente). Tope 50 000: 413, nunca truncado.
+      // CONTRACT: http.whatsapp-app.chat-export.v1
+      if (req.method === 'GET' && path === '/api/chat-export') {
+        const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
+        const conversation = await conversationFor(a, chat);
+        const readIds = await conversationReadIds(a, conversation);
+        const rows = await query(
+          `SELECT m.id, m.content AS text, m.direction = 'OUTBOUND' AS "fromMe",
+                  m.wa_timestamp AS timestamp, m.message_type AS type,
+                  CASE WHEN m.direction = 'OUTBOUND' THEN NULL ELSE COALESCE(p.name, p.push_name, p.id) END AS "senderName"
+             FROM messages m
+             LEFT JOIN participants p ON p.id=m.sender_wa_id AND p.account=m.account
+            WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp'
+              AND ${MESSAGE_RETAINED_SQL} AND ${MESSAGE_VISIBLE_SQL}
+            ORDER BY m.wa_timestamp ASC, m.id ASC LIMIT 50001`,
+          [a.accountId, readIds]
+        );
+        if (rows.length > 50000) throw fail(413, 'Export overflow');
+        const attachments = rows.length ? await query(
+          `SELECT a.message_id,a.mime_type,a.file_name,a.file_type
+             FROM attachments a JOIN messages m ON m.id=a.message_id
+            WHERE m.account=$1 AND m.conversation_id=ANY($2::text[]) AND m.platform='whatsapp'
+              AND ${MESSAGE_RETAINED_SQL}`,
+          [a.accountId, readIds]
+        ) : [];
+        const stamps = new Map(rows.map(row => [row.id, row.timestamp]));
+        const byMessage = new Map();
+        for (const item of attachments) {
+          const stamp = stamps.get(item.message_id) || new Date();
+          const list = byMessage.get(item.message_id) || [];
+          list.push({ name: item.file_name || `${downloadNames[item.file_type] || 'archivo'}-${new Date(stamp).toISOString().slice(0, 10)}.${downloadExts[(item.mime_type || '').toLowerCase()] || 'bin'}`, mimeType: item.mime_type || 'application/octet-stream' });
+          byMessage.set(item.message_id, list);
+        }
+        return json(200, { messages: rows.map(row => ({
+          id: String(row.id), text: row.text || '', timestamp: row.timestamp, fromMe: row.fromMe === true,
+          senderName: row.senderName || null, type: row.type, attachments: byMessage.get(row.id) || [],
+        })), nextCursor: null });
       }
       // CONTRACT: http.whatsapp-connector.history-recover.v1
       if (req.method === 'POST' && path === '/api/messages/recover') {
@@ -1662,18 +1814,19 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const schema = await getDatabaseSchema(query);
         if (!validDatabaseId(id, schema.messageIdType)) throw fail(404, 'Media not found');
         const rows = await query(
-          `SELECT p.message_payload->'imageMessage'->'jpegThumbnail' AS thumbnail
+          `SELECT COALESCE(p.message_payload->'imageMessage'->'jpegThumbnail', p.message_payload->'videoMessage'->'jpegThumbnail') AS thumbnail
              FROM messages m JOIN whatsapp_message_payloads p
                ON p.wa_message_id=m.wa_message_id AND p.account=m.account
             WHERE m.id=$1 AND m.account=$2 AND m.conversation_id=ANY($3::text[])
-              AND m.platform='whatsapp' AND m.message_type='IMAGE' AND ${MESSAGE_RETAINED_SQL}
-              AND pg_column_size(p.message_payload->'imageMessage'->'jpegThumbnail') <= 300000`,
+              AND m.platform='whatsapp' AND m.message_type IN ('IMAGE','VIDEO') AND ${MESSAGE_RETAINED_SQL}
+              AND pg_column_size(COALESCE(p.message_payload->'imageMessage'->'jpegThumbnail', p.message_payload->'videoMessage'->'jpegThumbnail')) <= 300000`,
           [id, a.accountId, readIds]
         );
         const bytes = jpegThumbnailBytes(rows[0]?.thumbnail);
         if (!bytes) throw fail(404, 'Media not found');
         res.setHeader('content-type', 'image/jpeg');
-        res.setHeader('cache-control', 'no-store');
+        // Miniatura del payload del mensaje: inmutable por id (QA velocidad).
+        res.setHeader('cache-control', 'private, max-age=86400, immutable');
         res.end(bytes);
         return;
       }
@@ -1700,8 +1853,15 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         for (const name of ['accept-ranges', 'content-range', 'etag', 'last-modified']) {
           const value = response.headers.get(name); if (value) res.setHeader(name, value);
         }
+        // QA velocidad: la fila de attachments es inmutable por id; sin esto el scroll
+        // volvía a bajar cada foto (el visor libera la copia al salir de vista).
+        // shortcut: un mensaje borrado deja su copia del día en el navegador; si la
+        // política de borrado lo exige, bajar a max-age=0 + etag.
+        if (response.status === 200 || response.status === 206) res.setHeader('cache-control', 'private, max-age=86400, immutable');
         if (!response.headers.get('content-encoding') && response.headers.has('content-length')) res.setHeader('content-length', response.headers.get('content-length'));
-        const safeInline = /^(image\/(jpeg|png|gif|webp)|audio\/|video\/)/.test(media.mime_type || '');
+        // QA #115.2: el PDF se ve (como la oficial); svg/html siguen attachment, pueden
+        // ejecutar guion con el type servido.
+        const safeInline = /^(image\/(jpeg|png|gif|webp)|application\/pdf|audio\/|video\/)/.test(media.mime_type || '');
         res.setHeader('content-type', safeInline ? media.mime_type : 'application/octet-stream');
         res.setHeader('content-disposition', `${safeInline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(media.file_name || 'attachment')}`);
         if (response.body) await pipeline(Readable.fromWeb(response.body), res);
@@ -1714,10 +1874,18 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const pathChat = path.match(/^\/api\/(?:chats|groups)\/([^/]+)\/(?:group|contact|info|participants)$/)?.[1];
         const chat = safeChatId(url.searchParams.get('chat') || url.searchParams.get('id') || (pathChat ? decodeURIComponent(pathChat) : null));
         const conversation = await conversationFor(a, chat);
+        // UX #32.1/#56.2: el jid/LID crudo nunca es nombre visible; sin nombre
+        // útil sale null y la ficha pone «Grupo»/«Contacto».
+        const displayName = readableChatName({
+          id: conversation.id,
+          isGroup: conversation.is_group === true,
+          name: conversation.name,
+          waChatId: conversation.wa_chat_id,
+        });
         const result = {
           account: a.accountId,
           chat: conversation.id,
-          name: conversation.name || conversation.id,
+          name: isJidPlaceholder(displayName, conversation.id) ? null : displayName,
           isGroup: conversation.is_group === true,
           archived: conversation.archived === true,
           unread: Number(conversation.unread || 0),
@@ -1754,6 +1922,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           const capabilities = {
             manageMembers: info?.capabilities?.manageMembers === true,
             editInfo: info?.capabilities?.editInfo === true,
+            // UX #49.2: announce/restrict son solo de administradores (groups-update.v1).
+            changeSettings: info?.capabilities?.changeSettings === true,
           };
           return json(200, { ...result, group: info, capabilities, participants: participants.map(item => ({
             id: item.id || item.jid || null,
@@ -1780,7 +1950,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         return json(200, { ...result, contact: {
           id: contact.id || conversation.id,
           phone: contact.phone || null,
-          name: contact.name || contact.push_name || conversation.name || null,
+          name: [contact.name, contact.push_name].find(name => !isJidPlaceholder(name, contact.id || conversation.id)) || null,
           avatarUrl: `/api/contacts/${encodeURIComponent(contact.id || conversation.id)}/avatar?account=${encodeURIComponent(a.accountId)}`,
           presence: { state: 'unknown', lastSeen: null, available: false },
         } });
@@ -1814,14 +1984,16 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           clauses.push(`m.wa_timestamp < $${args.length}::timestamptz`);
         }
         if (['image', 'video'].includes(kind)) { args.push(kind.toUpperCase()); clauses.push(`m.message_type=$${args.length}`); }
-        if (kind === 'gallery') { clauses.push("m.message_type IN ('IMAGE','VIDEO')"); }
-        if (['document', 'documents'].includes(kind)) clauses.push("m.message_type='DOCUMENT'");
+        // QA #96: un vídeo o un audio mandado como documento es vídeo/audio, no DOC (file_type manda, mime de respaldo).
+        const videoDoc = "(m.message_type='DOCUMENT' AND (a.file_type='VIDEO' OR a.mime_type LIKE 'video/%'))";
+        if (kind === 'gallery') { clauses.push(`(m.message_type IN ('IMAGE','VIDEO') OR ${videoDoc})`); }
+        if (['document', 'documents'].includes(kind)) clauses.push(`m.message_type='DOCUMENT' AND NOT ${videoDoc}`);
         if (['link', 'links'].includes(kind)) clauses.push("m.content ~* 'https?://[^[:space:]]+'");
         args.push(limit + 1);
         const rows = await query(
           `SELECT m.id,m.wa_message_id,m.content,m.message_type,m.wa_timestamp,
                   m.wa_timestamp::text AS cursor_timestamp,
-                  a.id AS attachment_id,a.mime_type,a.file_name,a.file_size,a.file_url,a.caption
+                  a.id AS attachment_id,a.mime_type,a.file_name,a.file_type,a.file_size,a.file_url,a.caption
              FROM messages m LEFT JOIN attachments a ON a.message_id=m.id
             WHERE ${clauses.join(' AND ')}
             ORDER BY m.wa_timestamp DESC, m.id DESC, a.id DESC NULLS LAST
@@ -1835,7 +2007,11 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           id: String(lastRow.id), attachment: lastRow.attachment_id ? String(lastRow.attachment_id) : '',
         })).toString('base64url') : null;
         return json(200, { account: a.accountId, chat, kind, items: page.map(item => {
-          const itemKind = item.message_type === 'DOCUMENT' ? 'document' : item.message_type === 'IMAGE' || item.message_type === 'VIDEO' || item.message_type === 'AUDIO' || item.message_type === 'STICKER' ? 'media' : 'link';
+          // QA #96: documento con file_type/mime de vídeo → galería; de audio → kind 'audio' (glifo AUDIO en el panel).
+          const itemKind = (item.message_type === 'DOCUMENT' && (item.file_type === 'VIDEO' || (item.mime_type || '').startsWith('video/')))
+            || item.message_type === 'IMAGE' || item.message_type === 'VIDEO' || item.message_type === 'AUDIO' || item.message_type === 'STICKER' ? 'media'
+            : item.message_type === 'DOCUMENT' && (item.file_type === 'VOICE' || item.file_type === 'AUDIO' || (item.mime_type || '').startsWith('audio/')) ? 'audio'
+            : item.message_type === 'DOCUMENT' ? 'document' : 'link';
           const link = itemKind === 'link'
             ? item.content?.match(/https?:\/\/[^\s<]+/i)?.[0]?.replace(/[),.!?;:]+$/, '') || null
             : null;
@@ -1850,6 +2026,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             name: item.file_name || link,
             size: item.file_size || null,
             url: item.attachment_id ? `/api/media/${encodeURIComponent(item.attachment_id)}?account=${encodeURIComponent(a.accountId)}&chat=${encodeURIComponent(chat)}` : link,
+            // QA #72: la galería se bajaba los originales (9,2 MB/45 items). El thumb
+            // va por id de mensaje, como el de las burbujas (readMessages).
+            thumbUrl: item.message_type === 'IMAGE' ? `/api/media/thumb/${encodeURIComponent(item.id)}?account=${encodeURIComponent(a.accountId)}&chat=${encodeURIComponent(chat)}` : null,
             caption: item.caption || null,
           };
         }), nextCursor });
@@ -1878,7 +2057,12 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const cursorScope = { account: a.accountId, chat, queryHash: createHash('sha256').update(q).digest('hex'), searchScope };
         const schema = await getDatabaseSchema(query);
         const cursor = url.searchParams.has('cursor') ? decodeSearchCursor(url.searchParams.get('cursor'), cursorScope, schema) : null;
-        const args = [a.accountId, `%${q}%`];
+        const cacheKey = JSON.stringify([a.accountId, chat, q, searchScope, url.searchParams.get('cursor') || '']);
+        const cached = searchCache.get(cacheKey);
+        if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return json(200, cached.body);
+        // QA 22-10: % y _ del término eran comodines SQL (buscar «%» casaba con todo).
+        // El patrón va parametrizado — no es inyección — pero hay que escapar los comodines.
+        const args = [a.accountId, `%${q.replace(/[\\%_]/g, '\\$&')}%`];
         const clauses = ["m.account=$1", "m.platform='whatsapp'", 'NOT m.is_deleted', MESSAGE_RETAINED_SQL, MESSAGE_VISIBLE_SQL, 'm.content ILIKE $2'];
         if (conversation) { args.push(await conversationReadIds(a, conversation)); clauses.push(`m.conversation_id=ANY($${args.length}::text[])`); }
         if (cursor) {
@@ -1911,7 +2095,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           args
         );
         const page = rows.slice(0, limit);
-        return json(200, { account: a.accountId, query: q, chat, results: page.map(item => ({
+        // QA 22-10: re-buscar el mismo término volvía a la BD (no-store global).
+        // Una página de búsqueda no cambia en 30 s; el navegador la reutiliza.
+        res.setHeader('cache-control', 'private, max-age=30');
+        const body = { account: a.accountId, query: q, chat, results: page.map(item => ({
           id: item.wa_message_id || item.id,
           messageId: item.wa_message_id || item.id,
           chat: item.chat_id || item.conversation_id,
@@ -1927,7 +2114,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           fromMe: item.direction === 'OUTBOUND',
           type: item.message_type,
           timestamp: item.wa_timestamp,
-        })), nextCursor: rows.length > limit ? encodeSearchCursor(page.at(-1), cursorScope) : null });
+        })), nextCursor: rows.length > limit ? encodeSearchCursor(page.at(-1), cursorScope) : null };
+        searchCache.set(cacheKey, { at: Date.now(), body });
+        if (searchCache.size > 200) for (const [key, entry] of searchCache) if (Date.now() - entry.at > SEARCH_CACHE_TTL_MS) searchCache.delete(key);
+        return json(200, body);
       }
       if (req.method === 'GET' && (path === '/api/chats/avatar' || /^\/api\/chats\/[^/]+\/avatar$/.test(path) || path === '/api/avatar')) {
         const a = accountParam(url.searchParams.get('account'));
@@ -1947,7 +2137,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const participant = rows[0];
         if (participant.profile_pic_url) {
           try {
-            sendAvatar(res, await readStoredMedia({ ref: participant.profile_pic_url, mime_type: 'image/jpeg', file_name: 'avatar.jpg' }));
+            sendAvatar(req, res, await readStoredMedia({ ref: participant.profile_pic_url, mime_type: 'image/jpeg', file_name: 'avatar.jpg' }));
             return;
           } catch (error) {
             if (error?.status && ![403, 404, 502].includes(error.status)) throw error;
@@ -1965,8 +2155,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const a = accountParam(url.searchParams.get('account')); const chat = safeChatId(url.searchParams.get('chat'));
         const conversation = await conversationFor(a, chat); const providerChat = providerChatId(conversation);
         try {
-          const result = await featureConnector(a, `/chats/${encodeURIComponent(providerChat)}/presence`, { method: 'GET' });
-          return json(200, { account: a.accountId, chat, ...normalizePresence(result) });
+          // QA #27.1: la GET parametrizada nunca existió en el conector vivo; su lectura es POST /chats/presence/read.
+          const result = await featureConnector(a, '/chats/presence/read', { method: 'POST', body: { conversationId: providerChat } });
+          const presence = normalizePresence(result?.presence?.presence || result?.presence || result);
+          return json(200, { account: a.accountId, chat, ...presence, available: presence.state !== 'unknown' || presence.lastSeen != null });
         } catch (error) {
           if (error?.code !== 'UNSUPPORTED_UPSTREAM') throw error;
           return json(200, { account: a.accountId, chat, state: 'unknown', lastSeen: null, available: false, reason: 'provider_unavailable' });
@@ -2085,9 +2277,13 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const conversation = await conversationFor(a, chat);
         const providerChat = providerChatId(conversation);
         if (conversation.is_group || !/^\d+@(c\.us|s\.whatsapp\.net|lid)$/.test(providerChat)) throw fail(400, 'A direct contact is required');
-        const result = await featureConnector(a, `/chats/${encodeURIComponent(providerChat)}/block`, { method: 'GET' });
-        if (typeof result.blocked !== 'boolean' || result.confirmed !== true) throw fail(502, 'Contact block state was not confirmed');
-        return json(200, { account: a.accountId, chat, blocked: result.blocked, confirmed: true, source: 'provider' });
+        // QA #13: no existe una lectura por-chat en el conector (era 501 y el botón se
+        // ocultaba); el estado se deriva del listado, que sí está desplegado. Los dígitos
+        // casan @c.us/@s.whatsapp.net/@lid: Baileys bloquea la persona bajo ambas identidades.
+        const blockedJids = await providerBlocklist(a);
+        const digits = providerChat.match(/^(\d+)@/)?.[1];
+        const blocked = blockedJids.some(jid => jid === providerChat || jid.startsWith(`${digits}@`));
+        return json(200, { account: a.accountId, chat, blocked, confirmed: true, source: 'provider' });
       }
       if (req.method === 'GET' && path === '/api/blocked-contacts') {
         const a = accountParam(url.searchParams.get('account'));
@@ -2310,6 +2506,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       // CONTRACT: http.whatsapp-app.messages-delete.v1
       if (req.method === 'POST' && (path === '/api/messages/reply' || path === '/api/messages/react' || path === '/api/messages/forward' || path === '/api/messages/edit' || path === '/api/messages/delete' || path === '/api/message-actions' || path === '/api/messages/action' || path === '/api/messages/actions')) {
         const body = await bodyJSON(req);
+        // Any message mutation can change what /api/search must answer (deletion,
+        // edit), so the 60 s result cache dies here rather than serving a stale body.
+        searchCache.clear();
         const a = accountParam(body.account); const chat = safeChatId(body.chat || body.chatId);
         const pathAction = path.match(/^\/api\/messages\/(reply|react|forward|edit|delete)$/)?.[1];
         const action = String(body.action || pathAction || '').toLowerCase();
@@ -2341,7 +2540,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         } else if (action === 'edit') {
           const content = required(body.text || body.content, 'text', 20000);
           result = await featureConnector(a, '/messages/edit', { method: 'POST', body: { conversationId: target.providerChat, messageId, content }, requireSending: true });
-          await query("UPDATE messages SET content=$4, is_edited=true, edited_at=now(), updated_at=now() WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, content]);
+          // QA #5: sin edited_at en el esquema vivo (42703); la hora de edición la
+          // guarda el conector en metadata->>'edited_at' y nada la lee de una columna.
+          await query("UPDATE messages SET content=$4, is_edited=true, updated_at=now() WHERE account=$1 AND conversation_id=$2 AND (id::text=$3 OR wa_message_id=$3)", [a.accountId, target.message.conversation_id, body.messageId || body.id, content]);
         } else {
           // Local deletion and remote revocation have separate connector routes.
           if (!['me', 'everyone'].includes(body.scope)) throw fail(400, 'Invalid delete scope');
@@ -2391,7 +2592,9 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             catch (error) { throw fail(400, error.message); }
             result = await connector(a, '/messages/poll', {
               name: draft.question,
-              values: draft.options,
+              // QA #78: el conector vivo (v1.3.120) sólo lee `options`; el alias
+              // `values` llegó en 8702dd4, sin desplegar → 400 siempre.
+              options: draft.options,
               selectableCount: draft.selectableCount,
               sendToken: sendToken(body),
               conversationId: providerChat,
@@ -2402,9 +2605,10 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
             catch (error) { throw fail(400, error.message); }
             result = await connector(a, '/messages/event', {
               name: draft.title,
-              startDate: draft.dateTime,
+              // QA #78: mismo que la encuesta — nombres del contrato declarado.
+              startTime: draft.dateTime,
               ...(draft.description ? {description: draft.description} : {}),
-              ...(draft.endDateTime ? {endDate: draft.endDateTime} : {}),
+              ...(draft.endDateTime ? {endTime: draft.endDateTime} : {}),
               ...(draft.location ? {location: {name: draft.location}} : {}),
               sendToken: sendToken(body),
               conversationId: providerChat,
@@ -2478,8 +2682,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         const result = await featureConnector(a, '/groups/create', { method: 'POST', body: { subject: name, participants }, requireSending: true });
         return json(200, { account: a.accountId, confirmed: true, ...result });
       }
-      if (req.method === 'POST' && (path === '/api/groups/action' || /^\/api\/groups\/[^/]+\/(?:participants|subject|description)$/.test(path))) {
-        const body = await bodyJSON(req); const pathParts = path.match(/^\/api\/groups\/([^/]+)\/(participants|subject|description)$/);
+      if (req.method === 'POST' && (path === '/api/groups/action' || /^\/api\/groups\/[^/]+\/(?:participants|subject|description|settings)$/.test(path))) {
+        const body = await bodyJSON(req); const pathParts = path.match(/^\/api\/groups\/([^/]+)\/(participants|subject|description|settings)$/);
         const a = accountParam(body.account); const chat = safeChatId(body.chat || (pathParts ? decodeURIComponent(pathParts[1]) : null));
         const conversation = await conversationFor(a, chat); if (conversation.is_group !== true) throw fail(400, 'Conversation is not a group');
         const providerChat = providerChatId(conversation); const action = String(body.action || pathParts?.[2] || '').toLowerCase();
@@ -2494,6 +2698,14 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         } else if (action === 'subject' || action === 'description') {
           providerPath = `/groups/${encodeURIComponent(providerChat)}/update`;
           providerBody = { [action]: required(body.value || body[action], action, 4096) };
+        } else if (action === 'settings') {
+          // UX #49.2: «Quién puede enviar» (announce) y «quién puede editar la info»
+          // (restrict). La aprobación de participantes no la expone el conector.
+          const settings = {};
+          for (const name of ['announce', 'restrict']) if (body[name] !== undefined) settings[name] = body[name] === true || body[name] === 'true';
+          if (!Object.keys(settings).length) throw fail(400, 'Invalid group settings');
+          providerPath = `/groups/${encodeURIComponent(providerChat)}/update`;
+          providerBody = { settings };
         } else {
           throw fail(400, 'Invalid group action');
         }
@@ -2733,7 +2945,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       }
       // CONTRACT: http.whatsapp-app.hermes-settings.v1
       if (['GET', 'POST'].includes(req.method) && path === '/api/ai/settings') {
-        if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'Hermes endpoint is not configured');
+        if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'El asistente de IA no está configurado');
         const body = req.method === 'POST' ? await bodyJSON(req) : Object.fromEntries(url.searchParams);
         const a = accountFor(body.account);
         const conversation = await conversationFor(a, body.chat);
@@ -2812,7 +3024,7 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
           if (body.voice) return json(200, await connector(a, '/messages/audio', { conversationId: providerChat, audioBase64: (await voiceBytes(bytes)).toString('base64'), mimeType: 'audio/ogg; codecs=opus', sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
           return json(200, await connector(a, '/messages/media/send', { conversationId: providerChat, fileUrl: `data:${body.mimeType};base64,${bytes.toString('base64')}`, fileName: body.name, quality, caption, replyTo, ...(viewOnce ? { viewOnce: true } : {}), sourceDigest, sourceMimeType: body.mimeType, sendToken: sendToken(body) }));
         }
-        if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'Hermes endpoint is not configured');
+        if (!env.HERMES_API_URL || !env.HERMES_API_KEY) throw fail(503, 'El asistente de IA no está configurado');
         const images = hermesImages(body.images);
         const message = required(body.message || (images.length ? 'Describe estas imagenes' : ''), 'message', 20000);
         required(env.HERMES_DEFAULT_MODEL || env.APP_AI_DEFAULT_MODEL, 'HERMES_DEFAULT_MODEL', 200);
@@ -3049,7 +3261,21 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       if (file.includes('..') || file.includes('\\') || file.includes('\0')) throw fail(404, 'Not found');
       const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
       let bytes; try { bytes = await readFile(join(root, 'public', file)); } catch { throw fail(404, 'Not found'); }
-      res.setHeader('content-type', types[extname(file)] || 'application/octet-stream'); res.end(bytes);
+      // QA velocidad: sin ETag no hay 304 posible y el navegador bajaba los 2,33 MB de
+      // public/ en cada navegación (el no-store global heredado). El HTML del shell sigue
+      // no-store: es el que apunta a los assets.
+      const etag = `"${createHash('sha1').update(bytes).digest('base64url')}"`;
+      if (!file.endsWith('.html')) res.setHeader('cache-control', 'private, max-age=300');
+      if (req.headers['if-none-match'] === etag) { res.statusCode = 304; return res.end(); }
+      res.setHeader('etag', etag);
+      res.setHeader('content-type', types[extname(file)] || 'application/octet-stream');
+      if (acceptsGzip(req) && GZIP_TEXT.test(extname(file))) {
+        let entry = gzippedStatic.get(file);
+        if (!entry || entry.etag !== etag) { entry = { etag, bytes: gzipSync(bytes) }; gzippedStatic.set(file, entry); }
+        res.setHeader('content-encoding', 'gzip'); res.setHeader('vary', 'accept-encoding');
+        return res.end(entry.bytes);
+      }
+      res.end(bytes);
     } catch (e) {
       if (res.headersSent) { res.destroy(); return; }
       json(e.status || 500, { error: e.status ? e.message : 'Internal server error', ...(e.code ? { code: e.code } : {}), ...(e.details ? { details: e.details } : {}), ...(e.outcomeUncertain ? { outcomeUncertain: true } : {}) });

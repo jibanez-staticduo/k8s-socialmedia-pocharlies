@@ -56,7 +56,8 @@ export function createEmojiPicker({documentRef = document, account, onSelect, is
   });
   let preferences = readEmojiPreferences(storage, account); tone.value = String(preferences.tone);
   const categories = make('nav', 'emoji-picker-categories'); categories.setAttribute('aria-label', 'Categor\u00edas de emoji');
-  const status = make('p', 'emoji-picker-status', 'Cargando emojis...'); status.setAttribute('role', 'status');
+  // UX #37.1: live-region para el lector — oculto visualmente (sr-only), no texto suelto en el picker.
+  const status = make('p', 'emoji-picker-status sr-only', 'Cargando emojis...'); status.setAttribute('role', 'status');
   const grid = make('div', 'emoji-picker-grid'); grid.setAttribute('aria-label', 'Emojis');
   const variants = make('div', 'emoji-picker-variants'); variants.hidden = true;
   toolbar.append(search, tone); root.append(toolbar, categories, status, variants, grid);
@@ -72,7 +73,9 @@ export function createEmojiPicker({documentRef = document, account, onSelect, is
         preferences = rememberEmoji(preferences, item.emoji);
         writeEmojiPreferences(storage, account, preferences);
       }
-      if (active()) { variants.hidden = true; opener?.focus(); }
+      // QA 22-10: si la selección ya movió el foco (el composer tras insertar), no
+      // se lo quitamos; el opener solo recupera el foco si se había quedado huérfano.
+      if (active()) { variants.hidden = true; const ae = documentRef.activeElement; if (!ae || ae === documentRef.body) opener?.focus(); }
     } catch (error) { if (active()) status.textContent = error.message || 'No se pudo seleccionar el emoji.'; }
     finally {pending = false; root.removeAttribute('aria-busy');}
   };
@@ -94,7 +97,7 @@ export function createEmojiPicker({documentRef = document, account, onSelect, is
       : selectedGroup === 'recent' ? preferences.recents.map(emoji => allVariants.get(emoji)).filter(Boolean)
       : filterEmojis(catalog.items, '', selectedGroup);
     for (const category of categories.children) category.setAttribute('aria-pressed', String(!query && category.dataset.group === String(selectedGroup)));
-    status.textContent = items.length ? `${items.length} emojis` : query ? 'No se encontraron emojis.' : 'Todav\u00eda no has usado emojis en esta cuenta.';
+    status.textContent = items.length ? `${items.length} ${items.length === 1 ? 'emoji' : 'emojis'}` : query ? 'Ning\u00fan emoji.' : 'Todav\u00eda no has usado emojis en esta cuenta.';
     for (const item of items) {
       const displayed = selectedGroup === 'recent' && !query ? item : emojiVariant(item, preferences.tone);
       const element = emojiButton(displayed);

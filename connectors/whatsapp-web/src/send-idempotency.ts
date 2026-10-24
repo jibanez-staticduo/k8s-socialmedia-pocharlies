@@ -39,9 +39,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parseMediaQuality, type MediaQuality } from './media-quality';
 import { connectorAccount, getPool } from './db-writer';
 
-export const IDEMPOTENCY_HEADER = 'idempotency-key';
-export const IDEMPOTENCY_BODY_FIELD = 'idempotencyKey';
-const MAX_KEY_LENGTH = 200;
+export {
+  IDEMPOTENCY_HEADER,
+  IDEMPOTENCY_BODY_FIELD,
+  readIdempotencyKey,
+} from '@mcp-socialmedia/shared';
 
 const UNDEFINED_TABLE = '42P01';
 const MISSING_TABLE_RECHECK_MS = 5 * 60 * 1000;
@@ -119,37 +121,6 @@ function sha256(value: string): string {
 // ---------------------------------------------------------------------------
 // Key parsing and hashing
 // ---------------------------------------------------------------------------
-
-/**
- * The caller's idempotency key: header `Idempotency-Key` and/or body
- * `idempotencyKey`. Absent (or blank) → `{}`: the legacy, non-idempotent path.
- * Both given with different values, a non-string or an over-long key → error.
- */
-export function readIdempotencyKey(
-  headers: Record<string, string | string[] | undefined>,
-  body: unknown
-): { key?: string; error?: string } {
-  const header = headers[IDEMPOTENCY_HEADER];
-  const field =
-    body && typeof body === 'object' && !Array.isArray(body)
-      ? (body as Record<string, unknown>)[IDEMPOTENCY_BODY_FIELD]
-      : undefined;
-  if (Array.isArray(header)) return { error: 'Idempotency-Key must be a single header' };
-  if (field !== undefined && field !== null && typeof field !== 'string') {
-    return { error: 'idempotencyKey must be a string' };
-  }
-  const fromHeader = header?.trim() || undefined;
-  const fromBody = (typeof field === 'string' && field.trim()) || undefined;
-  if (fromHeader && fromBody && fromHeader !== fromBody) {
-    return { error: 'Idempotency-Key header and idempotencyKey body field differ' };
-  }
-  const key = fromHeader || fromBody;
-  if (!key) return {};
-  if (key.length > MAX_KEY_LENGTH) {
-    return { error: `Idempotency-Key is longer than ${MAX_KEY_LENGTH} characters` };
-  }
-  return { key };
-}
 
 export function idempotencyKeyHash(key: string): string {
   return sha256(key);
@@ -362,9 +333,12 @@ export async function confirmSend(key: string, messageId: string | undefined): P
 }
 
 /**
- * Record a failed attempt. Before the claim nothing reached WhatsApp: the row
- * becomes `failed` (retryable). After it the outcome is unknown: the row stays
- * `pending` and only keeps the error text. Never throws.
+ * Record a failed attempt. The row becomes `failed` (retryable) whenever nothing
+ * could reach WhatsApp: before the claim, or after it with a pre-network failure
+ * — Baileys uploads the media before posting the message, so "Media upload
+ * failed on all hosts" (QA #49) means nothing was sent even if the row was
+ * already claimed. Otherwise the outcome is unknown: the row stays `pending`
+ * and only keeps the error text. Never throws.
  */
 export async function recordSendFailure(
   key: string,
@@ -372,14 +346,17 @@ export async function recordSendFailure(
   error: unknown
 ): Promise<void> {
   const text = describeError(error).slice(0, 1000);
+  // shortcut: clasificación por mensaje — Baileys lanza un Error plano aquí;
+  // subir a tipo propio si Baileys llega a exportarlo.
+  const preNetwork = !claimed || /Media upload failed on all hosts/i.test(text);
   try {
     await getPool().query(
-      claimed
-        ? `UPDATE whatsapp_send_attempts SET error = $3, updated_at = NOW()
-            WHERE account = $1 AND key_hash = $2 AND status = 'pending'`
-        : `UPDATE whatsapp_send_attempts SET status = 'failed', error = $3, updated_at = NOW()
-            WHERE account = $1 AND key_hash = $2 AND status = 'prepared'`,
-      [connectorAccount(), idempotencyKeyHash(key), text]
+      preNetwork
+        ? `UPDATE whatsapp_send_attempts SET status = 'failed', error = $3, updated_at = NOW()
+            WHERE account = $1 AND key_hash = $2 AND status = $4`
+        : `UPDATE whatsapp_send_attempts SET error = $3, updated_at = NOW()
+            WHERE account = $1 AND key_hash = $2 AND status = 'pending'`,
+      [connectorAccount(), idempotencyKeyHash(key), text, claimed ? 'pending' : 'prepared']
     );
   } catch (recordError) {
     console.warn(`send idempotency failure record failed: ${describeError(recordError)}`);

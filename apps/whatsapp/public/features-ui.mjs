@@ -1,14 +1,16 @@
 'use strict';
 
-import { createPageFetcher, exportConversationText, ChatExportCanceled } from './chat-export.mjs';
+import { createWholeExportFetcher, exportConversationText, ChatExportCanceled } from './chat-export.mjs';
 import { installNotificationSettings } from './notification-settings.mjs';
 import { createStatusNotificationMonitor } from './status-notifications.mjs';
 import { installContactDirectoryUI } from './contact-directory-ui.mjs';
+import { initialsOf } from './text-initials.mjs';
 import { createPollComposer } from './poll-composer.mjs';
 import { createEventComposer } from './event-composer.mjs';
 import { localDayRange } from './message-date.mjs';
 import { createEmojiPicker } from './emoji-picker.mjs';
 import { attachmentError } from './composer-attachment.mjs';
+import { appendRichText } from './message-render.mjs';
 
 /*
  * Feature UI for the selected WhatsApp Web inventory.  The module owns the
@@ -39,6 +41,7 @@ export const FEATURE_CONTRACT = Object.freeze({
   groupCreate: { method: 'POST', path: '/api/groups', body: 'account, name, participants[]' },
   groupMember: { method: 'POST', path: '/api/groups/action', body: 'account, chat, action=add|remove|promote|demote, participant' },
   groupUpdate: { method: 'POST', path: '/api/groups/action', body: 'account, chat, action=subject|description, value' },
+  groupSettings: { method: 'POST', path: '/api/groups/action', body: 'account, chat, action=settings, announce?, restrict?' },
   list: { method: 'GET/POST', path: '/api/lists', response: 'GET lists[]; POST accepts action=list, list, chat|id' },
   starred: { method: 'GET', path: '/api/favorites/starred', response: 'items[] with id, messageId, chatId, text, timestamp' },
   share: { method: 'POST', path: '/api/messages/compose', body: 'account, chat, kind=contact|poll|event, payload' },
@@ -287,6 +290,8 @@ export async function runScopedMutation({ request, isCurrent, refreshChats, refr
     if (refreshMessages) await refreshMessages();
     if (!isCurrent()) return null;
     if (success) toast(success, 'success');
+    // QA #13: el banner de error era pegajoso — ninguna ruta de éxito lo limpiaba.
+    showError('');
     return result;
   } catch (error) {
     if (!isCurrent()) return null;
@@ -398,13 +403,13 @@ export function messageInfoSections(info = {}) {
 export function createMessageInfoPanel({ documentRef, container, message, context, requestInfo, isCurrent,
   schedule = (callback, delay) => setTimeout(callback, delay), cancel = timer => clearTimeout(timer) }) {
   const node = (tag, className, value) => makeElement(documentRef, tag, className, value);
-  const summary = node('div', 'feature-message-info-summary');
-  summary.append(node('p', 'feature-message-info-preview', messageText(message)));
+  // UX #72: el diálogo no repite el texto del mensaje (la burbuja ya lo muestra);
+  // en WhatsApp la información solo enseña los relojes de acuse.
   const notice = node('p', 'feature-muted');
   notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite');
   const retry = button(documentRef, 'Reintentar', 'feature-button subtle');
   const content = node('div', 'feature-message-info-content');
-  container.append(summary, notice, retry, content);
+  container.append(notice, retry, content);
   let version = 0;
   let timer = null;
   let automaticRefreshes = 0;
@@ -483,12 +488,14 @@ export function createMessageInfoPanel({ documentRef, container, message, contex
   return { load, dispose: () => { disposed = true; version += 1; clearScheduled(); } };
 }
 
-function field(documentRef, label, type = 'text', name = '', value = '') {
+function field(documentRef, label, type = 'text', name = '', value = '', placeholder = '') {
   const wrapper = makeElement(documentRef, 'label', 'feature-field');
   wrapper.append(makeElement(documentRef, 'span', '', label));
   const input = makeElement(documentRef, type === 'textarea' ? 'textarea' : 'input', '', type === 'textarea' ? undefined : '');
   input.name = name;
   input.value = value;
+  // UX #43.1: los campos de teléfono piden el pad numérico y enseñan el formato.
+  if (placeholder) input.placeholder = placeholder;
   if (type !== 'textarea') input.type = type;
   if (type === 'textarea') input.rows = 3;
   wrapper.append(input);
@@ -505,13 +512,32 @@ function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+// QA #107: los tres formularios de creación hacían `return` a secas con el
+// formulario vacío; el motivo se pinta aquí, en un punto, no en tres.
+function formValidator(documentRef, form) {
+  const error = makeElement(documentRef, 'p', 'feature-form-error');
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+  form.append(error);
+  return message => {
+    error.textContent = message || '';
+    error.hidden = !message;
+  };
+}
+
 function initials(value) {
-  const parts = text(value).trim().split(/\s+/).filter(Boolean);
-  return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : parts[0]?.slice(0, 2) || 'S').toUpperCase();
+  // UX #45.2: grapheme completo (public/text-initials.mjs).
+  return initialsOf(text(value), 'S');
 }
 
 function messageText(message) {
-  return text(message?.text || message?.content).trim() || (array(message?.attachments).length ? 'Archivo adjunto' : 'Mensaje no disponible');
+  // Nit QA 22-10: la oficial distingue el adjunto citado por tipo; «Archivo adjunto»
+  // solo queda para lo que no se reconozca.
+  const attachment = array(message?.attachments)[0];
+  const type = text(attachment?.type || attachment?.fileType || attachment?.file_type).toLowerCase();
+  const kind = type.startsWith('video') ? 'Vídeo' : type.startsWith('audio') ? 'Audio'
+    : type === 'sticker' ? 'Pegatina' : type.startsWith('image') ? 'Foto' : type === 'document' ? 'Documento' : 'Archivo adjunto';
+  return text(message?.text || message?.content).trim() || (array(message?.attachments).length ? kind : 'Mensaje no disponible');
 }
 
 function mediaUrl(item, baseUrl = 'http://localhost/') {
@@ -558,7 +584,9 @@ export function installFeatureUI({
     currentMessageIds: new Set(),
     selectedMessageIds: new Set(),
     replyTarget: null,
-    currentView: store.read(state.account).view,
+    // UX #7.5: Archivados es una vista de paso; al cargar se abre la lista de
+    // chats (la app oficial no arranca nunca en el archivo).
+    currentView: store.read(state.account).view === 'archived' ? 'all' : store.read(state.account).view,
     readPending: new Set(),
     manualUnreadKey: '',
     generation: 0,
@@ -607,9 +635,36 @@ export function installFeatureUI({
 
   function prefs() { return store.read(runtime.account); }
 
+  // QA #84 (22-10): cada filtro enseña cuántos chats muestra. chatFilter es cliente (app.js),
+  // así que el array cargado siempre es completo — el recuento no cuesta un refetch.
+  const VIEW_FILTERS = [['Todos', 'all'], ['No leídos', 'unread'], ['Grupos', 'groups'], ['Chats destacados', 'favorites'], ['Destacados', 'starred']];
+  let filterChats = [];
+
+  function updateFilterCounts() {
+    if (!filterChats.length) return;
+    const local = prefs();
+    const counts = { starred: local.starredMessages.length };
+    for (const view of ['all', 'unread', 'groups', 'favorites', 'archived']) {
+      counts[view] = filterChats.filter(chat => matchesChatView(chat, view, local)).length;
+    }
+    for (const [label, view] of VIEW_FILTERS) {
+      const item = documentRef.querySelector(`[data-feature-view="${view}"]`);
+      if (!item) continue;
+      item.textContent = `${label} ${counts[view]}`;
+      item.setAttribute('aria-label', `${label}: ${counts[view]}`);
+    }
+    const entry = documentRef.getElementById('feature-archived-entry');
+    if (entry) {
+      const count = documentRef.getElementById('feature-archived-count');
+      if (count) count.textContent = ` ${counts.archived}`;
+      entry.setAttribute('aria-label', `Archivados: ${counts.archived}`);
+    }
+  }
+
   function savePrefs(updater) {
     const next = store.update(runtime.account, updater);
     runtime.currentView = next.view;
+    updateFilterCounts();
     return next;
   }
 
@@ -654,6 +709,10 @@ export function installFeatureUI({
   function openModal(title, { wide = false, opener = documentRef.activeElement, variant = '' } = {}) {
     closeModal();
     closeContactDirectory();
+    // UX #71: abrir un diálogo desde otro (Exportar desde el menú ⋮) desprende el
+    // opener capturado — closeModal acaba de devolver el foco al disparador real
+    // (el ⋯); si no se reencadena, al cerrar el foco cae en body (WCAG 2.4.3).
+    if (opener?.isConnected === false) opener = documentRef.activeElement;
     const overlay = node('div', `feature-modal ${wide ? 'feature-modal-wide' : ''} ${variant ? `feature-modal-${variant}` : ''}`);
     overlay.setAttribute('role', 'presentation');
     const dialog = node('section', 'feature-dialog');
@@ -726,6 +785,17 @@ export function installFeatureUI({
     if (heading) heading.hidden = !archived;
     const hint = documentRef.getElementById('feature-archived-hint');
     if (hint) hint.hidden = !archived;
+    // QA 22-10: dentro de una lista no había pestaña activa ni forma de saber en cuál
+    // se estaba. La lista filtrada se pinta como pestaña con su nombre; pulsarla sale.
+    documentRef.getElementById('feature-list-chip')?.remove();
+    const listView = text(runtime.currentView).startsWith('list:') ? findList(prefs(), runtime.currentView.slice(5)) : null;
+    if (listView) {
+      const chip = button(documentRef, `Lista: ${listView.name}`, 'feature-view-button');
+      chip.id = 'feature-list-chip'; chip.dataset.featureView = runtime.currentView;
+      chip.setAttribute('aria-pressed', 'true'); chip.title = 'Salir de la lista';
+      chip.onclick = () => setView('all');
+      documentRef.querySelector('.feature-view-nav')?.append(chip);
+    }
   }
 
   function matchesChat(chat, view = runtime.currentView) {
@@ -749,6 +819,16 @@ export function installFeatureUI({
       refreshChats: refreshChats ? loadChats : null, refreshMessages: refreshMessages ? loadMessages : null,
       success, toast, showError,
     });
+  }
+
+  // QA #80: la fila de un compose sólo existe cuando el conector ingiere su eco
+  // (asíncrono, sin evento NATS): el loadMessages inmediato no la veía.
+  function refetchAfterEcho() {
+    const context = { account: runtime.account, chat: runtime.chat, generation: runtime.generation };
+    // shortcut: 2,5 s cubre el eco medido; si se falla, subir a la ingesta real.
+    setTimeout(() => {
+      if (runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation) void loadMessages();
+    }, 2500);
   }
 
   function updateChatFlags(chatId, values) {
@@ -786,11 +866,24 @@ export function installFeatureUI({
   }
 
   function renderMember(member, info, parent) {
-    const row = node('div', 'feature-member');
+    // Un miembro con chat abierto es accesible: el botón lo abre igual que la
+    // fila del directorio (QA #97). Sin chat conocido queda como div: no hay
+    // nada que abrir y un botón falso mentiría.
+    const known = member.id ? array(getChats()).find(chat => text(chat.id) === member.id) : null;
+    const row = node(known ? 'button' : 'div', 'feature-member');
+    if (known) {
+      row.type = 'button';
+      row.setAttribute('aria-label', `Abrir el chat con ${member.name || member.pushName || member.id}`);
+      row.onclick = () => { closeModal(); selectChat(known); };
+    }
     const avatar = node('span', 'feature-member-avatar');
     initialsAvatar(avatar, member.name || member.pushName || member.id, member.photoUrl || member.photo_url || member.avatarUrl);
     const copy = node('span', 'feature-member-copy');
-    copy.append(node('strong', '', member.name || member.pushName || member.id || 'Contacto'), node('small', '', member.id || 'Identidad no disponible'));
+    const memberName = member.name || member.pushName;
+    copy.append(node('strong', '', memberName || member.id || 'Contacto'));
+    // UX #32.1: sin nombre el dígito es lo único que identifica; con nombre, el
+    // JID/LID crudo sobra — la oficial nunca lo muestra.
+    if (!memberName && member.id) copy.append(node('small', '', member.id));
     if (bool(member.isAdmin) || bool(member.admin) || text(member.role).toLowerCase() === 'admin') copy.append(node('em', 'feature-admin', 'Administrador'));
     row.append(avatar, copy);
     const capabilities = info?.capabilities || {};
@@ -805,7 +898,7 @@ export function installFeatureUI({
       const remove = button(documentRef, 'Quitar', 'feature-button subtle');
       remove.onclick = async () => {
         if (!windowRef?.confirm?.(`¿Quitar a ${member.name || member.id} del grupo?`)) return;
-        const result = await mutate('/api/groups/action', { action: 'remove', participant: member.id }, { refreshMessages: false, success: 'Miembro quitado.' });
+        const result = await mutate('/api/groups/action', { action: 'remove', participant: member.id }, { refreshMessages: false, success: 'Participante quitado.' });
         if (result) { closeModal(); openInfo(); }
       };
       actions.append(promote, remove);
@@ -840,13 +933,17 @@ export function installFeatureUI({
     modal.body.replaceChildren();
     const identity = node('div', 'feature-profile-head');
     const photo = node('span', 'feature-profile-photo');
-    initialsAvatar(photo, info.name || profile.name || runtime.chat, profile.avatarUrl || profile.avatar_url || info.avatarUrl || info.avatar_url);
+    // UX #32.1/#56.2: sin nombre útil se pone la etiqueta, nunca el jid/LID crudo.
+    const title = info.name || profile.name || (isGroup ? 'Grupo' : 'Contacto');
+    initialsAvatar(photo, title, profile.avatarUrl || profile.avatar_url || info.avatarUrl || info.avatar_url);
     const copy = node('div', 'feature-profile-copy');
-    copy.append(node('h3', '', info.name || profile.name || runtime.chat), node('p', 'feature-muted', isGroup ? 'Grupo' : visiblePresenceLabel(presence, 'es-ES')));
+    copy.append(node('h3', '', title), node('p', 'feature-muted', isGroup ? 'Grupo' : visiblePresenceLabel(presence, 'es-ES')));
     identity.append(photo, copy);
     modal.body.append(identity);
     if (isGroup) {
-      const about = node('p', 'feature-description', info.description || info.desc || 'Sin descripción');
+      // UX #8.3: la descripción se pinta con el mismo marcado que los cuerpos.
+      const about = node('p', 'feature-description');
+      appendRichText(about, info.description || info.desc || 'Sin descripción', documentRef, false);
       modal.body.append(about);
       const capabilities = result.capabilities || info.capabilities || {};
       if (bool(capabilities.editInfo)) {
@@ -858,11 +955,29 @@ export function installFeatureUI({
         }
         modal.body.append(edit);
       }
-      addSection(modal.body, `Miembros${members.length ? ` · ${members.length}` : ''}`);
-      if (!members.length) modal.body.append(node('p', 'feature-muted', 'No hay miembros disponibles para esta cuenta.'));
+      if (bool(capabilities.changeSettings)) {
+        // UX #49.2: los dos ajustes que expone el conector (groups-update.v1: announce/restrict).
+        // La aprobación de participantes no está en el contrato del conector.
+        addSection(modal.body, 'Administración');
+        for (const [label, key] of [['Solo administradores pueden enviar mensajes', 'announce'], ['Solo administradores pueden editar la información', 'restrict']]) {
+          const row = node('label', 'feature-field');
+          const check = documentRef.createElement('input');
+          check.type = 'checkbox';
+          check.checked = info[key] === true;
+          check.onchange = async () => {
+            const result = await mutate('/api/groups/action', { action: 'settings', [key]: check.checked }, { refreshMessages: false, success: 'Ajuste actualizado.' });
+            if (!result) check.checked = !check.checked;
+          };
+          row.append(check, node('span', '', label));
+          modal.body.append(row);
+        }
+      }
+      // UX #66.5: WhatsApp en español dice «Participantes», no «Miembros».
+      addSection(modal.body, `Participantes${members.length ? ` · ${members.length}` : ''}`);
+      if (!members.length) modal.body.append(node('p', 'feature-muted', 'No hay participantes disponibles para esta cuenta.'));
       else for (const member of members) renderMember(member, { ...info, capabilities: result.capabilities || info.capabilities }, modal.body);
       if (bool(capabilities.manageMembers)) {
-        const addMember = button(documentRef, 'Añadir miembro', 'feature-button primary');
+        const addMember = button(documentRef, 'Añadir participante', 'feature-button primary');
         addMember.onclick = () => openMemberForm();
         modal.body.append(addMember);
       }
@@ -896,7 +1011,7 @@ export function installFeatureUI({
       [chatIsArchived(info, prefs()) ? 'Desarchivar' : 'Archivar', 'archive'],
       [chatIsPinned(info, prefs()) ? 'Desfijar' : 'Fijar', 'pin'],
       [chatIsMuted(info, prefs()) ? 'Activar sonido' : 'Silenciar', 'mute'],
-      [chatIsFavorite(info, prefs()) ? 'Quitar de favoritos' : 'Añadir a favoritos', 'favorite'],
+      [chatIsFavorite(info, prefs()) ? 'Quitar chat destacado' : 'Destacar chat', 'favorite'],
       [Number(info.unread) > 0 || bool(info.unread) ? 'Marcar leído' : 'Marcar no leído', 'read'],
     ];
     for (const [label, action] of chatActions) {
@@ -904,9 +1019,14 @@ export function installFeatureUI({
       control.onclick = () => { closeModal(); openChatAction(action); };
       actions.append(control);
     }
-    if (!isGroup && blockState !== null) {
-      const control = button(documentRef, blockState ? 'Desbloquear contacto' : 'Bloquear contacto', 'feature-button subtle');
-      control.onclick = () => {
+    if (!isGroup) {
+      const control = button(documentRef, blockState === true ? 'Desbloquear contacto' : 'Bloquear contacto', 'feature-button subtle');
+      if (blockState === null) {
+        // QA #13: sin estado del proveedor el botón se ve inutilizable con el
+        // motivo, no desaparece (el 501 del conector no debe ser silencioso).
+        control.disabled = true;
+        control.title = 'Bloqueo no disponible con este proveedor';
+      } else control.onclick = () => {
         const nextBlocked = !blockState;
         const confirmation = openModal(nextBlocked ? 'Bloquear contacto' : 'Desbloquear contacto');
         confirmation.body.append(node('p', 'feature-description', nextBlocked
@@ -953,8 +1073,8 @@ export function installFeatureUI({
   }
 
   function openMemberForm() {
-    const modal = openModal('Añadir miembro', { opener: documentRef.activeElement });
-    const address = field(documentRef, 'Número o identificador', 'text', 'memberId');
+    const modal = openModal('Añadir participante', { opener: documentRef.activeElement });
+    const address = field(documentRef, 'Número o identificador', 'tel', 'memberId', '', '+34 600 000 000');
     const submit = button(documentRef, 'Añadir', 'feature-button primary');
     submit.type = 'submit';
     const form = node('form', 'feature-form');
@@ -963,15 +1083,10 @@ export function installFeatureUI({
       event.preventDefault();
       const value = address.input.value.trim();
       if (!value) { address.input.focus(); return; }
-      const result = await mutate('/api/groups/action', { action: 'add', participant: value }, { success: 'Miembro añadido.' });
+      const result = await mutate('/api/groups/action', { action: 'add', participant: value }, { success: 'Participante añadido.' });
       if (result) { closeModal(); openInfo(); }
     };
     modal.body.append(form);
-  }
-
-  function localGallery(kind) {
-    if (kind === 'links') return extractLinks(runtime.currentMessages);
-    return attachmentItems(runtime.currentMessages, kind);
   }
 
   async function openGallery(kind) {
@@ -985,35 +1100,78 @@ export function installFeatureUI({
     }
     modal.body.append(tabs, node('p', 'feature-loading', 'Cargando…'));
     let items = [];
+    let cursor = null;
+    let loadError = null;
+    const serverKind = kind === 'media' ? 'gallery' : kind;
     try {
-      const serverKind = kind === 'media' ? 'gallery' : kind;
-      const result = await request('/api/chats/media', undefined, { chat: runtime.chat, kind: serverKind });
+      // QA #72: antes se pintaban los originales (9,2 MB/45 items) de una sola vez.
+      const result = await request('/api/chats/media', undefined, { chat: runtime.chat, kind: serverKind, limit: 60 });
       items = array(result.items || result.media || result.results);
-    } catch {
-      items = localGallery(kind);
+      cursor = result.nextCursor || null;
+    } catch (err) {
+      // QA #114: antes caía a localGallery (los mensajes cargados en pantalla) sin
+      // aviso → un 500 se parecía a «este chat tiene estos 4 elementos». Vacío + aviso.
+      loadError = err;
     }
     if (!runtime.modal || runtime.modal.body !== modal.body) return;
+    modal.body.querySelector('.feature-loading')?.remove();
+    if (loadError) {
+      modal.body.append(node('p', 'feature-muted', loadError.message || 'No se pudo cargar la galería.'));
+      const retry = button(documentRef, 'Reintentar', 'feature-button subtle');
+      retry.onclick = () => { closeModal(); openGallery(kind); };
+      modal.body.append(retry);
+      return;
+    }
     const list = node('div', `feature-gallery-grid ${kind === 'links' ? 'links' : ''}`);
     list.replaceChildren();
     if (!items.length) list.append(node('p', 'feature-muted', 'No hay elementos disponibles en este chat.'));
-    for (const item of items) {
-      const card = node('article', 'feature-gallery-card');
+    const renderCard = item => {
       const url = kind === 'links' ? safeWebUrl(item.url || item.href) : mediaUrl(item, windowRef?.location?.href || 'http://localhost/');
+      // QA #115.1: <a href> real → click medio, «copiar dirección» y destino en la barra
+      // de estado gratis; el Enter nativo cubre lo que hacía el role=link (QA #152).
+      const card = url ? node('a', 'feature-gallery-card') : node('article', 'feature-gallery-card');
       if (kind === 'media' && url && text(item.mimeType || item.mime_type).startsWith('image/')) {
         const image = node('img', '', text(item.name || 'Imagen'));
-        image.src = url; image.alt = text(item.name || 'Imagen'); image.loading = 'lazy';
-        image.onerror = () => { image.remove(); card.prepend(node('span', 'feature-gallery-icon', 'IMG')); };
+        // La rejilla usa el thumb (jpegThumbnail del payload); el original solo
+        // al abrir (clic). Sin thumb, se cae al original como antes.
+        image.src = item.thumbUrl || url; image.alt = text(item.name || 'Imagen'); image.loading = 'lazy';
+        image.onerror = () => {
+          if (image.src !== url && url) { image.onerror = () => { image.remove(); card.prepend(node('span', 'feature-gallery-icon', 'IMG')); }; image.src = url; }
+          else { image.remove(); card.prepend(node('span', 'feature-gallery-icon', 'IMG')); }
+        };
         card.append(image);
-      } else card.append(node('span', 'feature-gallery-icon', kind === 'documents' ? 'DOC' : kind === 'links' ? '↗' : 'MEDIA'));
+      } else card.append(node('span', 'feature-gallery-icon', kind === 'documents' ? (item.kind === 'audio' ? 'AUDIO' : 'DOC') : kind === 'links' ? '↗' : 'MEDIA'));
       const copy = node('div', 'feature-gallery-copy');
       copy.append(node('strong', '', item.name || item.fileName || item.file_name || item.title || item.url || 'Elemento'));
       if (item.timestamp) copy.append(node('small', '', new Date(item.timestamp).toLocaleDateString('es-ES')));
       card.append(copy);
-      if (url) { card.setAttribute('role', 'link'); card.tabIndex = 0; card.onclick = () => windowRef?.open?.(url, '_blank', 'noopener,noreferrer'); }
+      if (url) { card.href = url; card.target = '_blank'; card.rel = 'noopener noreferrer'; }
       list.append(card);
-    }
+    };
+    items.forEach(renderCard);
     modal.body.querySelector('.feature-loading')?.remove();
     modal.body.append(list);
+    // QA #72: paginación — «Cargar más» baja la siguiente página de 60.
+    const loadMore = () => {
+      const more = button(documentRef, 'Cargar más', 'feature-button subtle');
+      more.onclick = async () => {
+        more.disabled = true;
+        try {
+          const page = await request('/api/chats/media', undefined, { chat: runtime.chat, kind: serverKind, limit: 60, cursor });
+          const next = array(page.items || page.media || page.results);
+          if (!runtime.modal || runtime.modal.body !== modal.body) return;
+          next.forEach(renderCard);
+          cursor = page.nextCursor || null;
+          more.remove();
+          if (cursor) loadMore();
+        } catch {
+          more.disabled = false;
+          more.textContent = 'Reintentar';
+        }
+      };
+      modal.body.append(more);
+    };
+    if (cursor) loadMore();
   }
 
   function openSearch() {
@@ -1045,6 +1203,7 @@ export function installFeatureUI({
     let jumping = false;
     dateForm.onsubmit = async event => {
       event.preventDefault(); if (jumping) return;
+      if (!date.input.value) { dateStatus.textContent = 'Elige una fecha antes de pulsar Ir.'; return; }
       refreshToday();
       const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
       const current = () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation;
@@ -1121,7 +1280,7 @@ export function installFeatureUI({
           if (!messageId) return;
           const renderedId = text(runtime.currentMessages.find(message => text(message.id) === messageId || text(message.waMessageId) === messageId)?.id || messageId);
           const bubble = [...documentRef.querySelectorAll('#messages [data-message-id]')].find(element => element.dataset.messageId === renderedId);
-          if (bubble) { bubble.tabIndex = -1; bubble.scrollIntoView?.({ block: 'center' }); bubble.focus?.({preventScroll: true}); }
+          if (bubble) { bubble.tabIndex = -1; bubble.classList.add('message-highlight'); bubble.scrollIntoView?.({ block: 'center' }); bubble.focus?.({preventScroll: true}); }
           else {
             try { await showHistoricalMessage(messageId); }
             catch (error) { toast(error.message || 'No se pudo cargar el mensaje encontrado.', 'error'); }
@@ -1141,7 +1300,9 @@ export function installFeatureUI({
     if (!composer) return;
     let quote = documentRef.getElementById('feature-reply-quote');
     if (!quote) { quote = node('div', 'feature-reply-quote'); quote.id = 'feature-reply-quote'; composer.parentElement.insertBefore(quote, composer); }
-    quote.replaceChildren(node('span', 'feature-reply-label', 'Respondiendo a'), node('strong', '', messageText(message)));
+    // UX #8.4: el autor citado, como WhatsApp («Respondiendo a <nombre>»).
+    const sender = message?.fromMe ? 'Tú' : String(message?.senderName || '').trim();
+    quote.replaceChildren(node('span', 'feature-reply-label', sender ? `Respondiendo a ${sender}` : 'Respondiendo a'), node('strong', '', messageText(message)));
     const close = button(documentRef, 'Cancelar', 'feature-reply-close');
     close.onclick = clearReply;
     quote.append(close);
@@ -1178,7 +1339,9 @@ export function installFeatureUI({
         action.setAttribute('aria-label', 'Acciones del mensaje');
         bubble.append(action);
       }
-      action.onclick = event => { event.stopPropagation(); openMessageActions(message); };
+      action.onclick = event => { event.stopPropagation(); openMessageActions(message, event); };
+      // QA #59 addendum: clic derecho en la burbuja → el mismo menú (la oficial).
+      bubble.oncontextmenu = event => { event.preventDefault(); openMessageActions(message, event); };
       const quoted = bubble.querySelector('.message-reply-reference[data-reply-to-message-id]');
       if (quoted) quoted.onclick = async event => {
         event.stopPropagation();
@@ -1188,7 +1351,9 @@ export function installFeatureUI({
         const targetId = text(original?.id || originalId);
         if (original && targetId !== id) {
           const target = [...documentRef.querySelectorAll('#messages [data-message-id]')].find(item => item.dataset.messageId === targetId);
-          if (target) { target.tabIndex = -1; target.scrollIntoView?.({ block: 'center' }); target.focus?.({ preventScroll: true }); return; }
+          // QA 22-10: el salto por cita no iluminaba el destino (message-highlight
+          // es el flash de app.js:638; aquí faltaba).
+          if (target) { target.tabIndex = -1; target.classList.add('message-highlight'); target.scrollIntoView?.({ block: 'center' }); target.focus?.({ preventScroll: true }); return; }
         }
         try {
           const found = await showHistoricalMessage(originalId);
@@ -1197,15 +1362,7 @@ export function installFeatureUI({
           if (runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation) toast(error.message || 'No se pudo mostrar el mensaje citado.', 'error');
         }
       };
-      let selector = bubble.querySelector('.feature-message-select');
-      if (runtime.selectedMessageIds.size) {
-        if (!selector) {
-          selector = documentRef.createElement('input'); selector.type = 'checkbox'; selector.className = 'feature-message-select'; selector.setAttribute('aria-label', 'Seleccionar mensaje');
-          selector.onclick = event => { event.stopPropagation(); toggleMessageSelected(id, selector.checked); };
-          bubble.prepend(selector);
-        }
-        selector.checked = runtime.selectedMessageIds.has(id);
-      } else selector?.remove();
+      applySelectionToBubble(bubble, id);
       const reactions = reactionFor(message);
       let reactionStrip = bubble.querySelector('.feature-reactions');
       if (reactions.length) {
@@ -1218,9 +1375,35 @@ export function installFeatureUI({
     if (toolbar) toolbar.hidden = runtime.selectedMessageIds.size === 0;
   }
 
+  // #155 (velocidad): el modo selección pone/quita el checkbox en todas las burbujas;
+  // dentro del modo, un toggle solo toca la burbuja afectada.
+  function applySelectionToBubble(bubble, id) {
+    const selecting = runtime.selectedMessageIds.size > 0;
+    let selector = bubble.querySelector('.feature-message-select');
+    if (selecting) {
+      if (!selector) {
+        selector = documentRef.createElement('input'); selector.type = 'checkbox'; selector.className = 'feature-message-select'; selector.setAttribute('aria-label', 'Seleccionar mensaje');
+        selector.onclick = event => { event.stopPropagation(); toggleMessageSelected(id, selector.checked); };
+        bubble.prepend(selector);
+      }
+      selector.checked = runtime.selectedMessageIds.has(id);
+    } else selector?.remove();
+    // QA 22-10: en modo selección, pulsar la burbuja alterna (comportamiento de WhatsApp).
+    // Media, enlaces y el checkbox conservan su propio comportamiento.
+    bubble.onclick = selecting
+      ? event => { if (!event.target?.closest?.('button, a, input')) toggleMessageSelected(id, !runtime.selectedMessageIds.has(id)); }
+      : null;
+  }
+
   function toggleMessageSelected(id, selected = true) {
+    const wasSelecting = runtime.selectedMessageIds.size > 0;
     if (selected) runtime.selectedMessageIds.add(text(id)); else runtime.selectedMessageIds.delete(text(id));
-    enhanceMessages();
+    if (wasSelecting && runtime.selectedMessageIds.size > 0) {
+      const bubble = documentRef.querySelector(`#messages .message[data-message-id="${CSS.escape(text(id))}"]`);
+      if (bubble) applySelectionToBubble(bubble, text(id));
+    } else {
+      enhanceMessages();
+    }
     const count = documentRef.getElementById('feature-selection-count');
     if (count) count.textContent = `${runtime.selectedMessageIds.size} ${runtime.selectedMessageIds.size === 1 ? 'seleccionado' : 'seleccionados'}`;
   }
@@ -1231,38 +1414,94 @@ export function installFeatureUI({
     return Boolean(result);
   }
 
+  // UX #55.1: fila rápida de WhatsApp (6 + «+»); el picker completo solo tras «+».
+  const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
   function openReactionPicker(message) {
     const modal = openModal('Reaccionar', { opener: documentRef.activeElement });
-    const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
-    modal.body.append(createEmojiPicker({documentRef, account: context.account,
-      isCurrent: () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation,
-      onSelect: emoji => reactTo(message, emoji),
-    }));
+    const showFullPicker = () => {
+      const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
+      modal.body.replaceChildren(createEmojiPicker({documentRef, account: context.account,
+        isCurrent: () => runtime.modal?.body === modal.body && runtime.account === context.account && runtime.chat === context.chat && runtime.generation === context.generation,
+        onSelect: emoji => reactTo(message, emoji),
+      }));
+    };
+    const row = node('div', 'feature-quick-reactions');
+    for (const emoji of QUICK_REACTIONS) {
+      const button = documentRef.createElement('button');
+      button.type = 'button';
+      button.textContent = emoji;
+      button.setAttribute('aria-label', `Reaccionar con ${emoji}`);
+      button.onclick = () => reactTo(message, emoji);
+      row.append(button);
+    }
+    const more = documentRef.createElement('button');
+    more.type = 'button';
+    more.textContent = '+';
+    more.setAttribute('aria-label', 'Más reacciones');
+    more.onclick = showFullPicker;
+    row.append(more);
+    modal.body.append(row);
   }
 
   function openForwardPicker(ids) {
     const source = { account: runtime.account, chat: runtime.chat, generation: runtime.generation };
     const messageIds = [...ids];
     const modal = openModal('Reenviar mensaje', { wide: true });
-    const form = node('form', 'feature-form');
-    const select = documentRef.createElement('select'); select.name = 'targetChat'; select.required = true; select.append(option(documentRef, 'Selecciona una conversación', ''));
-    for (const chat of array(getChats()).filter(chat => !chatIsArchived(chat, prefs()))) select.append(option(documentRef, chat.name || chat.id, chat.id));
+    // UX #57 / QA #92: buscador + hasta 5 destinos con contador, como WhatsApp
+    // (el <select> de 1034 opciones era inutilizable). El pie de foto queda fuera:
+    // el contrato del conector (forward) no admite caption.
+    const chosen = new Set();
+    const search = documentRef.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'Buscar conversación';
+    search.setAttribute('aria-label', 'Buscar conversación de destino');
+    const list = node('div', 'feature-forward-list');
     const submit = button(documentRef, 'Reenviar', 'feature-button primary');
     submit.type = 'submit';
-    form.append(makeElement(documentRef, 'label', 'feature-field', 'Conversación de destino'), select, submit);
+    submit.disabled = true;
+    const render = () => {
+      const term = (search.value || '').trim().toLowerCase();
+      list.replaceChildren();
+      for (const chat of array(getChats()).filter(chat => !chatIsArchived(chat, prefs()))) {
+        const name = chat.name || (chat.isGroup ? 'Grupo sin nombre' : 'Contacto sin nombre');
+        if (term && !name.toLowerCase().includes(term) && !String(chat.id).toLowerCase().includes(term)) continue;
+        const row = node('label', 'feature-forward-row');
+        const check = documentRef.createElement('input');
+        check.type = 'checkbox';
+        check.checked = chosen.has(chat.id);
+        check.onchange = () => {
+          if (check.checked && chosen.size >= 5) { check.checked = false; toast('Máximo 5 conversaciones.', 'error'); return; }
+          if (check.checked) chosen.add(chat.id); else chosen.delete(chat.id);
+          submit.textContent = chosen.size > 1 ? `Reenviar a ${chosen.size}` : 'Reenviar';
+          submit.disabled = chosen.size === 0;
+        };
+        row.append(check, node('span', '', name));
+        list.append(row);
+      }
+    };
+    search.oninput = render;
+    const form = node('form', 'feature-form');
+    form.append(search, list, submit);
     form.onsubmit = async event => {
       event.preventDefault();
-      const targetChat = select.value;
-      if (!targetChat) return;
+      const targets = [...chosen];
+      if (!targets.length) return;
       let sent = 0;
-      for (const messageId of messageIds) {
-        if (runtime.account !== source.account || runtime.chat !== source.chat || runtime.generation !== source.generation) return;
-        const result = await mutate('/api/messages/forward', { messageId, targetChat }, { success: '' });
-        if (!result) return;
-        sent += 1;
+      for (const targetChat of targets) {
+        for (const messageId of messageIds) {
+          if (runtime.account !== source.account || runtime.chat !== source.chat || runtime.generation !== source.generation) return;
+          const result = await mutate('/api/messages/forward', { messageId, targetChat }, { success: '' });
+          if (!result) return;
+          sent += 1;
+        }
       }
-      if (sent) { toast(`${sent} mensaje${sent === 1 ? '' : 's'} reenviado${sent === 1 ? '' : 's'}.`, 'success'); runtime.selectedMessageIds.clear(); closeModal(); enhanceMessages(); }
+      // QA #116: reenviar al chat abierto no refrescaba el transcript (solo el eco SSE
+      // tardío lo traía); el refresco diferido de la casa (QA #80) lo pinta en ~2,5 s.
+      if (sent && targets.includes(source.chat)) refetchAfterEcho();
+      if (sent) { toast(`${sent} reenvío${sent === 1 ? '' : 's'}.`, 'success'); runtime.selectedMessageIds.clear(); closeModal(); enhanceMessages(); }
     };
+    render();
+    search.focus?.();
     modal.body.append(form, node('p', 'feature-muted', 'La entrega depende de la confirmación del proveedor.'));
   }
 
@@ -1283,10 +1522,11 @@ export function installFeatureUI({
     modal.body.append(form);
   }
 
-  function openDelete(message) {
+  function openDelete(message, mine = true) {
     const modal = openModal('Eliminar mensaje', { opener: documentRef.activeElement });
-    modal.body.append(node('p', '', 'Elige si quieres quitar el mensaje solo de tu historial o solicitar su eliminación para todos.'));
-    const scope = documentRef.createElement('select'); scope.setAttribute('aria-label', 'Alcance del borrado'); scope.append(option(documentRef, 'Eliminar para mí', 'me'), option(documentRef, 'Eliminar para todos', 'everyone'));
+    // UX #36.1: en un mensaje ajeno solo existe «para mí» (como la oficial); «para todos» es solo de los propios.
+    modal.body.append(node('p', '', mine ? 'Elige si quieres quitar el mensaje solo de tu historial o solicitar su eliminación para todos.' : 'El mensaje solo se quita de tu historial; tus contactos lo seguirán viendo.'));
+    const scope = documentRef.createElement('select'); scope.setAttribute('aria-label', 'Alcance del borrado'); scope.append(option(documentRef, 'Eliminar para mí', 'me'), ...(mine ? [option(documentRef, 'Eliminar para todos', 'everyone')] : []));
     const confirm = button(documentRef, 'Eliminar', 'feature-button danger');
     confirm.onclick = async () => { const result = await mutate('/api/messages/delete', { messageId: message.id, scope: scope.value }, { refreshMessages: true, success: 'Mensaje eliminado.' }); if (result) closeModal(); };
     modal.body.append(scope, confirm);
@@ -1342,10 +1582,17 @@ export function installFeatureUI({
     modal.close.focus();
   }
 
-  function openMessageActions(message) {
-    const modal = openModal('Acciones del mensaje', { opener: documentRef.activeElement, variant: 'menu' });
+  function openMessageActions(message, event) {
+    // UX #3.1: el anclaje leía document.activeElement, que no siempre era el
+    // botón (un re-render lo sustituía y el menú salía sobre la lista de chats).
+    // Se ancla al botón del evento; activeElement queda de respaldo.
+    const modal = openModal('Acciones del mensaje', { opener: event?.currentTarget ?? documentRef.activeElement, variant: 'menu' });
+    // QA #59: patrón de menú igual que el menú de chat (role=menu + flechas).
+    modal.dialog.setAttribute('role', 'menu');
+    modal.dialog.setAttribute('aria-label', 'Acciones del mensaje');
+    modal.dialog.removeAttribute('aria-labelledby');
     const actions = node('div', 'feature-action-grid');
-    const add = (label, handler, className = 'feature-button subtle') => { const item = button(documentRef, label, className); item.onclick = () => handler(message); actions.append(item); };
+    const add = (label, handler, className = 'feature-button subtle') => { const item = button(documentRef, label, className); item.setAttribute('role', 'menuitem'); item.tabIndex = -1; item.onclick = () => handler(message); actions.append(item); };
     add('Responder', item => { closeModal(); replyTo(item); });
     if (text(message.text ?? message.content).trim()) add('Copiar texto', async item => {
       const context = { account: runtime.account, chat: runtime.chat, generation: runtime.generation };
@@ -1375,8 +1622,19 @@ export function installFeatureUI({
     if (message.fromMe === true) {
       add('Editar', item => { closeModal(); openEdit(item); });
       add('Eliminar', item => { closeModal(); openDelete(item); }, 'feature-button danger');
+    } else {
+      // UX #36.1: los ajenos se pueden quitar del propio historial (el servidor ya lo admite: allowRevoked scope=me).
+      add('Eliminar para mí', item => { closeModal(); openDelete(item, false); }, 'feature-button danger');
     }
     modal.body.append(actions);
+    actions.firstElementChild?.focus();
+    modal.dialog.addEventListener('keydown', event => {
+      if (event.key === 'Tab') { closeModal(); return; }
+      const items = [...actions.children].filter(item => item.getAttribute('role') === 'menuitem');
+      const index = items.indexOf(documentRef.activeElement);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : event.key === 'ArrowDown' ? (index + 1) % items.length : event.key === 'ArrowUp' ? (index + items.length - 1) % items.length : -1;
+      if (next >= 0) { event.preventDefault(); items[next]?.focus(); }
+    });
   }
 
   async function openChatAction(action, desiredValue = null) {
@@ -1397,8 +1655,10 @@ export function installFeatureUI({
     const currentValue = { archived: chatIsArchived(runtime.selectedChat, prefs()), pinned: chatIsPinned(runtime.selectedChat, prefs()), muted: chatIsMuted(runtime.selectedChat, prefs()), favorite: chatIsFavorite(runtime.selectedChat, prefs()) }[fieldName];
     if (desiredValue !== null && currentValue === desiredValue) return;
     const providerAction = action === 'archive' ? (currentValue ? 'unarchive' : 'archive') : action === 'pin' ? (currentValue ? 'unpin' : 'pin') : action === 'mute' ? (currentValue ? 'unmute' : 'mute') : (currentValue ? 'unfavorite' : 'favorite');
+    // #217: la fila reacciona al confirmar, no tras el POST; se revierte si falla.
+    updateChatFlags(runtime.chat, { [fieldName]: !currentValue });
     const result = await mutate('/api/chat-actions', { action: providerAction }, { refreshChats: true, success: `${fieldName === 'archived' ? (!currentValue ? 'Chat archivado.' : 'Chat desarchivado.') : 'Preferencia actualizada.'}` });
-    if (result) updateChatFlags(runtime.chat, { [fieldName]: !currentValue });
+    if (!result) updateChatFlags(runtime.chat, { [fieldName]: currentValue });
   }
 
   function openSidebarChatMenu(chat, opener) {
@@ -1418,11 +1678,14 @@ export function installFeatureUI({
       const unreadKey = `${account}:${chat.id}`;
       const previousUnreadKey = runtime.manualUnreadKey;
       if (action === 'unread' && runtime.chat === chat.id) runtime.manualUnreadKey = unreadKey;
+      // #217: reflejo instantáneo (la fila va/viene al confirmar); si el
+      // proveedor falla se restaura el valor previo de la fila.
+      const flagSnapshot = flags ? Object.fromEntries(Object.keys(flags).map(key => [key, chat[key]])) : null;
+      if (flags) updateChatFlags(chat.id, flags);
       try {
         const result = await request(path, { account, chat: chat.id, action, ...extra });
         if (runtime.account !== account) return;
         if (action === 'read' && runtime.manualUnreadKey === unreadKey) runtime.manualUnreadKey = '';
-        if (flags) updateChatFlags(chat.id, flags);
         if (action === 'list') { markListMutation(account); savePrefs(value => ({ ...value,
           lists: value.lists.map(list => list.name === extra.list ? { ...list, chatIds: [...new Set([...list.chatIds, chat.id])] } : list),
           serverListNames: [...new Set([...value.serverListNames, extra.list])],
@@ -1431,6 +1694,7 @@ export function installFeatureUI({
         if (runtime.account === account) toast('Preferencia actualizada.');
         return result;
       } catch (error) {
+        if (flags) updateChatFlags(chat.id, flagSnapshot);
         if (runtime.account === account) {
           if (action === 'unread' && runtime.manualUnreadKey === unreadKey) runtime.manualUnreadKey = previousUnreadKey;
           showError(error);
@@ -1461,13 +1725,17 @@ export function installFeatureUI({
     else branch('Silenciar notificaciones', [
       ['8 horas', () => perform('mute', { muted: true }, { durationMs: 8 * 60 * 60 * 1000 })],
       ['1 semana', () => perform('mute', { muted: true }, { durationMs: 7 * 24 * 60 * 60 * 1000 })],
+      // QA #101 (22-10): la oficial da 8 h / 1 semana / 1 año; faltaba la larga.
+      ['1 año', () => perform('mute', { muted: true }, { durationMs: 365 * 24 * 60 * 60 * 1000 })],
+      // UX #26.1: sin durationMs el puente del conector silencia sin fin (controller.ts:2100).
+      ['Siempre', () => perform('mute', { muted: true })],
     ]);
     const pinned = chatIsPinned(chat, prefs());
     add(actions, pinned ? 'Desfijar chat' : 'Fijar chat', () => perform(pinned ? 'unpin' : 'pin', { pinned: !pinned }));
     const unread = Number(chat.unread) > 0 || chat.unread === true;
     add(actions, unread ? 'Marcar como leído' : 'Marcar como no leído', () => perform(unread ? 'read' : 'unread', { unread: unread ? 0 : 1 }));
     const favorite = chatIsFavorite(chat, prefs());
-    add(actions, favorite ? 'Quitar de favoritos' : 'Añadir a favoritos', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
+    add(actions, favorite ? 'Quitar chat destacado' : 'Destacar chat', () => perform(favorite ? 'unfavorite' : 'favorite', { favorite: !favorite }));
     const lists = prefs().lists.filter(list => !list.chatIds.includes(chat.id));
     branch('Añadir a la lista', [
       ...lists.map(list => [list.name, () => perform('list', null, { list: list.name, id: chat.id }, '/api/lists')]),
@@ -1478,30 +1746,7 @@ export function installFeatureUI({
         if (runtime.account !== account || runtime.modal?.body !== modal.body
           || providerBlock.confirmed !== true || typeof providerBlock.blocked !== 'boolean') return;
         const blocked = providerBlock.blocked;
-        add(actions, blocked ? 'Desbloquear' : 'Bloquear', () => {
-          const confirmation = openModal(blocked ? 'Desbloquear contacto' : 'Bloquear contacto');
-          confirmation.body.append(node('p', 'feature-description', blocked
-            ? 'Volverás a recibir mensajes de este contacto.'
-            : 'Dejarás de recibir mensajes de este contacto.'));
-          const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
-          cancel.onclick = closeModal;
-          const confirm = button(documentRef, blocked ? 'Desbloquear' : 'Bloquear', 'feature-button primary');
-          confirm.onclick = async () => {
-            if (runtime.account !== account) return;
-            confirm.disabled = true;
-            try {
-              const result = await request('/api/chat-actions', { chat: chat.id, action: blocked ? 'unblock' : 'block' });
-              if (result.confirmed !== true || result.blocked !== !blocked) throw new Error('El proveedor no confirmó el bloqueo.');
-              if (runtime.account === account) { closeModal(); toast('Preferencia actualizada.'); }
-            } catch (error) {
-              if (runtime.account === account) showError(error);
-              if (runtime.modal?.body === confirmation.body) confirm.disabled = false;
-            }
-          };
-          const footer = node('div', 'feature-dialog-actions');
-          footer.append(cancel, confirm);
-          confirmation.body.append(footer);
-        });
+        add(actions, blocked ? 'Desbloquear' : 'Bloquear', () => confirmBlockToggle(account, chat, blocked));
       }).catch(() => {});
     }
     modal.dialog.addEventListener('keydown', event => {
@@ -1562,21 +1807,76 @@ export function installFeatureUI({
     };
   }
 
-  function openChatMenu() {
+  // UX #60: la confirmación de bloqueo es común al menú de fila y al de cabecera.
+  function confirmBlockToggle(account, chat, blocked) {
+    const confirmation = openModal(blocked ? 'Desbloquear contacto' : 'Bloquear contacto');
+    confirmation.body.append(node('p', 'feature-description', blocked
+      ? 'Volverás a recibir mensajes de este contacto.'
+      : 'Dejarás de recibir mensajes de este contacto.'));
+    const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
+    cancel.onclick = closeModal;
+    const confirm = button(documentRef, blocked ? 'Desbloquear' : 'Bloquear', 'feature-button primary');
+    confirm.onclick = async () => {
+      if (runtime.account !== account) return;
+      confirm.disabled = true;
+      try {
+        const result = await request('/api/chat-actions', { chat: chat.id, action: blocked ? 'unblock' : 'block' });
+        if (result.confirmed !== true || result.blocked !== !blocked) throw new Error('El proveedor no confirmó el bloqueo.');
+        if (runtime.account === account) { closeModal(); toast('Preferencia actualizada.'); }
+      } catch (error) {
+        if (runtime.account === account) showError(error);
+        if (runtime.modal?.body === confirmation.body) confirm.disabled = false;
+      }
+    };
+    const footer = node('div', 'feature-dialog-actions');
+    footer.append(cancel, confirm);
+    confirmation.body.append(footer);
+  }
+
+  function openChatMenu(event) {
     if (!runtime.chat) return;
-    const modal = openModal('Opciones de conversación', { opener: documentRef.activeElement, variant: 'menu' });
+    const modal = openModal('Opciones de conversación', { opener: event?.currentTarget ?? documentRef.activeElement, variant: 'menu' });
+    modal.dialog.setAttribute('role', 'menu');
+    modal.dialog.setAttribute('aria-label', `Opciones de ${runtime.selectedChat?.name || runtime.chat}`);
+    modal.dialog.removeAttribute('aria-labelledby');
     const actions = node('div', 'feature-action-grid');
-    const add = (label, action) => { const item = button(documentRef, label, 'feature-button subtle'); item.onclick = () => { closeModal(); action(); }; actions.append(item); };
+    const add = (label, action) => {
+      const item = button(documentRef, label, 'feature-button subtle');
+      item.setAttribute('role', 'menuitem'); item.tabIndex = -1;
+      item.onclick = () => { closeModal(); action(); };
+      actions.append(item);
+      return item;
+    };
     add('Información', openInfo);
     add('Buscar mensajes', openSearch);
     add(chatIsArchived(runtime.selectedChat, prefs()) ? 'Desarchivar' : 'Archivar', () => openChatAction('archive'));
     add(chatIsPinned(runtime.selectedChat, prefs()) ? 'Desfijar' : 'Fijar', () => openChatAction('pin'));
     add(chatIsMuted(runtime.selectedChat, prefs()) ? 'Activar sonido' : 'Silenciar', () => openChatAction('mute'));
-    add(chatIsFavorite(runtime.selectedChat, prefs()) ? 'Quitar de favoritos' : 'Añadir a favoritos', () => openChatAction('favorite'));
+    add(chatIsFavorite(runtime.selectedChat, prefs()) ? 'Quitar chat destacado' : 'Destacar chat', () => openChatAction('favorite'));
     add('Listas', openLists);
     add('Privacidad', openPrivacy);
     add('Exportar chat', openChatExport);
+    const blockChat = runtime.selectedChat;
+    if (blockChat && !blockChat.isGroup) {
+      const account = runtime.account;
+      void request('/api/contact-block', undefined, { account, chat: blockChat.id }).then(providerBlock => {
+        if (runtime.account !== account || runtime.modal?.body !== modal.body
+          || providerBlock.confirmed !== true || typeof providerBlock.blocked !== 'boolean') return;
+        const blocked = providerBlock.blocked;
+        add(blocked ? 'Desbloquear' : 'Bloquear', () => confirmBlockToggle(account, blockChat, blocked));
+      }).catch(() => {});
+    }
     modal.body.append(actions);
+    // UX #60.2: navegación por flechas, como el menú de la fila.
+    modal.dialog.addEventListener('keydown', keyEvent => {
+      if (keyEvent.key === 'Tab') { closeModal(); return; }
+      const items = [...actions.children].filter(item => item.getAttribute('role') === 'menuitem');
+      const index = items.indexOf(documentRef.activeElement);
+      const next = keyEvent.key === 'Home' ? 0 : keyEvent.key === 'End' ? items.length - 1
+        : keyEvent.key === 'ArrowDown' ? (index + 1) % items.length
+        : keyEvent.key === 'ArrowUp' ? (index + items.length - 1) % items.length : -1;
+      if (next >= 0) { keyEvent.preventDefault(); items[next]?.focus(); }
+    });
   }
 
   function openChatExport() {
@@ -1586,7 +1886,7 @@ export function installFeatureUI({
     const modal = openModal('Exportar chat');
     const controller = new AbortController();
     runtime.modal.onClose = () => controller.abort();
-    const progress = node('p', 'feature-muted', 'Se exportarán todos los mensajes sincronizados de este chat a un archivo de texto. Los archivos adjuntos se incluyen por su nombre, sin descargar su contenido.');
+    const progress = node('p', 'feature-muted', 'Se exportarán los mensajes sincronizados de este chat (hasta 50 000) a un archivo de texto. Los adjuntos se listan por su nombre, sin descargar su contenido; para exportar con multimedia usa la app del móvil.');
     progress.setAttribute('role', 'status');
     const start = button(documentRef, 'Exportar TXT', 'feature-button primary');
     const cancel = button(documentRef, 'Cancelar', 'feature-button subtle');
@@ -1596,7 +1896,7 @@ export function installFeatureUI({
       start.disabled = true;
       try {
         const result = await exportConversationText({
-          fetchPage: createPageFetcher({ fetchImpl: windowRef.fetch.bind(windowRef) }),
+          fetchPage: createWholeExportFetcher({ fetchImpl: windowRef.fetch.bind(windowRef) }),
           account, chat, signal: controller.signal,
           onProgress: ({ messages }) => { if (!controller.signal.aborted) progress.textContent = `Preparando ${messages} mensajes…`; },
         });
@@ -1617,11 +1917,13 @@ export function installFeatureUI({
   }
 
   function openLists() {
-    const modal = openModal('Favoritos y listas', { wide: true });
+    // UX #33.1: el panel solo contiene listas; los mensajes destacados tienen su
+    // propia vista (chip «Destacados»). «Favoritos» era una promesa vacía.
+    const modal = openModal('Listas', { wide: true });
     const account = runtime.account;
     const current = prefs();
     const form = node('form', 'feature-form');
-    const input = field(documentRef, 'Nueva lista', 'text', 'name');
+    const input = field(documentRef, 'Nombre de la lista', 'text', 'name');
     input.input.maxLength = 100;
     const submit = button(documentRef, 'Crear lista', 'feature-button primary');
     submit.type = 'submit';
@@ -1641,12 +1943,14 @@ export function installFeatureUI({
       } catch (error) { if (runtime.account === account) showError(error); }
       finally { if (runtime.account === account && runtime.modal?.body === modal.body) submit.disabled = false; }
     };
-    modal.body.append(form, node('p', 'feature-muted', 'Las listas se guardan para esta cuenta en SocialMedia. Las listas antiguas de este navegador se conservan.'));
-    const refresh = button(documentRef, 'Actualizar listas', 'feature-button subtle');
-    refresh.onclick = async () => { await refreshLists(account); if (runtime.account === account && runtime.modal?.body === modal.body) { closeModal(); openLists(); } };
-    modal.body.append(refresh);
+    // UX #33.2: la frase interpolada se leía cortada; el nombre de la app va entre paréntesis.
+    modal.body.append(form, node('p', 'feature-muted', 'Las listas se guardan en esta cuenta (SocialMedia).'));
     addSection(modal.body, 'Listas guardadas');
     if (!current.lists.length) modal.body.append(node('p', 'feature-muted', 'Todavía no hay listas.'));
+    // UX #33.3: el refresco manual va discreto, al final, sin competir con «Crear lista».
+    const refresh = button(documentRef, 'Actualizar', 'feature-button subtle');
+    refresh.onclick = async () => { await refreshLists(account); if (runtime.account === account && runtime.modal?.body === modal.body) { closeModal(); openLists(); } };
+    modal.body.append(refresh);
     for (const list of current.lists) {
       const row = node('div', 'feature-list-row'); row.append(node('strong', '', list.name), node('span', 'feature-muted', `${list.chatIds.length} chats`));
       const show = button(documentRef, 'Ver', 'feature-button subtle');
@@ -1677,29 +1981,28 @@ export function installFeatureUI({
 
   function cryptoRandom() { return `local-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 
-  async function openStarred() {
-    const modal = openModal('Mensajes destacados', { wide: true });
-    // El chip «Destacados» abre un diálogo, no filtra la lista (matchesChat('starred') es false),
-    // así que no pasa por setView: se marca activo mientras el diálogo vive y se restaura al cerrar.
-    const paint = active => { for (const chip of documentRef.querySelectorAll('[data-feature-view]')) chip.setAttribute('aria-pressed', String(chip.dataset.featureView === active)); };
-    paint('starred');
-    modal.onClose = () => paint(runtime.currentView);
+  // QA #89/#97: «Destacados» es una vista de mensajes (no un diálogo): renderiza en la lista lateral.
+  let starredToken = 0;
+  async function renderStarredView(container) {
+    const token = ++starredToken;
     const account = runtime.account;
+    const isCurrent = () => token === starredToken && runtime.account === account && runtime.currentView === 'starred';
+    container.replaceChildren(node('p', 'feature-muted', 'Cargando mensajes destacados…'));
     const loadPage = async before => {
       let result;
       try { result = await request('/api/favorites/starred', undefined, { limit: '100', ...(before ? { before } : {}) }); }
-      catch (error) { if (runtime.modal?.body === modal.body) modal.body.append(node('p', 'feature-muted', error.message || 'No se pudieron cargar los mensajes destacados.')); return; }
-      if (runtime.account !== account || runtime.modal?.body !== modal.body) return;
-      modal.body.querySelector('.feature-load-more')?.remove();
+      catch (error) { if (isCurrent()) container.replaceChildren(node('p', 'feature-muted', error.message || 'No se pudieron cargar los mensajes destacados.')); return; }
+      if (!isCurrent()) return;
+      container.querySelector('.feature-load-more')?.remove();
       const items = array(result.items);
-      if (!items.length && !before) { modal.body.append(node('p', 'feature-muted', 'No hay mensajes destacados.')); return; }
+      if (!items.length && !before) { container.replaceChildren(node('p', 'feature-muted', 'Aún no has destacado ningún mensaje. Abre el menú «⋯» de un mensaje y elige «Destacar».')); return; }
       for (const item of items) {
         const row = button(documentRef, '', 'feature-search-result');
         row.append(node('strong', '', item.chatName || item.chatId || 'Conversación'), node('span', '', messageText(item)));
-        row.onclick = () => { const id = text(item.chatId); if (!id) return; const chat = array(getChats()).find(candidate => text(candidate.id) === id) || { id, name: item.chatName || id }; closeModal(); selectChat(chat); };
-        modal.body.append(row);
+        row.onclick = () => { const id = text(item.chatId); if (!id) return; const chat = array(getChats()).find(candidate => text(candidate.id) === id) || { id, name: item.chatName || id }; selectChat(chat); };
+        container.append(row);
       }
-      if (result.nextCursor) { const more = button(documentRef, 'Mostrar más', 'feature-button subtle feature-load-more'); more.onclick = () => loadPage(text(result.nextCursor)); modal.body.append(more); }
+      if (result.nextCursor) { const more = button(documentRef, 'Mostrar más', 'feature-button subtle feature-load-more'); more.onclick = () => loadPage(text(result.nextCursor)); container.append(more); }
     };
     await loadPage('');
   }
@@ -1711,14 +2014,16 @@ export function installFeatureUI({
     const modal = openModal('Nuevo contacto', { wide: true });
     const form = node('form', 'feature-form');
     const name = field(documentRef, 'Nombre', 'text', 'name');
-    const address = field(documentRef, 'Número o identificador', 'text', 'address');
+    const address = field(documentRef, 'Número o identificador', 'tel', 'address', '', '+34 600 000 000');
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
     form.append(name.wrapper, address.wrapper, submit);
+    const showError = formValidator(documentRef, form);
     form.onsubmit = async event => {
       event.preventDefault();
       const values = formData(form);
-      if (!values.name?.trim() || !values.address?.trim()) return;
+      if (!values.name?.trim() || !values.address?.trim()) { showError('Indica el nombre y el número o identificador.'); return; }
+      showError('');
       const result = await mutate('/api/contacts', { phone: values.address.trim(), displayName: values.name.trim() }, { refreshChats: true, success: 'Operación confirmada.', includeChat: false });
       if (result?.confirmed) closeModal();
     };
@@ -1729,15 +2034,26 @@ export function installFeatureUI({
     const modal = openModal('Nuevo grupo', { wide: true });
     const form = node('form', 'feature-form');
     const name = field(documentRef, 'Nombre', 'text', 'name');
-    const members = field(documentRef, 'Miembros (separados por comas)', 'text', 'members');
+    const members = field(documentRef, 'Participantes (separados por comas, p. ej. +34600112233)', 'text', 'members', '', '+34600112233, +34600112244');
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
     form.append(name.wrapper, members.wrapper, submit);
+    const showError = formValidator(documentRef, form);
+    // UX #49.1: «Continuar» queda deshabilitado hasta nombre + ≥1 miembro (como WhatsApp);
+    // el mensaje de motivo sigue para un submit sintético.
+    const groupValid = () => {
+      const values = formData(form);
+      return Boolean(values.name?.trim()) && values.members.split(',').some(item => item.trim());
+    };
+    const syncSubmit = () => { submit.disabled = !groupValid(); };
+    form.addEventListener('input', syncSubmit);
+    syncSubmit();
     form.onsubmit = async event => {
       event.preventDefault();
       const values = formData(form);
-      const payload = { name: values.name.trim(), participants: values.members.split(',').map(item => item.trim()).filter(Boolean) };
-      if (!payload.name || !payload.participants.length) return;
+      const payload = { name: values.name.trim().slice(0, 100), participants: values.members.split(',').map(item => item.trim()).filter(Boolean) };
+      if (!payload.name || !payload.participants.length) { showError('Indica el nombre del grupo y al menos un participante.'); return; }
+      showError('');
       const result = await mutate('/api/groups', payload, { refreshChats: true, success: 'Operación confirmada.', includeChat: false });
       const chat = result?.chat || result?.conversation;
       if (chat) { closeModal(); selectChat(chat); }
@@ -1754,10 +2070,12 @@ export function installFeatureUI({
     const submit = button(documentRef, 'Continuar', 'feature-button primary');
     submit.type = 'submit';
     form.append(subject.wrapper, description.wrapper, submit);
+    const showError = formValidator(documentRef, form);
     form.onsubmit = async event => {
       event.preventDefault();
       const values = formData(form);
-      if (!values.subject?.trim()) return;
+      if (!values.subject?.trim()) { showError('Indica el nombre de la comunidad.'); return; }
+      showError('');
       const payload = { subject: values.subject.trim().slice(0, 100) };
       if (values.description?.trim()) payload.description = values.description.trim();
       const result = await mutate('/api/communities', payload, { refreshChats: true, success: 'Comunidad creada.', includeChat: false });
@@ -1802,15 +2120,16 @@ export function installFeatureUI({
     return runtime.contactDirectory;
   }
 
-  function openNewChat(initialType = 'chat') {
+  function openNewChat(initialType = 'chat', query = '') {
     closeModal();
     if (initialType === 'group') { newGroupForm(); return; }
     if (initialType === 'contact') { newContactForm(); return; }
-    contactDirectory()?.open({ opener: documentRef.activeElement });
+    contactDirectory()?.open({ opener: documentRef.activeElement, query });
   }
 
   function openPicker(initial = 'emoji') {
-    const modal = openModal('Emoji, GIF y stickers', { wide: true });
+    // UX #46.2: «pegatina» es el término de WhatsApp en español; se unifica en toda la app.
+    const modal = openModal('Emoji, GIF y pegatinas', { wide: true });
     const tabs = node('nav', 'feature-picker-tabs');
     const content = node('div', 'feature-picker-content');
     const context = {account: runtime.account, chat: runtime.chat, generation: runtime.generation};
@@ -1820,8 +2139,8 @@ export function installFeatureUI({
     const renderEmoji = () => { content.replaceChildren(createEmojiPicker({documentRef, account: context.account, isCurrent, onSelect: insertEmoji})); };
     const renderUpload = (kind, accept) => {
       const sticker = kind === 'sticker';
-      content.replaceChildren(node('p', 'feature-muted', kind === 'GIF' ? 'El GIF se prepara junto al mensaje para revisarlo antes de enviar.' : 'Elige una foto, edítala y revisa el sticker antes de enviarlo.'));
-      const input = documentRef.createElement('input'); input.type = 'file'; input.accept = accept; input.setAttribute('aria-label', `Subir ${kind}`);
+      content.replaceChildren(node('p', 'feature-muted', kind === 'GIF' ? 'El GIF se prepara junto al mensaje para revisarlo antes de enviar.' : 'Elige una foto, edítala y revisa la pegatina antes de enviarla.'));
+      const input = documentRef.createElement('input'); input.type = 'file'; input.accept = accept; input.setAttribute('aria-label', `Subir ${sticker ? 'pegatina' : kind}`);
       if (kind === 'GIF') {
         input.onchange = () => {
           if (!isCurrent() || !input.files?.length) return;
@@ -1831,9 +2150,9 @@ export function installFeatureUI({
         return;
       }
       const preview = node('div', 'feature-sticker-preview'); preview.hidden = true;
-      const image = documentRef.createElement('img'); image.alt = 'Vista previa del sticker';
+      const image = documentRef.createElement('img'); image.alt = 'Vista previa de la pegatina';
       preview.append(image);
-      const send = button(documentRef, 'Enviar sticker', 'feature-button primary'); send.disabled = true;
+      const send = button(documentRef, 'Enviar pegatina', 'feature-button primary'); send.disabled = true;
       let selectedFile = null;
       let previewUrl = '';
       let sendToken = '';
@@ -1844,7 +2163,7 @@ export function installFeatureUI({
         if (!source || !isCurrent()) return;
         if (!/^image\/(jpeg|png|webp)$/.test(source.type)) { toast('Elige una imagen JPEG, PNG o WebP.', 'error'); return; }
         const problem = sticker
-          ? source.size > MAX_STICKER_SOURCE_BYTES ? 'La imagen para el sticker supera los 50 MiB.' : ''
+          ? source.size > MAX_STICKER_SOURCE_BYTES ? 'La imagen para la pegatina supera los 50 MiB.' : ''
           : attachmentError(source);
         if (problem) { toast(problem, 'error'); return; }
         send.disabled = true;
@@ -1873,7 +2192,8 @@ export function installFeatureUI({
           const data = await readBase64(file);
           if (!isCurrent() || selectedFile !== file) return;
           sendToken ||= crypto.randomUUID();
-          const result = await mutate('/api/messages/compose', { kind: 'sticker', name: file.name, mimeType: file.type, data, sendToken }, { refreshMessages: true, success: 'Sticker enviado.' });
+          const result = await mutate('/api/messages/compose', { kind: 'sticker', name: file.name, mimeType: file.type, data, sendToken }, { refreshMessages: true, success: 'Pegatina enviada.' });
+          if (result) refetchAfterEcho();
           if (result && isCurrent()) closeModal();
         } catch (error) {
           if (isCurrent()) toast(error.message, 'error');
@@ -1886,7 +2206,7 @@ export function installFeatureUI({
     const addTab = (label, render) => { const tab = button(documentRef, label, 'feature-button subtle'); tab.onclick = () => { disposeUpload(); disposeUpload = () => {}; for (const item of tabs.children) item.classList.remove('active'); tab.classList.add('active'); render(); }; tabs.append(tab); return tab; };
     const emojiTab = addTab('Emoji', renderEmoji);
     addTab('GIF local', () => renderUpload('GIF', 'image/gif'));
-    const stickerTab = addTab('Crear sticker', () => renderUpload('sticker', 'image/jpeg,image/png,image/webp'));
+    const stickerTab = addTab('Crear pegatina', () => renderUpload('sticker', 'image/jpeg,image/png,image/webp'));
     (initial === 'sticker' ? stickerTab : emojiTab).click();
     modal.body.append(tabs, content);
   }
@@ -1913,17 +2233,17 @@ export function installFeatureUI({
           const result = await request('/api/messages/compose', {kind: type, payload, sendToken});
           if (result.confirmed !== true && result.sent !== true) throw new Error('No se ha confirmado el envío.');
         },
-        onSent: () => {closeModal(); void loadMessages();},
+        onSent: () => {closeModal(); void loadMessages(); refetchAfterEcho();},
       }));
       return;
     }
     const form = node('form', 'feature-form');
-    const fields = [field(documentRef, 'Nombre', 'text', 'name'), field(documentRef, 'Número o identificador', 'text', 'address')];
+    const fields = [field(documentRef, 'Nombre', 'text', 'name'), field(documentRef, 'Número o identificador', 'tel', 'address', '', '+34 600 000 000')];
     const submit = button(documentRef, 'Enviar contacto', 'feature-button primary');
     submit.type = 'submit';
     for (const item of fields) form.append(item.wrapper); form.append(submit);
     let lastPayload = ''; let sendToken = '';
-    form.onsubmit = async event => { event.preventDefault(); const values = formData(form); const signature = JSON.stringify(values); if (signature !== lastPayload) { sendToken = crypto.randomUUID(); lastPayload = signature; } const result = await mutate('/api/messages/compose', { kind: type, payload: values, sendToken }, { refreshMessages: true, success: 'Contenido preparado para enviar.' }); if (result) closeModal(); };
+    form.onsubmit = async event => { event.preventDefault(); const values = formData(form); const signature = JSON.stringify(values); if (signature !== lastPayload) { sendToken = crypto.randomUUID(); lastPayload = signature; } const result = await mutate('/api/messages/compose', { kind: type, payload: values, sendToken }, { refreshMessages: true, success: 'Contenido preparado para enviar.' }); if (result) { refetchAfterEcho(); closeModal(); } };
     modal.body.append(form, node('p', 'feature-muted', 'La entrega queda confirmada por el proveedor; no se muestra como enviada antes de esa respuesta.'));
   }
 
@@ -1952,13 +2272,19 @@ export function installFeatureUI({
       const result = await request('/api/blocked-contacts', undefined, { account: scope.account, chat: '' });
       if (!isCurrent()) return;
       if (result.account !== scope.account || result.confirmed !== true || !Array.isArray(result.contacts)) throw new Error('Lista no confirmada por WhatsApp.');
-      notice.textContent = result.contacts.length ? `${result.contacts.length} contacto${result.contacts.length === 1 ? '' : 's'} bloqueado${result.contacts.length === 1 ? '' : 's'}.` : 'No hay contactos bloqueados.';
       search.hidden = result.contacts.length === 0;
       let visibleCount = 100;
       const render = () => {
         list.replaceChildren();
         const needle = search.value.trim().toLocaleLowerCase();
         const matches = result.contacts.filter(contact => `${text(contact?.name)} ${text(contact?.jid)}`.toLocaleLowerCase().includes(needle));
+        // QA #105: el aviso cuenta lo que se ve, no lo que hay; con filtro sin
+        // coincidencias la lista vacía necesita decirlo.
+        notice.textContent = needle
+          ? (matches.length
+            ? `${matches.length} de ${result.contacts.length} contactos bloqueados coinciden con la búsqueda.`
+            : 'Ningún contacto bloqueado coincide con esta búsqueda.')
+          : (result.contacts.length ? `${result.contacts.length} contacto${result.contacts.length === 1 ? '' : 's'} bloqueado${result.contacts.length === 1 ? '' : 's'}.` : 'No hay contactos bloqueados.');
         showMore.hidden = matches.length <= visibleCount;
         for (const contact of matches.slice(0, visibleCount)) {
         const jid = text(contact?.jid).trim();
@@ -2084,11 +2410,16 @@ export function installFeatureUI({
       status.value = initial.status || '';
       groupsAdd.value = initial.groupsAdd || '';
       receipts.value = initial.readReceipts || '';
-      loaded = true;
-      submit.disabled = false;
-      notice.textContent = [initial.profile, initial.lastSeen, initial.groupsAdd].includes('contact_blacklist')
-        ? 'Para cambiar las personas excluidas, usa WhatsApp en tu teléfono. Los demás ajustes se aplican a tu cuenta.'
-        : 'Estos ajustes se aplican a tu cuenta de WhatsApp.';
+      // UX 20.1: WhatsApp puede no reportar ningún valor; dejar editar a ciegas es
+      // peor que no ofrecer el panel. Sin ningún valor leído, Guardar no se activa.
+      const known = [initial.profile, initial.lastSeen, initial.online, initial.status, initial.groupsAdd, initial.readReceipts];
+      loaded = known.some(value => value !== '' && value !== null && value !== undefined);
+      submit.disabled = !loaded;
+      notice.textContent = !loaded
+        ? 'No se ha podido leer tu estado actual; cambia estos ajustes desde WhatsApp en tu teléfono.'
+        : [initial.profile, initial.lastSeen, initial.groupsAdd].includes('contact_blacklist')
+          ? 'Para cambiar las personas excluidas, usa WhatsApp en tu teléfono. Los demás ajustes se aplican a tu cuenta.'
+          : 'Estos ajustes se aplican a tu cuenta de WhatsApp.';
     } catch {
       if (isCurrent()) notice.textContent = 'No se pudieron cargar las preferencias actuales; Guardar permanece desactivado.';
     }
@@ -2111,6 +2442,8 @@ export function installFeatureUI({
   }
 
   function chatListChanged(chats) {
+    filterChats = array(chats);
+    updateFilterCounts();
     const account = runtime.account;
     const firstSnapshot = !runtime.notificationSnapshots.has(account);
     if (firstSnapshot) runtime.notificationSnapshots.set(account, Date.now());
@@ -2176,12 +2509,12 @@ export function installFeatureUI({
     const sidebarHeader = documentRef.querySelector('.chat-sidebar-header');
     const sidebarActions = node('div', 'chat-sidebar-actions');
     const newChat = button(documentRef, '+', 'sidebar-action sidebar-action-new'); newChat.id = 'feature-new-chat'; newChat.setAttribute('aria-label', 'Nuevo chat'); newChat.title = 'Nuevo chat'; newChat.onclick = () => openNewChat();
-    const lists = button(documentRef, '☆', 'sidebar-action sidebar-action-favorites'); lists.id = 'feature-lists'; lists.setAttribute('aria-label', 'Favoritos y listas'); lists.title = 'Favoritos y listas'; lists.onclick = openLists;
+    const lists = button(documentRef, '☆', 'sidebar-action sidebar-action-favorites'); lists.id = 'feature-lists'; lists.setAttribute('aria-label', 'Listas'); lists.title = 'Listas'; lists.onclick = openLists;
     sidebarActions.append(newChat, lists); sidebarHeader?.append(sidebarActions);
     const search = documentRef.querySelector('.chat-sidebar > .search');
     const views = node('nav', 'feature-view-nav'); views.setAttribute('aria-label', 'Vistas de conversaciones');
-    for (const [label, view] of [['Todos', 'all'], ['No leídos', 'unread'], ['Grupos', 'groups'], ['Favoritos', 'favorites'], ['Destacados', 'starred']]) {
-      const item = button(documentRef, label, 'feature-view-button'); item.dataset.featureView = view; item.setAttribute('aria-pressed', String(runtime.currentView === view)); item.onclick = () => view === 'starred' ? openStarred() : setView(view); views.append(item);
+    for (const [label, view] of VIEW_FILTERS) {
+      const item = button(documentRef, label, 'feature-view-button'); item.dataset.featureView = view; item.setAttribute('aria-pressed', String(runtime.currentView === view)); item.onclick = () => setView(view); views.append(item);
     }
     search?.after(views);
     const archiveTitle = node('header', 'feature-archive-title'); archiveTitle.id = 'feature-archived-title'; archiveTitle.hidden = true;
@@ -2190,6 +2523,7 @@ export function installFeatureUI({
     sidebarHeader?.after(archiveTitle);
     const archiveEntry = button(documentRef, 'Archivados', 'feature-archive-entry'); archiveEntry.id = 'feature-archived-entry'; archiveEntry.setAttribute('aria-pressed', String(runtime.currentView === 'archived'));
     const archiveIcon = node('span', 'feature-archive-icon', '▤'); archiveIcon.setAttribute('aria-hidden', 'true'); archiveEntry.prepend(archiveIcon);
+    const archiveCount = node('span', 'feature-archive-count'); archiveCount.id = 'feature-archived-count'; archiveEntry.append(archiveCount);
     archiveEntry.onclick = () => setView('archived');
     views.after(archiveEntry);
     const archiveHint = node('p', 'feature-archive-hint', 'Estos chats permanecen archivados y no aparecen en la lista principal.'); archiveHint.id = 'feature-archived-hint'; archiveHint.hidden = true;
@@ -2207,7 +2541,7 @@ export function installFeatureUI({
     const cancel = button(documentRef, 'Cancelar', 'feature-button subtle'); cancel.onclick = () => { runtime.selectedMessageIds.clear(); enhanceMessages(); };
     toolbar.append(count, forward, star, cancel); documentRef.querySelector('.conversation-header')?.after(toolbar);
     const composer = documentRef.getElementById('composer');
-    const emoji = button(documentRef, '☺', 'composer-icon'); emoji.id = 'feature-emoji'; emoji.setAttribute('aria-label', 'Emoji, GIF y stickers'); emoji.title = 'Emoji, GIF y stickers'; emoji.onclick = openPicker; composer?.prepend(emoji);
+    const emoji = button(documentRef, '☺', 'composer-icon'); emoji.id = 'feature-emoji'; emoji.setAttribute('aria-label', 'Emoji, GIF y pegatinas'); emoji.title = 'Emoji, GIF y pegatinas'; emoji.onclick = openPicker; composer?.prepend(emoji);
     const attachment = documentRef.getElementById('attach');
     const originalAttachmentClick = attachment?.onclick;
     const attachMenu = node('div', 'feature-attach-menu'); attachMenu.id = 'feature-attach-menu'; attachMenu.hidden = true; attachMenu.setAttribute('role', 'menu'); attachMenu.setAttribute('aria-label', 'Adjuntar');
@@ -2223,6 +2557,7 @@ export function installFeatureUI({
       camera: ['M4 7h4l2-2h4l2 2h4v13H4z', 'M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z'],
       audio: ['M9 4v12a3 3 0 1 1-2-3', 'M9 6l10-2v12a3 3 0 1 1-2-3'],
       sticker: ['M4 4h16v11l-5 5H4z', 'M15 20v-5h5'],
+      gif: ['M3 7h18v10H3z', 'M7 11v2', 'M10.5 11v2', 'M14 11v2', 'M17 11v2'],
       contact: ['M4 5h16v14H4z', 'M10 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z', 'M6.5 16c0-2 1.5-3 3.5-3s3.5 1 3.5 3', 'M16 10h2', 'M16 13h2'],
       poll: ['M5 5h3v3H5z', 'M11 6h8', 'M5 11h3v3H5z', 'M11 12h8', 'M5 17h3v3H5z', 'M11 18h8'],
       event: ['M4 5h16v16H4z', 'M4 9h16', 'M8 3v4', 'M16 3v4', 'M8 13h3', 'M8 17h3'],
@@ -2241,7 +2576,19 @@ export function installFeatureUI({
     addAttach('Contacto', 'contact', () => openShare('contact'));
     addAttach('Encuesta', 'poll', () => openShare('poll'));
     addAttach('Evento', 'event', () => openShare('event'));
-    addAttach('Nuevo sticker', 'sticker', () => openPicker('sticker'));
+    addAttach('Nueva pegatina', 'sticker', () => openPicker('sticker'));
+    // QA #85: el conector ya acepta GIF (el server convierte gif→mp4, server.mjs:2436); faltaba la entrada.
+    addAttach('GIF', 'gif', () => {
+      const input = documentRef.createElement('input');
+      input.type = 'file'; input.accept = 'image/gif';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const sendToken = crypto.randomUUID();
+        await mutate('/api/messages/compose', { kind: 'gif', name: file.name, mimeType: 'image/gif', data: await readBase64(file), sendToken }, { refreshMessages: true, success: 'GIF enviado.' });
+      };
+      input.click();
+    });
     composer?.append(attachMenu);
     if (attachment) {
       attachment.setAttribute('aria-haspopup', 'menu'); attachment.setAttribute('aria-controls', 'feature-attach-menu'); attachment.setAttribute('aria-expanded', 'false');
@@ -2274,7 +2621,7 @@ export function installFeatureUI({
     runtime.presenceStream?.close(); runtime.presenceStream = null;
     runtime.presenceEventVersion = 0;
     runtime.closeAttachMenu?.();
-    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); runtime.notificationSnapshots.clear(); statusNotifications.start(runtime.account); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
+    closeModal(); runtime.generation += 1; runtime.account = text(account); runtime.chat = ''; runtime.selectedChat = null; runtime.currentMessages = []; runtime.selectedMessageIds.clear(); runtime.replyTarget = null; runtime.manualUnreadKey = ''; runtime.currentView = store.read(runtime.account).view === 'archived' ? 'all' : store.read(runtime.account).view; state.chatFilter = runtime.currentView; runtime.readPending.clear(); runtime.chatListBaseline.clear(); runtime.notificationSnapshots.clear(); statusNotifications.start(runtime.account); documentRef.getElementById('feature-reply-quote')?.remove(); for (const item of documentRef.querySelectorAll('[data-feature-view]')) item.setAttribute('aria-pressed', String(item.dataset.featureView === runtime.currentView)); updateArchiveView(); void refreshLists(runtime.account);
   }
 
   async function markVisibleRead() {
@@ -2285,9 +2632,13 @@ export function installFeatureUI({
     if (!documentRef.body.classList.contains('chat-open')) return;
     if (!(Number(runtime.selectedChat?.unread) > 0 || bool(runtime.selectedChat?.unread))) return;
     runtime.readPending.add(key);
+    // #163: el POST tarda ~2,9 s (la BD solo se limpia tras confirmar el conector). El badge se
+    // quita al instante como en WhatsApp; si el proveedor falla, vuelve con su valor anterior.
+    const previousUnread = runtime.selectedChat?.unread;
+    updateChatFlags(chat, { unread: 0 });
     const result = await mutate('/api/chat-actions', { action: 'read' }, { refreshChats: true, success: '' });
     runtime.readPending.delete(key);
-    if (result && runtime.account === account && runtime.chat === chat) updateChatFlags(chat, { unread: 0 });
+    if (runtime.account === account && runtime.chat === chat) updateChatFlags(chat, { unread: result ? 0 : (previousUnread || 1) });
   }
 
   function chatChanged(chat) {
@@ -2368,6 +2719,10 @@ export function installFeatureUI({
   windowRef?.addEventListener?.('pagehide', () => { clearInterval(runtime.presenceTimer); runtime.presenceTimer = null; });
 
   addHeaderControls();
+  // UX #60.5: Privacidad global desde Ajustes, el mismo modal del menú del chat.
+  documentRef.getElementById('settings-privacy')?.addEventListener('click', () => {
+    void openPrivacy(documentRef.querySelector('.rail-settings summary'));
+  });
   return {
     matchesChat,
     accountChanged,
@@ -2383,10 +2738,35 @@ export function installFeatureUI({
     openChatMenu,
     openSidebarChatMenu,
     isChatPinned: chat => chatIsPinned(chat, prefs()),
+    isChatFavorite: chat => chatIsFavorite(chat, prefs()),
+    // UX 21.2: acciones rápidas del hover en la fila, sin abrir «⌄». Mismo
+    // camino que el menú de fila (chat-actions + updateChatFlags + loadChats).
+    quickChatAction: async (chat, action) => {
+      const account = runtime.account;
+      if (!account || !chat?.id || !['archive', 'pin', 'mute'].includes(action)) return;
+      const current = action === 'archive' ? chatIsArchived(chat, prefs()) : action === 'pin' ? chatIsPinned(chat, prefs()) : chatIsMuted(chat, prefs());
+      const providerAction = current ? { archive: 'unarchive', pin: 'unpin', mute: 'unmute' }[action] : action;
+      // #217: la fila se queda/va al confirmar, no tras el POST (~3 s de ida y
+      // vuelta al conector). Si el proveedor falla, se revierte el cambio local.
+      const flagName = action === 'archive' ? 'archived' : action === 'pin' ? 'pinned' : 'muted';
+      updateChatFlags(chat.id, {[flagName]: !current});
+      try {
+        await request('/api/chat-actions', { account, chat: chat.id, action: providerAction });
+        if (runtime.account !== account) return;
+        await loadChats();
+        if (runtime.account === account) toast(!current && action === 'archive' ? 'Chat archivado.' : 'Preferencia actualizada.');
+      } catch (error) {
+        updateChatFlags(chat.id, {[flagName]: current});
+        if (runtime.account === account) showError(error);
+      }
+    },
     /** Close every features dialog from the app shell (rail panels are mutually exclusive). */
     closePanels: () => { runtime.closeAttachMenu?.(); closeContactDirectory(); closeModal(); },
     setView,
     isFeatureView: () => runtime.currentView,
+    starredView: renderStarredView,
+    // QA #125: la lista ofrece «Chatear con +NNN» y aterriza en el directorio filtrado.
+    openNewChat,
     getState: () => ({ ...runtime, selectedMessageIds: new Set(runtime.selectedMessageIds) }),
   };
 }

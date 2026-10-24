@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as renderer from '../public/message-render.mjs';
+import { readFile } from 'node:fs/promises';
 import { writeMediaSettings } from '../public/settings-ui.mjs';
 import {
   decorateMessages,
@@ -37,6 +38,7 @@ class FakeNode {
     this.attributes = new Map();
     this.dataset = {};
     this.className = '';
+    this.style = {};
     this.textContent = '';
     this.movedExisting = [];
   }
@@ -199,6 +201,9 @@ test('formatChatListTime follows WhatsApp today, yesterday and older-date labels
 
   assert.equal(formatChatListTime(new Date(2026, 8, 23, 8, 7).toISOString(), now), '08:07');
   assert.equal(formatChatListTime(new Date(2026, 8, 22, 23), now), 'Ayer');
+  assert.equal(formatChatListTime(new Date(2026, 8, 21, 23), now), 'lunes'); // UX #54: nombre del día hasta 7 días
+  assert.equal(formatChatListTime(new Date(2026, 8, 17, 23), now), 'jueves');
+  assert.equal(formatChatListTime(new Date(2026, 8, 16, 23), now), '16/09/2026');
   assert.equal(formatChatListTime(new Date(2026, 0, 5, 23), now), '05/01/2026');
   assert.equal(formatChatListTime('no es una fecha', now), '');
 });
@@ -264,6 +269,14 @@ test('attachment rendering falls back safely when URL data is absent or unsafe',
   assert.equal(missing.children.some(child => child.tagName === 'IMG' || child.tagName === 'A'), false);
 });
 
+test('a pending outbox attachment shows its name, never «Enviando…» text nor the error (QA #113, Jordi 22-10)', () => {
+  const container = createAttachmentElement({ name: 'informe.pdf', mimeType: 'application/pdf', size: 2048, pending: true }, { document: fakeDocument });
+  assert.match(treeText(container), /informe\.pdf/);
+  assert.doesNotMatch(treeText(container), /Enviando/);
+  assert.equal(container.querySelector('.attachment-error'), null);
+  assert.equal(container.children.some(child => child.tagName === 'A'), false);
+});
+
 test('sent image attachment remains visible with its caption', () => {
   const mediaPolicy = stubPolicy({ enabled: () => true, cachedUrl: () => 'blob:sent-photo' });
   const sent = renderMessage({
@@ -306,7 +319,7 @@ test('quoted messages show the real sender and excerpt without treating markup a
 });
 
 test('quoted media and empty media bubbles use a type icon and honest label', () => {
-  for (const [type, label] of Object.entries({ IMAGE: 'Imagen', VIDEO: 'Video', AUDIO: 'Audio', DOCUMENT: 'Documento', STICKER: 'Sticker', POLL: 'Encuesta', LOCATION: 'Ubicacion' })) {
+  for (const [type, label] of Object.entries({ IMAGE: 'Foto', VIDEO: 'Vídeo', AUDIO: 'Audio', DOCUMENT: 'Documento', STICKER: 'Pegatina', POLL: 'Encuesta', LOCATION: 'Ubicación' })) {
     const quoted = renderMessage({
       id: `quote-${type}`, text: 'Respuesta', replyToMessageId: 'original',
       replyPreview: { type, text: '', senderName: 'Ana', available: true },
@@ -357,6 +370,13 @@ test('renderMessageList exposes a real document fragment and sender names are op
 
   assert.equal(direct.children.some(child => child.tagName === 'STRONG'), false);
   assert.equal(group.children.some(child => child.tagName === 'STRONG'), true);
+  // UX #10.3/#52.2: color fijo por participante por clase de paleta (cada tema la pinta en CSS),
+  // estable y distinto entre autores.
+  const senderPalette = senderId => renderMessage({ id: 'g', senderName: 'X', senderId, text: 't', isFirstInGroup: true }, { document: fakeDocument, showSenderNames: true })
+    .children.find(child => child.className?.startsWith('message-sender')).className.split(' ')[1];
+  assert.match(senderPalette('ana@gmail.com'), /^sender-palette-[0-7]$/);
+  assert.notEqual(senderPalette('ana@gmail.com'), senderPalette('luis@gmail.com'));
+  assert.equal(senderPalette('ana@gmail.com'), senderPalette('ana@gmail.com'));
   assert.equal(rendered.fragment.tagName, '#FRAGMENT');
   assert.equal(rendered.fragment.children.filter(child => child.tagName === 'ARTICLE').length, 2);
   assert.equal(rendered.fragment.children.some(child => child.textContent === '[object Object]'), false);
@@ -681,4 +701,54 @@ test('deleted messages show the recorded instant in browser time and update when
   const invalid = renderMessage({...message, deletedAt:'<img onerror=bad>'},{document:fakeDocument});
   assert.equal(invalid.querySelector('.message-deleted-time'),null);
   assert.match(treeText(invalid.querySelector('.message-deleted')),/Fecha no disponible/);
+});
+
+test('la primera letra fuerte decide la dirección del texto (QA #111)', () => {
+  assert.equal(renderer.detectDirection('مرحبا بالعالم'), 'rtl');
+  assert.equal(renderer.detectDirection('hola qué tal'), 'ltr');
+  assert.equal(renderer.detectDirection('¡Hola! مرحبا'), 'ltr');
+  assert.equal(renderer.detectDirection('123 ???'), '');
+  assert.equal(renderer.detectDirection(''), '');
+});
+
+test('pending y failed tienen indicador en la burbuja (QA #109)', async () => {
+  const src = await readFile(new URL('../public/message-render.mjs', import.meta.url), 'utf8');
+  assert.match(src, /status === 'pending'\) return \{ symbol: '\\u25f7', label: 'Pendiente', className: 'status-pending' \}/);
+  assert.match(src, /status === 'failed'\) return \{ symbol: '!', label: 'No enviado', className: 'status-failed' \}/);
+  const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.message-status\.status-failed \{ color: var\(--danger\);/);
+});
+
+test('documento sin caption no repite el nombre y muestra tamaño (UX #53)', () => {
+  const doc = { fileName: 'qa-doc.pdf', url: '/api/media/123?account=personal', size: 12345 };
+  const bubble = renderer.renderMessage({ id: 'd', type: 'DOCUMENT', text: 'qa-doc.pdf', attachments: [doc] }, { document: fakeDocument });
+  assert.equal(bubble.querySelector('.message-text'), null);
+  assert.equal(bubble.querySelector('.document-name').textContent, 'qa-doc.pdf');
+  assert.equal(bubble.querySelector('.document-size').textContent, '13 KB');
+  const captioned = renderer.renderMessage({ id: 'e', type: 'DOCUMENT', text: 'el informe', attachments: [{ ...doc, caption: 'el informe' }] }, { document: fakeDocument });
+  assert.equal(treeText(captioned.querySelector('.message-text')), 'el informe');
+});
+
+test('video bubble carries a Spanish label and the payload poster (UX #63)', () => {
+  const policy = stubPolicy();
+  const container = createAttachmentElement({
+    url: 'http://nas/api/media/v1?account=personal&chat=c',
+    posterUrl: 'http://nas/api/media/thumb/42?account=personal&chat=c',
+    mimeType: 'video/mp4', name: 'playa.mp4', size: 8 * 1024 * 1024,
+  }, { document: fakeDocument, mediaPolicy: policy });
+  const video = container.querySelector('.attachment-video');
+  assert.equal(video.poster, 'http://nas/api/media/thumb/42?account=personal&chat=c');
+  assert.equal(video.attributes.get('aria-label'), 'Vídeo: playa.mp4');
+  assert(container.querySelector('.attachment-video-wrap'), 'el badge de duración vive sobre el vídeo');
+});
+
+test('duration badge and Spanish pending label (UX #63)', async () => {
+  const source = await readFile(new URL('../public/message-render.mjs', import.meta.url), 'utf8');
+  assert.match(source, /attachment-video-duration/);
+  assert.match(source, /loadedmetadata/);
+  assert.match(source, /video: 'Descargar vídeo'/);
+  const server = await readFile(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /videoMessage'->'jpegThumbnail/);
+  assert.match(server, /message_type IN \('IMAGE','VIDEO'\)/);
+  assert.match(server, /posterUrl/);
 });

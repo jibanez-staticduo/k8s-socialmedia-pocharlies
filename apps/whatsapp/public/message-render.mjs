@@ -12,13 +12,14 @@ const mountedMediaStates = new WeakMap();
 const viewerMediaStates = new WeakMap();
 const mediaPolicyDocuments = new WeakSet();
 const MESSAGE_KINDS = {
-  IMAGE: { label: 'Imagen', icon: 'image' },
-  VIDEO: { label: 'Video', icon: 'video' },
+  // QA UX #17.4: copia de WhatsApp («Foto») y tildes donde faltaban.
+  IMAGE: { label: 'Foto', icon: 'image' },
+  VIDEO: { label: 'Vídeo', icon: 'video' },
   AUDIO: { label: 'Audio', icon: 'audio' },
   DOCUMENT: { label: 'Documento', icon: 'document' },
-  STICKER: { label: 'Sticker', icon: 'sticker' },
+  STICKER: { label: 'Pegatina', icon: 'sticker' },
   POLL: { label: 'Encuesta', icon: 'poll' },
-  LOCATION: { label: 'Ubicacion', icon: 'location' },
+  LOCATION: { label: 'Ubicación', icon: 'location' },
   CONTACT: { label: 'Contacto', icon: 'contact' },
   EVENT: { label: 'Evento', icon: 'event' },
 };
@@ -239,12 +240,17 @@ export function formatDateSeparator(value, now = new Date()) {
   return `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
 }
 
-/** Format a chat-list timestamp as WhatsApp does: time today, Ayer, or date. */
+/** Format a chat-list timestamp as WhatsApp does: time today, Ayer, nombre del
+    día hasta 7 días (UX #54) y fecha absoluta a partir de ahí. */
 export function formatChatListTime(value, now = new Date()) {
   const date = parseTimestamp(value);
-  if (!date) return '';
-  const label = formatDateSeparator(date, now);
-  return label === 'Hoy' ? formatMessageTime(date) : label;
+  const reference = parseTimestamp(now);
+  if (!date || !reference) return '';
+  const difference = Math.round((dayStart(reference) - dayStart(date)) / 86400000);
+  if (difference === 0) return formatMessageTime(date);
+  if (difference === 1) return 'Ayer';
+  if (difference > 1 && difference < 7) return date.toLocaleDateString('es-ES', { weekday: 'long' });
+  return formatDateSeparator(date, now);
 }
 
 function senderGroupKey(message) {
@@ -353,7 +359,7 @@ function attachmentName(attachment) {
   return textValue(attachment?.name || attachment?.fileName || attachment?.file_name || 'Archivo adjunto').trim() || 'Archivo adjunto';
 }
 
-const MEDIA_PENDING_LABELS = { image: 'Descargar foto', audio: 'Descargar audio', video: 'Descargar video', document: 'Descargar documento' };
+const MEDIA_PENDING_LABELS = { image: 'Descargar foto', audio: 'Descargar audio', video: 'Descargar vídeo', document: 'Descargar documento' };
 const MEDIA_PENDING_BADGES = { image: 'IMG', audio: 'AUD', video: 'VID', document: 'DOC' };
 
 function attachmentSizeBytes(attachment) {
@@ -361,7 +367,7 @@ function attachmentSizeBytes(attachment) {
   return Number.isFinite(size) && size > 0 ? size : null;
 }
 
-function formatMediaSize(bytes) {
+export function formatMediaSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '';
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
@@ -623,7 +629,7 @@ function createAudioPlayer(url, name, parent, documentRef) {
   const current = makeElement(documentRef, 'span', 'audio-current', '0:00');
   const duration = makeElement(documentRef, 'span', 'audio-duration', '--:--');
   const speed = makeElement(documentRef, 'select', 'audio-speed');
-  speed.setAttribute('aria-label', 'Velocidad de reproduccion');
+  speed.setAttribute('aria-label', 'Velocidad de reproducción');
   for (const value of [0.5, 1, 1.5, 2]) {
     const option = makeElement(documentRef, 'option', '', `${value}x`);
     option.value = String(value);
@@ -633,7 +639,10 @@ function createAudioPlayer(url, name, parent, documentRef) {
   const time = makeElement(documentRef, 'span', 'audio-time');
   time.append(current, documentRef.createTextNode(' / '), duration);
   const controls = makeElement(documentRef, 'div', 'audio-controls');
-  controls.append(toggle, progress, time, speed);
+  // El chevron del select nativo se pinta fatal sobre la burbuja: appearance:none y flecha propia (mask + currentColor).
+  const speedWrap = makeElement(documentRef, 'span', 'audio-speed-wrap');
+  speedWrap.append(speed);
+  controls.append(toggle, progress, time, speedWrap);
   player.append(audio, controls);
   const update = () => {
     const total = Number.isFinite(audio.duration) ? audio.duration : 0;
@@ -669,8 +678,9 @@ function createDocumentCard(attachment, url, name, documentRef) {
   icon.setAttribute('aria-hidden', 'true');
   const details = makeElement(documentRef, 'span', 'document-details');
   details.append(makeElement(documentRef, 'strong', 'document-name', name));
-  const size = Number(attachment?.fileSize ?? attachment?.file_size);
-  if (Number.isFinite(size) && size >= 0) details.append(makeElement(documentRef, 'span', 'document-size', `${Math.ceil(size / 1024)} KB`));
+  // UX #53.2: el tamaño, con el mismo helper de la biblioteca (cubría solo fileSize).
+  const size = attachmentSizeBytes(attachment);
+  if (size) details.append(makeElement(documentRef, 'span', 'document-size', formatMediaSize(size)));
   const link = makeDownloadLink(url, name, documentRef);
   card.append(icon, details, link);
   return card;
@@ -715,13 +725,24 @@ function attachmentMediaNodes(attachment, { documentRef, src, name, parent, onIm
     return [button];
   }
   if (kind === 'video') {
+    const wrap = makeElement(documentRef, 'span', 'attachment-video-wrap');
     const video = makeElement(documentRef, 'video', 'attachment-video');
     video.controls = true;
     video.preload = 'metadata';
     video.playsInline = true;
+    video.setAttribute('aria-label', `Vídeo: ${name}`);
+    // UX #63: el servidor solo proyecta posterUrl si el payload trae jpegThumbnail.
+    if (attachment?.posterUrl) video.poster = attachment.posterUrl;
     video.src = src;
     addMediaError(video, parent, documentRef);
-    return [video];
+    video.addEventListener('loadedmetadata', () => {
+      const total = Math.round(video.duration);
+      if (!Number.isFinite(total) || total <= 0) return;
+      wrap.append(makeElement(documentRef, 'span', 'attachment-video-duration',
+        `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`));
+    }, { once: true });
+    wrap.append(video);
+    return [wrap];
   }
   if (kind === 'audio') return [createAudioPlayer(src, name, parent, documentRef)];
   return [];
@@ -827,6 +848,21 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
   const url = safeMessageUrl(attachmentUrl(attachment), baseUrl);
   const name = attachmentName(attachment);
   if (!url) {
+    // QA #113: un adjunto pendiente (fuera del outbox, aún sin fila en el servidor) no
+    // tiene URL; se pinta la tarjeta con el nombre en vez del error. Jordi 22-10: sin
+    // texto «Enviando…»: el reloj de la burbuja ya dice que va en vuelo.
+    if (attachment?.pending) {
+      const card = makeElement(documentRef, 'div', 'attachment-document');
+      const icon = makeElement(documentRef, 'span', 'document-icon', MEDIA_PENDING_BADGES[getAttachmentKind(attachment)]);
+      icon.setAttribute('aria-hidden', 'true');
+      const details = makeElement(documentRef, 'span', 'document-details');
+      details.append(makeElement(documentRef, 'strong', 'document-name', name));
+      const size = attachmentSizeBytes(attachment);
+      if (size) details.append(makeElement(documentRef, 'span', 'document-size', formatMediaSize(size)));
+      card.append(icon, details);
+      container.append(card);
+      return container;
+    }
     appendAttachmentError(container, documentRef, 'Adjunto no disponible.');
     return container;
   }
@@ -858,7 +894,6 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
     mountMedia(url);
     const video = container.querySelector('.attachment-video');
     video.preload = policy.enabled(kind, account) ? 'metadata' : 'none';
-    video.setAttribute('aria-label', `Video ${name}`);
     container.dataset.mediaState = 'streaming';
     return container;
   }
@@ -1020,12 +1055,37 @@ export function createAttachmentElement(attachment, { document: documentRef = gl
   return container;
 }
 
+// QA #111: la primera letra fuerte decide. Árabe, hebreo, siríaco, thaana,
+// n'ko y samaritano van a la derecha; el resto, a la izquierda. Vacío = no tocar.
+export function detectDirection(value) {
+  for (const character of String(value || '')) {
+    if (/[\u0590-\u08FF\uFB1D-\uFDCF\uFDF0-\uFDFF\uFE70-\uFEFF]/.test(character)) return 'rtl';
+    if (/[a-zA-Z\u00C0-\u024F]/.test(character)) return 'ltr';
+  }
+  return '';
+}
+
 function deliveryStatus(message) {
   const status = textValue(message?.status || message?.deliveryStatus).toLowerCase();
   if (status === 'sent') return { symbol: '\u2713', label: 'Enviado', className: 'status-sent' };
   if (status === 'delivered') return { symbol: '\u2713\u2713', label: 'Entregado', className: 'status-delivered' };
-  if (['read', 'played'].includes(status)) return { symbol: '\u2713\u2713', label: status === 'played' ? 'Reproducido' : 'Leido', className: 'status-read' };
+  if (['read', 'played'].includes(status)) return { symbol: '\u2713\u2713', label: status === 'played' ? 'Reproducido' : 'Le\u00eddo', className: 'status-read' };
+  // QA #109: sin estos dos estados un fallo de env\u00edo era invisible en el hilo.
+  // Jordi 22-10: reloj de trazo (\u25f7), no emoji a color: es un tick, no un adorno.
+  if (status === 'pending') return { symbol: '\u25f7', label: 'Pendiente', className: 'status-pending' };
+  if (status === 'failed') return { symbol: '!', label: 'No enviado', className: 'status-failed' };
   return null;
+}
+
+// UX #10.3: WhatsApp colorea el nombre por participante; paleta fija indexada
+// por hash del id (estable entre renders y sesiones). UX #52.2: el color va por
+// clase en CSS, no en línea: cada tema pinta la suya (AA sobre su burbuja).
+const SENDER_PALETTE_SIZE = 8;
+function senderPaletteClass(message) {
+  const key = textValue(message?.senderId || message?.senderName || message?.senderPushName);
+  let hash = 0;
+  for (const character of key) hash = (hash * 31 + character.codePointAt(0)) >>> 0;
+  return `sender-palette-${hash % SENDER_PALETTE_SIZE}`;
 }
 
 function messageType(value) {
@@ -1123,10 +1183,12 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
   if (message?.id != null) bubble.dataset.messageId = String(message.id);
   bubble.dataset.renderSignature = messageRenderSignature(message);
   bubble.setAttribute('aria-label', fromMe ? 'Mensaje enviado' : 'Mensaje recibido');
-  if (!fromMe && showSenderNames && message?.senderName && message?.isFirstInGroup !== false) bubble.append(makeElement(documentRef, 'strong', 'message-sender', message.senderName));
+  if (!fromMe && showSenderNames && message?.senderName && message?.isFirstInGroup !== false) {
+    bubble.append(makeElement(documentRef, 'strong', `message-sender ${senderPaletteClass(message)}`, message.senderName));
+  }
   if (message?.replyToMessageId) bubble.append(replyReference(message, documentRef));
   const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {};
-  if (metadata.viewOnce === true) bubble.append(makeElement(documentRef, 'div', 'message-preservation-marker message-view-once', 'Visualizacion unica'));
+  if (metadata.viewOnce === true) bubble.append(makeElement(documentRef, 'div', 'message-preservation-marker message-view-once', 'Visualización única'));
   if (message?.isDeleted === true) {
     const marker = makeElement(documentRef, 'div', 'message-preservation-marker message-deleted', 'Mensaje eliminado');
     const deletedAt = parseTimestamp(message?.deletedAt);
@@ -1171,7 +1233,7 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
           const name = textValue(voter?.name || voter?.id).trim();
           if (name) list.append(makeElement(documentRef, 'li', '', name));
         }
-        votes.append(list.children.length ? list : makeElement(documentRef, 'span', 'message-poll-note', 'Sin votos registrados para esta opcion'));
+        votes.append(list.children.length ? list : makeElement(documentRef, 'span', 'message-poll-note', 'Sin votos registrados para esta opción'));
         card.append(votes);
       }
     }
@@ -1197,9 +1259,19 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     bubble.append(card);
   }
   const text = textValue(message?.text ?? message?.content);
-  if (text && !['poll', 'event'].includes(metadata.kind)) {
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  // UX #53.1: un documento sin caption llega con el nombre de fichero como texto;
+  // la tarjeta ya lo muestra — no se repite en la burbuja (con caption, sí va).
+  const documentNameEcho = Boolean(text) && attachments.length === 1
+    && getAttachmentKind(attachments[0]) === 'document'
+    && !textValue(attachments[0]?.caption).trim()
+    && text.trim() === attachmentName(attachments[0]);
+  if (text && !['poll', 'event'].includes(metadata.kind) && !documentNameEcho) {
     const textElement = makeElement(documentRef, 'div', 'message-text');
+    textElement.setAttribute('dir', 'auto'); // QA #111: el navegador decide por el primer carácter fuerte.
     appendRichText(textElement, text, documentRef);
+    const direction = detectDirection(text);
+    if (direction) textElement.dir = direction;
     bubble.append(textElement);
   }
   const linkPreview = message?.linkPreview;
@@ -1223,7 +1295,6 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     card.append(details);
     bubble.insertBefore(card, bubble.querySelector('.message-text'));
   }
-  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
   for (const attachment of attachments) {
     const shownAttachment = text.trim() && text.trim() === textValue(attachment?.caption).trim()
       ? { ...attachment, caption: '' }
@@ -1289,7 +1360,7 @@ function syncSenderHeader(bubble, message, showSenderNames, documentRef) {
     sender.textContent = senderName;
     return;
   }
-  bubble.insertBefore(makeElement(documentRef, 'strong', 'message-sender', senderName), bubble.children?.[0] || null);
+  bubble.insertBefore(makeElement(documentRef, 'strong', `message-sender ${senderPaletteClass(message)}`, senderName), bubble.children?.[0] || null);
 }
 
 /** Reconcile message children in place so unchanged media never leaves its parent. */

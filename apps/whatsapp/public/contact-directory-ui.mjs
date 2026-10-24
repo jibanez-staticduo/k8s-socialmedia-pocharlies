@@ -75,7 +75,7 @@ export function contactDirectoryUrl({ account, q = '', cursor = null, limit = CO
 export function contactEntryHint(entry, { sendingEnabled = true } = {}) {
   if (!entry) return '';
   if (entry.canOpen) return entry.archived ? 'Abre un chat archivado' : 'Abre el chat existente';
-  if (entry.canStart) return sendingEnabled ? 'Empieza un chat sin enviar nada' : 'Envío desactivado en el servidor';
+  if (entry.canStart) return sendingEnabled ? 'Empieza un chat sin enviar nada' : 'Envío desactivado';
   return 'Sin número sincronizado';
 }
 
@@ -99,8 +99,8 @@ export function directoryStatusLabel(payload) {
   const stamp = when && !Number.isNaN(when.getTime())
     ? ` · sincronizado el ${new Intl.DateTimeFormat('es-ES', { dateStyle: 'medium', timeStyle: 'short' }).format(when)}`
     : '';
-  if (text(payload.query).trim()) return `${count(payload.total)} coincidencias entre ${identities} identidades sincronizadas${stamp}.`;
-  return `${identities} identidades sincronizadas en esta cuenta${stamp}.`;
+  if (text(payload.query).trim()) return `${count(payload.total)} coincidencias entre ${identities} contactos sincronizados${stamp}.`;
+  return `${identities} contactos sincronizados en esta cuenta${stamp}.`;
 }
 
 /**
@@ -120,20 +120,39 @@ export function typedPhoneTarget(value) {
   return { key: `typed:${digits}`, digits, display, phone: national ? raw : `+${digits}` };
 }
 
+/** Instant local filter over the loaded entries (QA #103): same fold as the chat
+ * list (NFD), numbers matched by digits like the server's searchClause. */
+export function filterDirectoryEntries(entries, query) {
+  const raw = text(query).trim();
+  if (!raw) return entries;
+  if (/^\+?[\d][\d +().-]*$/.test(raw)) {
+    const digits = raw.replace(/\D/g, '');
+    return entries.filter(entry => text(entry.phone).replace(/\D/g, '').includes(digits));
+  }
+  const q = raw.toLocaleLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  return entries.filter(entry => `${entry.label} ${entry.sublabel}`.toLocaleLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '').includes(q));
+}
+
+const PAGE_CACHE_TTL_MS = 60_000;
+
 export function createContactDirectoryClient({ api, getAccount, limit = CONTACT_DIRECTORY_LIMIT, baseUrl = () => 'http://localhost/' } = {}) {
   let generation = 0;
   const isCurrent = token => token.generation === generation && token.account === getAccount();
+  const pageCache = new Map();
 
   async function page({ q = '', cursor = null } = {}) {
     const token = { account: text(getAccount()), generation };
     if (!token.account) return null;
+    const cacheKey = `${token.account}|${q}|${cursor || ''}`;
+    const cached = pageCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < PAGE_CACHE_TTL_MS) return isCurrent(token) ? cached.value : null;
     const result = await api(contactDirectoryUrl({ account: token.account, q, cursor, limit }, baseUrl()));
     if (!isCurrent(token)) return null;
     if (result?.account !== token.account || !Array.isArray(result.contacts)) {
       throw new Error('Respuesta del directorio de contactos no válida.');
     }
     const entries = result.contacts.map(entry => normalizeContactEntry(entry, token.account, baseUrl())).filter(Boolean);
-    return {
+    const value = {
       entries,
       query: text(result.query),
       total: Number(result.total || 0),
@@ -142,6 +161,10 @@ export function createContactDirectoryClient({ api, getAccount, limit = CONTACT_
       sendingEnabled: result.sendingEnabled === true,
       sync: result.sync && typeof result.sync === 'object' ? result.sync : {},
     };
+    // shortcut: caché de término pequeño, se vacía entera al crecer; subir a LRU si molesta.
+    pageCache.set(cacheKey, { at: Date.now(), value });
+    if (pageCache.size > 50) pageCache.clear();
+    return value;
   }
 
   return {
@@ -185,7 +208,6 @@ export function installContactDirectoryUI({
     panel: null,
     query: null,
     status: null,
-    notices: null,
     list: null,
     more: null,
     opener: null,
@@ -242,7 +264,7 @@ export function installContactDirectoryUI({
       image.addEventListener('error', () => image.remove());
       avatar.append(image);
     }
-    avatar.append(node('span', 'contact-directory-initial', [...entry.label.trim()][0]?.toUpperCase() || '?'));
+    avatar.append(node('span', 'contact-directory-initial', firstGrapheme(entry.label).toUpperCase() || '?'));
     const copy = node('span', 'contact-directory-copy');
     copy.append(node('strong', '', entry.label));
     const detail = [entry.sublabel, contactEntryHint(entry, { sendingEnabled: state.sendingEnabled })].filter(Boolean).join(' · ');
@@ -339,12 +361,6 @@ export function installContactDirectoryUI({
         }
         setStatus(directoryStatusLabel(page));
         syncTypedRow();
-        if (state.notices) {
-          const notices = Array.isArray(page.sync.notices) ? page.sync.notices.filter(item => text(item)) : [];
-          state.notices.replaceChildren();
-          for (const notice of notices) state.notices.append(node('li', '', notice));
-          state.notices.hidden = !notices.length;
-        }
       })
       .catch(error => {
         if (requestId !== state.request || state.closed) return;
@@ -360,6 +376,14 @@ export function installContactDirectoryUI({
 
   function search(value) {
     state.queryInput = text(value);
+    // Feedback instantáneo sobre lo ya cargado (QA #103): la página del servidor
+    // llega un momento después y la sustituye con el resultado completo.
+    if (state.list && (state.entries || []).length) {
+      const visible = filterDirectoryEntries(state.entries, state.queryInput);
+      state.list.replaceChildren(...visible.map(entryRow));
+      if (!visible.length) state.list.append(node('p', 'contact-directory-empty', 'Ningún contacto sincronizado coincide con esta búsqueda.'));
+      syncTypedRow();
+    }
     clearScheduled(state.debounce);
     state.debounce = schedule(() => {
       state.entries = [];
@@ -380,7 +404,8 @@ export function installContactDirectoryUI({
     if (restoreFocus && state.opener?.isConnected !== false) state.opener.focus?.();
   }
 
-  function open({ opener = null } = {}) {
+  // QA #125: query prellena el buscador (la lista llega filtrada por ese número).
+  function open({ opener = null, query = '' } = {}) {
     if (!state.closed) close({ restoreFocus: false });
     const overlay = node('div', 'contact-directory-overlay');
     overlay.setAttribute('role', 'presentation');
@@ -434,8 +459,6 @@ export function installContactDirectoryUI({
     retry.textContent = 'Reintentar';
     retry.hidden = true;
     retry.onclick = () => { void loadNext({ replace: true }); };
-    const notices = node('ul', 'contact-directory-notices');
-    notices.hidden = true;
     const list = node('div', 'contact-directory-list');
     const more = documentRef.createElement('button');
     more.type = 'button';
@@ -444,19 +467,19 @@ export function installContactDirectoryUI({
     more.hidden = true;
     more.onclick = () => { void loadNext(); };
 
-    panel.append(header, actions, status, retry, notices, list, more);
+    panel.append(header, actions, status, retry, list, more);
     overlay.append(panel);
     documentRef.body.append(overlay);
 
     state.root = overlay;
     state.panel = panel;
-    state.queryInput = '';
+    state.queryInput = text(query);
+    if (state.queryInput) input.value = state.queryInput;
     state.entries = [];
     state.nextCursor = null;
     state.list = list;
     state.status = status;
     state.retry = retry;
-    state.notices = notices;
     state.more = more;
     state.opener = opener;
     state.closed = false;

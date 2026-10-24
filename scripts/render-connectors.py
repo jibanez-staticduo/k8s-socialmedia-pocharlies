@@ -231,6 +231,16 @@ def render_whatsapp(account):
                         "initialDelaySeconds": 15,
                         "timeoutSeconds": 3,
                     },
+                    # QA #39: un proceso colgado no se reiniciaba nunca (solo dejaba
+                    # de recibir tráfico). /api/v1/health responde 200 aunque el socket
+                    # esté caído: el liveness solo dispara si el HTTP cuelga.
+                    "livenessProbe": {
+                        "httpGet": {"path": "/api/v1/health", "port": 3001},
+                        "initialDelaySeconds": 60,
+                        "periodSeconds": 30,
+                        "timeoutSeconds": 10,
+                        "failureThreshold": 4,
+                    },
                     "volumeMounts": [
                         {"name": d["sessionPvc"], "mountPath": "/app/persistent-session"}
                     ],
@@ -312,7 +322,9 @@ def render_telegram(account):
     d = {**telegram_defaults(aid), **account.get("deploy", {})}
     cname, sname = d["connectorName"], d["syncName"]
 
-    c_env = [NATS_ENV, DASHBOARD_URL_ENV]
+    # DGX-1235 B2: DATABASE_URL for telegram_send_attempts (send-idempotency.ts);
+    # a keyed send without it is refused (503), an unkeyed one never opens it.
+    c_env = [NATS_ENV, DASHBOARD_URL_ENV, DB_ENV]
     if d["connectorAccountEnv"]:
         c_env.append(_env("CONNECTOR_ACCOUNT", aid))
     if d["sessionSecretKey"]:

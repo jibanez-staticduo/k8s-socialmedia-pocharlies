@@ -81,7 +81,7 @@ test('event creation sends explicit instants, end date, description, named locat
   assert.equal(calls.length, 0);
   assert.equal((await request('/api/messages/compose', body)).status, 200);
   assert.deepEqual(calls, [{url: 'http://secondary-connector/api/v1/messages/event', body: {name: 'Picnic', description: 'Bring lunch',
-    location: {name: 'Park'}, startDate: '2026-09-30T16:00:00.000Z', endDate: '2026-09-30T18:00:00.000Z', conversationId: 'secondary-chat', sendToken: body.sendToken, idempotencyKey: body.sendToken}}]);
+    location: {name: 'Park'}, startTime: '2026-09-30T16:00:00.000Z', endTime: '2026-09-30T18:00:00.000Z', conversationId: 'secondary-chat', sendToken: body.sendToken, idempotencyKey: body.sendToken}}]);
 });
 
 test('poll creation preserves option rows, validates provider limits and forwards the scoped retry token', async t => {
@@ -101,7 +101,7 @@ test('poll creation preserves option rows, validates provider limits and forward
   assert.equal(calls.length, 0);
   assert.equal((await request('/api/messages/compose', body)).status, 200);
   assert.deepEqual(calls, [{url: 'http://secondary-connector/api/v1/messages/poll', body: {
-    conversationId: 'secondary-chat', name: 'Menu?', values: ['Pasta, ensalada', 'Arroz'], selectableCount: 1, sendToken: body.sendToken, idempotencyKey: body.sendToken,
+    conversationId: 'secondary-chat', name: 'Menu?', options: ['Pasta, ensalada', 'Arroz'], selectableCount: 1, sendToken: body.sendToken, idempotencyKey: body.sendToken,
   }}]);
 });
 
@@ -286,11 +286,13 @@ function fixtureDatabase(calls) {
         let rows = (Array.isArray(args[1]) ? args[1] : [args[1]]).flatMap(id => messages[id] || [])
           .filter(row => conversations[row.conversation_id]?.account === args[0] && row.is_deleted !== true)
           .flatMap(row => (attachments[row.id] || [{}]).map(att => ({ ...row, attKey: att.id || '', attachment_id: att.id || null,
-            mime_type: att.mime_type || null, file_name: att.file_name || null, file_size: att.file_size ?? null, caption: att.caption || null })));
+            mime_type: att.mime_type || null, file_name: att.file_name || null, file_type: att.file_type || null, file_size: att.file_size ?? null, caption: att.caption || null })));
         const typeArg = sql.match(/m\.message_type=\$(\d+)/);
         if (typeArg) rows = rows.filter(row => row.message_type === args[Number(typeArg[1]) - 1]);
-        if (/m\.message_type IN \('IMAGE','VIDEO'\)/.test(sql)) rows = rows.filter(row => ['IMAGE', 'VIDEO'].includes(row.message_type));
-        if (/m\.message_type='DOCUMENT'/.test(sql)) rows = rows.filter(row => row.message_type === 'DOCUMENT');
+        const isVideoDoc = row => row.file_type === 'VIDEO' || (row.mime_type || '').startsWith('video/');
+        if (/m\.message_type IN \('IMAGE','VIDEO'\)/.test(sql)) rows = rows.filter(row => ['IMAGE', 'VIDEO'].includes(row.message_type) || (row.message_type === 'DOCUMENT' && isVideoDoc(row)));
+        if (/m\.message_type='DOCUMENT'/.test(sql) && !/m\.message_type IN \('IMAGE','VIDEO'\)/.test(sql)) rows = rows.filter(row => row.message_type === 'DOCUMENT'
+          && (/NOT \(m\.message_type='DOCUMENT'/.test(sql) ? !isVideoDoc(row) : true));
         if (/m\.content ~\* 'https\?/.test(sql)) rows = rows.filter(row => /https?:\/\/\S+/i.test(row.content || ''));
         const keyset = sql.match(/\(m\.wa_timestamp, m\.id\) < \(\$(\d+)::timestamptz, \$(\d+)::(?:uuid|bigint)\)/);
         if (keyset) {
@@ -322,6 +324,11 @@ function fixtureDatabase(calls) {
       }
       if (/FROM whatsapp_message_reactions/.test(sql)) return { rows: [] };
       if (/FROM messages m/.test(sql) && /m\.id,/.test(sql)) return { rows: (Array.isArray(args[1]) ? args[1] : [args[1]]).flatMap(id => messages[id] || []) };
+      if (/FROM attachments a JOIN messages m/.test(sql)) {
+        const ids = new Set(args[2] || []);
+        return { rows: Object.entries(attachments).filter(([messageId]) => ids.has(messageId))
+          .flatMap(([messageId, atts]) => atts.map(att => ({ ...att, message_id: messageId }))) };
+      }
       if (/FROM attachments/.test(sql)) return { rows: [] };
       return { rows: [] };
     },
@@ -551,6 +558,7 @@ test('search cursor pages tied timestamps without duplicates and stays bound to 
   do {
     const response = await request(base + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''));
     assert.equal(response.status, 200);
+    if (!cursor) assert.equal(response.headers.get('cache-control'), 'private, max-age=30', 'la búsqueda debe ser cacheable (QA 22-10)');
     const page = await response.json();
     seen.push(...page.results.map(row => row.id));
     cursor = page.nextCursor;
@@ -563,6 +571,16 @@ test('search cursor pages tied timestamps without duplicates and stays bound to 
   assert.equal(new Set(seen).size, 121);
   assert.equal(seen[0], 'wa-120');
   assert.equal(seen.at(-1), 'wa-0');
+});
+
+test('QA #100: re-buscar el mismo término no vuelve a la BD en 60 s', async t => {
+  const { request, calls } = await fixture(t);
+  const first = await (await request('/api/search?account=personal&scope=all&q=cachetest')).json();
+  const before = calls.filter(call => /ILIKE/.test(call.sql)).length;
+  assert.ok(before >= 1, 'la primera búsqueda debe ir a la BD');
+  const second = await (await request('/api/search?account=personal&scope=all&q=cachetest')).json();
+  assert.equal(calls.filter(call => /ILIKE/.test(call.sql)).length, before, 'la repetición sale de la caché');
+  assert.deepEqual(second.results, first.results);
 });
 
 test('read clears the database badge only after provider confirmation', async t => {
@@ -708,6 +726,35 @@ test('media pages walk equal timestamps and split attachments without loss or du
   }
   const twoEach = await collectMediaPages(request, 'account=personal&chat=personal-chat&kind=gallery&limit=2');
   assert.deepEqual(twoEach.pages, [2, 2, 2, 1]);
+});
+
+test('QA #96: vídeo y audio mandados como documento salen de «Documentos» con su clase', async t => {
+  const { request, database } = await fixture(t);
+  database.messages['personal-chat'].push(
+    { id: mediaUuid(40), conversation_id: 'personal-chat', content: 'clip', direction: 'INBOUND', message_type: 'DOCUMENT', is_deleted: false, wa_timestamp: mediaTimestamp(41) },
+    { id: mediaUuid(41), conversation_id: 'personal-chat', content: 'chiste', direction: 'INBOUND', message_type: 'DOCUMENT', is_deleted: false, wa_timestamp: mediaTimestamp(42) },
+  );
+  database.attachments[mediaUuid(40)] = [{ id: mediaUuid(140), mime_type: 'video/mp4', file_name: 'dashboard.mp4', file_type: 'VIDEO', file_size: 10, file_url: null, caption: null }];
+  database.attachments[mediaUuid(41)] = [{ id: mediaUuid(141), mime_type: 'audio/ogg', file_name: 'ricard.ogg', file_type: 'VOICE', file_size: 10, file_url: null, caption: null }];
+  const gallery = (await (await request('/api/chats/media?account=personal&chat=personal-chat&kind=gallery')).json()).items;
+  assert.deepEqual(gallery.filter(item => item.messageId === mediaUuid(40)).map(item => item.kind), ['media']);
+  const docs = (await (await request('/api/chats/media?account=personal&chat=personal-chat&kind=documents')).json()).items;
+  assert.ok(!docs.some(item => item.messageId === mediaUuid(40)), 'el vídeo no es un documento');
+  assert.deepEqual(docs.filter(item => item.messageId === mediaUuid(41)).map(item => item.kind), ['audio']);
+});
+
+test('QA #99: adjunto sin file_name descarga con nombre derivado del tipo y la fecha', async t => {
+  const { request, database } = await fixture(t);
+  database.messages['personal-chat'].push(
+    { id: mediaUuid(50), conversation_id: 'personal-chat', content: '', direction: 'INBOUND', message_type: 'IMAGE', is_deleted: false, wa_timestamp: mediaTimestamp(45) },
+    { id: mediaUuid(51), conversation_id: 'personal-chat', content: '', direction: 'INBOUND', message_type: 'DOCUMENT', is_deleted: false, wa_timestamp: mediaTimestamp(46) },
+  );
+  database.attachments[mediaUuid(50)] = [{ id: mediaUuid(150), mime_type: 'image/jpeg', file_name: '', file_type: 'PHOTO', file_size: 5, file_url: null, caption: null }];
+  database.attachments[mediaUuid(51)] = [{ id: mediaUuid(151), mime_type: 'application/pdf', file_name: '', file_type: 'DOCUMENT', file_size: 5, file_url: null, caption: null }];
+  const messages = (await (await request('/api/messages?account=personal&chat=personal-chat')).json()).messages;
+  const names = messages.flatMap(message => message.attachments || []).map(item => item.name);
+  assert.ok(names.some(name => /^foto-\d{4}-\d{2}-\d{2}\.jpg$/.test(name)), names.join());
+  assert.ok(names.some(name => /^documento-\d{4}-\d{2}-\d{2}\.pdf$/.test(name)), names.join());
 });
 
 test('media cursors are versioned, scoped, and reject malformed pagination input', async t => {
@@ -1062,22 +1109,30 @@ test('group details retain provider permissions and account-scoped saved member 
     ? { rows: [{ id: 'personal:member@s.whatsapp.net', wa_user_id: 'personal:member@s.whatsapp.net', name: 'Saved member', push_name: null }] }
     : originalQuery(sql, args);
   const upstream = [];
-  const { request } = await fixture(t, { db, fetchImpl: async url => {
+  const updateBodies = [];
+  const { request } = await fixture(t, { db, fetchImpl: async (url, init) => {
     upstream.push(url);
+    if (url.endsWith('/update')) updateBodies.push(JSON.parse(init.body));
     return Response.json(url.endsWith('/info')
-      ? { capabilities: { manageMembers: true, editInfo: false }, participants: [{ id: 'member@s.whatsapp.net', name: 'member@s.whatsapp.net' }] }
+      ? { capabilities: { manageMembers: true, editInfo: false, changeSettings: true }, announce: true, restrict: false, participants: [{ id: 'member@s.whatsapp.net', name: 'member@s.whatsapp.net' }] }
       : url.endsWith('/photo') ? { data: Buffer.from('group-photo').toString('base64') }
         : { participants: [{ id: 'member@s.whatsapp.net', name: 'member@s.whatsapp.net', isAdmin: true }] });
   } });
   const response = await request(`/api/chat-details?account=personal&chat=${encodeURIComponent(groupId)}`);
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.deepEqual(body.capabilities, { manageMembers: true, editInfo: false });
+  // UX #49.2: changeSettings sale proyectado y announce/restrict viajan en group.
+  assert.deepEqual(body.capabilities, { manageMembers: true, editInfo: false, changeSettings: true });
+  assert.equal(body.group.announce, true);
   assert.equal(body.participants[0].name, 'Saved member');
   assert.equal(body.participants[0].isAdmin, true);
   assert.deepEqual(body.participants[0].presence, { state: 'unknown', lastSeen: null, available: false });
   assert.equal((await request(`/api/chats/${encodeURIComponent(groupId)}/avatar?account=personal`)).status, 200);
   assert.equal((await request('/api/groups/action', { account: 'personal', chat: groupId, action: 'subject', value: 'New' })).status, 200);
+  // UX #49.2: action=settings llega al conector como { settings: { announce, restrict } }.
+  assert.equal((await request('/api/groups/action', { account: 'personal', chat: groupId, action: 'settings', announce: true, restrict: false })).status, 200);
+  assert.deepEqual(updateBodies.at(-1), { settings: { announce: true, restrict: false } });
+  assert.equal((await request('/api/groups/action', { account: 'personal', chat: groupId, action: 'settings' })).status, 400);
   assert.equal((await request('/api/chats?account=personal')).status, 200);
   assert.ok(upstream.some(url => url.includes(encodeURIComponent(groupId)) && url.endsWith('/info')));
   assert.ok(upstream.some(url => url.includes(encodeURIComponent(groupId)) && url.endsWith('/photo')));
@@ -1088,12 +1143,14 @@ test('direct chats preserve their stored provider JID', async t => {
   const upstream = [];
   const db = fixtureDatabase([]);
   db.conversations['personal-chat'].wa_chat_id = 'personal:resolved@s.whatsapp.net';
-  const { request } = await fixture(t, { db, fetchImpl: async url => {
-    upstream.push(url);
-    return Response.json({ state: 'unknown' });
+  const { request } = await fixture(t, { db, fetchImpl: async (url, options) => {
+    upstream.push(`${url} ${options?.body || ''}`);
+    return Response.json({ presence: { presence: { status: 'unknown' } } });
   } });
   assert.equal((await request('/api/presence?account=personal&chat=personal-chat')).status, 200);
-  assert.ok(upstream[0].includes('personal%3Aresolved%40s.whatsapp.net'));
+  // QA #27.1: la lectura es POST /chats/presence/read y el JID viaja en el cuerpo.
+  assert.ok(upstream[0].includes('/chats/presence/read'));
+  assert.ok(upstream[0].includes('personal:resolved@s.whatsapp.net'));
 });
 
 test('sending from a LID conversation uses its canonical LID, including a namespaced account', async t => {
@@ -1169,4 +1226,41 @@ test('upload validates and forwards media quality with source as the compatible 
     assert.equal((await request('/api/upload', {...body, quality})).status, 400);
   }
   assert.equal(outbound.length, 4);
+});
+
+test('/api/chats/media enseña thumbUrl para que la galería no baje originales (QA #72)', async () => {
+  const src = await readFile(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(src, /thumbUrl: item\.message_type === 'IMAGE'/);
+  assert.match(src, /\/api\/media\/thumb\/\$\{encodeURIComponent\(item\.id\)\}\?account=/);
+});
+
+test('QA #79/#77: la proyección normaliza la forma almacenada por el conector', () => {
+  assert.deepEqual(publicMessageMetadata({ contact: { displayName: 'Ana', contacts: [{ displayName: 'Ana', phones: ['+34600111222'], waids: ['waid'] }] } }),
+    { kind: 'contact', contacts: [{ displayName: 'Ana', phone: '+34600111222', email: null, organization: null }] });
+  assert.deepEqual(publicMessageMetadata({ poll: { question: 'Menú?', options: ['A', 'B'], selectableCount: 1 } }),
+    { kind: 'poll', options: ['A', 'B'], selectableCount: 1 });
+  assert.deepEqual(publicMessageMetadata({ event: { name: 'Comida', description: '14:00', startTime: 1790000000000, endTime: 1790003600000, isCanceled: true } }),
+    { kind: 'event', description: '14:00', startTime: 1790000000000, endTime: 1790003600000,
+      location: { name: null, degreesLatitude: null, degreesLongitude: null }, isCancelled: true, extraGuestsAllowed: false });
+  assert.equal(publicMessageMetadata({}, 'VIEWONCEMESSAGE').viewOnce, true);
+});
+
+test('el término de búsqueda escapa los comodines SQL antes del ILIKE (QA 22-10)', async () => {
+  const src = await readFile(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const args = \[a\.accountId, `%\$\{q\.replace\(\/\[\\\\%_\]\/g, '\\\\\$&'\)}%`\];/);
+});
+
+test('ficha: sin nombre útil sale teléfono o null, nunca el jid crudo (UX #32.1/#56.2)', async t => {
+  const calls = [];
+  const db = fixtureDatabase(calls);
+  const lidId = '12345678901234@lid';
+  db.conversations[lidId] = { id: lidId, account: 'personal', name: lidId, wa_chat_id: '34600111222@c.us', is_group: false, archived: false, unread: 0, avatar_url: null };
+  const { request } = await fixture(t, { db });
+  const body = await (await request(`/api/chat-details?account=personal&chat=${encodeURIComponent(lidId)}`)).json();
+  assert.equal(body.name, '+34600111222');
+  assert.equal(body.contact.name, null);
+  db.conversations[lidId].wa_chat_id = null;
+  const bare = await (await request(`/api/chat-details?account=personal&chat=${encodeURIComponent(lidId)}`)).json();
+  assert.equal(bare.name, null);
+  assert.equal(bare.chat, lidId);
 });
