@@ -47,13 +47,17 @@ try {
       }
       assert.equal(await page.locator('.chat-quick').count(),0);
       const indicatorRow = page.locator('.chat-row').filter({has:page.locator('[data-chat-id="indicators"]')});
-      const timeBefore = await indicatorRow.locator('.chat-time').boundingBox();
       if (width >= 760) await indicatorRow.hover();
       const menu = indicatorRow.getByRole('button',{name:'Opciones de Equipo de trabajo con un nombre largo'});
-      await menu.focus();
+      // Account refreshes replace rows. Measure focus in one browser task so the
+      // test cannot compare a detached old row with its replacement.
+      const focusGeometry = await menu.evaluate(el => {
+        const row = el.closest('.chat-row');
+        const rect = () => row.querySelector('.chat-time').getBoundingClientRect().toJSON();
+        const before = rect(); el.focus(); return {before,after:rect()};
+      });
       await page.waitForFunction(() => {const menu=document.querySelector('[aria-label="Opciones de Equipo de trabajo con un nombre largo"]');return menu && getComputedStyle(menu).opacity === '1';});
-      const timeAfter = await indicatorRow.locator('.chat-time').boundingBox();
-      assert.deepEqual(timeAfter,timeBefore,'hover/focus never shifts title or timestamp');
+      assert.deepEqual(focusGeometry.after,focusGeometry.before,'focus never shifts title or timestamp');
       const boxes = await measure();
       assert(boxes[1].metadata.right <= boxes[1].menu.left + 1,'menu does not cover unread or status indicators');
       await menu.click();
