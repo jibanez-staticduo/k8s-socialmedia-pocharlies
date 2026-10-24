@@ -289,7 +289,8 @@ contracts:
     entry beside this one. QA #49 (22-10): a failure that provably never reached the network — Baileys''
     media upload, ''Media upload failed on all hosts'', which precedes the message post by construction —
     moves the claimed row to ''failed'' and stays retryable; the 409 send_outcome_uncertain is reserved
-    for post-network outcomes.'
+    for post-network outcomes. NAS integration 24-10 records ambiguous errors with the matching SQL
+    parameter count; pending attempts remain pending and are never automatically resent.'
 - id: http.whatsapp-connector.messages-react.v1
   kind: http-route
   value: /messages/react
@@ -2034,8 +2035,8 @@ contracts:
     «Documentos» de descarga automática (copia del panel, QA 22-10; el valor por defecto
     apagado es conducta del store, no de esta entrada). El icono es ahora de marca (burbuja
     verde WhatsApp, ICO multi-resolución 16/32/48); la ruta, el MIME y la
-    referencia del shell no cambian. El <title> pasa a «WhatsApp» y la app lo
-    reemplaza por «(N) WhatsApp» con no leídos (QA #74) — el título no es
+    referencia del shell no cambian. La integracion NAS conserva el icono SocialMedia
+    y el titulo «(N) SocialMedia» con no leidos (QA #74) — el titulo no es
     contrato. La etiqueta aria-expanded de los botones del rail Estados/Canales
     tampoco (estado de selección del shell, UX #59). La sección «Privacidad» del
     popover de Ajustes (botón settings-privacy) es markup del shell que abre el
@@ -2469,10 +2470,11 @@ contracts:
     whatsapp.e-dani.com. El id es bigint (o uuid legacy): nunca validar solo
     por patrón uuid (QA #6). La referencia sale solo de attachments.file_url
     — storage_key no existe en la casa (42703, QA #12) — y mediaRequest
-    entiende refs s3:// contra S3_ENDPOINT/S3_BUCKET. Los 200/206 llevan
-    cache-control private, max-age=86400, immutable (la fila de attachments es
-    inmutable por id; sin ella el scroll volvía a bajar cada foto, QA
-    velocidad 22-10); los 4xx siguen sin caché. /api/chats/media añade por
+    entiende refs s3:// contra S3_ENDPOINT/S3_BUCKET. Los 200/206/304 llevan
+    cache-control private, no-cache y Vary Cookie/Authorization. Cada lectura
+    revalida autenticacion y visibilidad antes de reutilizar bytes o reenviar
+    If-None-Match al almacenamiento; las miniaturas y avatares siguen la misma
+    politica. Los 4xx siguen sin reutilizacion privada sin validar. /api/chats/media añade por
     item `thumbUrl` (GET /api/media/thumb/<id de mensaje>, jpegThumbnail del
     payload): la rejilla de la galería pinta el thumb y el original solo al
     abrir — 9,2 MB/45 items a cientos de KB (QA #72). Campo aditivo; el
@@ -2498,14 +2500,12 @@ contracts:
     m.content con ILIKE y necesita el índice trigram
     idx_messages_content_trgm (migración 002); sin él es seq scan y
     revienta el statement_timeout (57014). chatName sale legible
-    (readableChatName), nunca el jid crudo (QA #10). Desde QA 22-10 la
-    respuesta se sirve con cache-control private, max-age=30 (re-buscar el
-    mismo término no vuelve a la BD; 30 s de antigüedad aceptables). Desde
-    QA #100 hay además caché de resultado en el proceso (60 s por
-    cuenta+término+ámbito+cursor): el trgm de un término común trae miles de
-    filas y el heap fetch costaba 2,9 s repetida. Toda mutación de mensaje
-    (reply/react/forward/edit/delete) vacía esa caché: un mensaje borrado o
-    editado no puede seguir saliendo en la búsqueda. El envelope y el cursor
+    (readableChatName), nunca el jid crudo (QA #10). La integracion NAS 24-10
+    revalida cada solicitud mediante consulta a la BD y private, no-cache con
+    ETag por representacion y Vary Cookie/Authorization/Accept-Encoding.
+    No conserva snapshots de resultados entre solicitudes: cambios de limite,
+    ediciones y ocultaciones del conector se reflejan antes de decidir un 304.
+    El envelope y el cursor
     son contrato; la cabecera de caché no lo es.
 - id: http.whatsapp-app.chat-details.v1
   kind: http-route
