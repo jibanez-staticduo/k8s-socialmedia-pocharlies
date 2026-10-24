@@ -110,14 +110,6 @@ test('la pestaña avisa de los no leídos (QA #74)', async () => {
   assert.match(html, /<title>SocialMedia<\/title>/);
 });
 
-test('la fila de chat tiene acciones rápidas fijar/silenciar/archivar (UX 21.2)', async () => {
-  const src = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
-  assert.match(src, /chat-quick chat-quick-\$\{action\}/);
-  assert.match(src, /featureUI\?\.quickChatAction\?\.\(chat, action\)/);
-  const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
-  assert.match(css, /\.chat-row:hover \.chat-quick/);
-  assert.match(css, /@media \(hover: none\) \{ \.chat-quick \{ display: none; \}/);
-});
 test('el buscador del listado pliega tildes como el servidor (QA #87)', async () => {
   const src = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   assert.ok(src.includes("value.toLocaleLowerCase().normalize('NFD').replace(/\\p{Diacritic}/gu, '')"));

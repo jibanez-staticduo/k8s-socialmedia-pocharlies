@@ -379,31 +379,39 @@ function chatRowNode(chat) {
     const details = node('span', 'chat-details');
     const nameRow = node('span', 'chat-name-row');
     nameRow.append(node('span', 'chat-name', chat.name || chat.id));
+    const metadata = node('span', 'chat-metadata');
     if (featureUI?.isChatPinned?.(chat) || chat.pinned === true || chat.isPinned === true) {
       const pin = node('span', 'chat-pin');
       // UX #58.4: un span con aria-label sin rol se lo salta NVDA en modo formulario.
       pin.setAttribute('role', 'img');
       pin.setAttribute('aria-label', 'Chat fijado');
       pin.title = 'Chat fijado';
-      nameRow.append(pin);
+      metadata.append(pin);
     }
     // QA 22-10: el favorito se filtraba pero no se veía en la fila de «Todos».
     if (featureUI?.isChatFavorite?.(chat) || chat.favorite === true || chat.isFavorite === true) {
       const fav = node('span', 'chat-fav');
       fav.setAttribute('aria-label', 'Chat destacado');
       fav.title = 'Chat destacado';
-      nameRow.append(fav);
+      metadata.append(fav);
     }
     if (chat.muted === true || chat.isMuted === true) {
       const muted = node('span', 'chat-muted', 'Silenciado');
       muted.setAttribute('aria-label', 'Chat silenciado');
       muted.title = 'Chat silenciado';
-      nameRow.append(muted);
+      metadata.append(muted);
     }
     if (chat.timestamp && messageRenderer) { const label = messageRenderer.formatChatListTime(chat.timestamp); if (label) { const time = node('time', 'chat-time', label); const date = new Date(typeof chat.timestamp === 'number' && chat.timestamp < 1e12 ? chat.timestamp * 1000 : chat.timestamp); if (!Number.isNaN(date.getTime())) time.dateTime = date.toISOString(); nameRow.append(time); } }
-    details.append(nameRow, messageRenderer ? messageRenderer.renderChatPreview(chat) : node('span', 'chat-preview', chat.preview || 'Sin mensajes disponibles'));
+    const previewRow = node('span', 'chat-preview-row');
+    previewRow.append(messageRenderer ? messageRenderer.renderChatPreview(chat) : node('span', 'chat-preview', chat.preview || 'Sin mensajes disponibles'));
+    if (Number(chat.unread) > 0 || chat.unread === true) {
+      const badge = node('span', 'badge', String(chat.unread === true ? '' : chat.unread));
+      badge.setAttribute('aria-label', chat.unread === true ? 'Mensajes sin leer' : `${chat.unread} mensajes sin leer`);
+      metadata.append(badge);
+    }
+    previewRow.append(metadata);
+    details.append(nameRow, previewRow);
     button.append(details);
-    if (Number(chat.unread) > 0 || chat.unread === true) button.append(node('span', 'badge', String(chat.unread === true ? '' : chat.unread)));
     // UX #4.5: el nombre accesible de la fila se derivaba del DOM y la elipsis CSS
     // no oculta el texto al lector de pantalla: filas con mensajes largos =
     // etiquetas de párrafos enteros. Nombre + previsualización truncados a 120.
@@ -415,7 +423,7 @@ function chatRowNode(chat) {
     // abre y deja el cursor en el composer, como la oficial.
     button.onclick = event => selectChat(chat, { focusComposer: event?.detail === 0 });
     const row = node('div', 'chat-row');
-    const menu = node('button', 'chat-row-menu', '⌄');
+    const menu = node('button', 'chat-row-menu');
     menu.type = 'button';
     menu.setAttribute('aria-label', `Opciones de ${chat.name || chat.id}`);
     menu.setAttribute('aria-haspopup', 'menu');
@@ -423,22 +431,7 @@ function chatRowNode(chat) {
     menu.onclick = openMenu;
     row.oncontextmenu = openMenu;
     button.onkeydown = event => { if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openMenu(event); };
-    // UX 21.2: fijar/silenciar/archivar al hover (y con foco de teclado), sin
-    // pasar por «⌄». Con 1000+ chats es la diferencia entre 10 s y 5 min.
-    const quicks = [];
-    for (const [action, glyph, label] of [
-      ['pin', '📌', chat.pinned === true || chat.isPinned === true ? 'Desfijar chat' : 'Fijar chat'],
-      ['mute', '🔕', chat.muted === true || chat.isMuted === true ? 'Activar sonido' : 'Silenciar chat'],
-      ['archive', '🗂️', 'Archivar chat'],
-    ]) {
-      const quick = node('button', `chat-quick chat-quick-${action}`, glyph);
-      quick.type = 'button';
-      quick.setAttribute('aria-label', label);
-      quick.title = label;
-      quick.onclick = event => { event.stopPropagation(); void featureUI?.quickChatAction?.(chat, action); };
-      quicks.push(quick);
-    }
-    row.append(button, menu, ...quicks);
+    row.append(button, menu);
     return row;
 }
 function renderChatsTail(chats, {numeric, digits, filter}) {

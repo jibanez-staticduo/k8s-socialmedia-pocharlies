@@ -298,6 +298,10 @@ h1, h2, p { margin: 0; }
   color: var(--muted-strong);
   font-size: 22px;
   line-height: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
 }
 
 .sidebar-action-new {
@@ -310,7 +314,14 @@ h1, h2, p { margin: 0; }
   font-weight: 400;
 }
 
-.sidebar-action-favorites { background: transparent; color: var(--accent-strong); }
+.sidebar-action-favorites { background: transparent; color: var(--muted-strong); font-size: 0; }
+.sidebar-action-favorites::before {
+  width: 22px;
+  height: 22px;
+  background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z' fill='none' stroke='black' stroke-width='1.7' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  content: "";
+}
 .sidebar-action-favorites:hover { color: var(--accent); background: var(--surface-raised); border-radius: 50%; }
 
 .search {
@@ -491,20 +502,38 @@ h1, h2, p { margin: 0; }
 
 .chat-item:hover { background: color-mix(in srgb, var(--surface) 64%, transparent); }
 .chat-row { position: relative; }
-.chat-row .chat-item { width: 100%; padding-right: 38px; }
-.chat-row-menu { position: absolute; right: 8px; top: 32px; width: 28px; height: 28px; padding: 0; background: transparent; color: var(--muted-strong); font-size: 23px; opacity: 0; }
-.chat-row:hover .chat-row-menu, .chat-row:focus-within .chat-row-menu { opacity: 1; }
-@media (hover: none) { .chat-row-menu { opacity: 1; } }
-/* UX 21.2: acciones rápidas al hover (fijar/silenciar/archivar), junto al «⌄».
-   En táctil no se muestran: el menú «⌄» ya está siempre visible. */
-.chat-quick { position: absolute; top: 32px; width: 28px; height: 28px; padding: 0; background: transparent; border: 0; font-size: 15px; line-height: 1; cursor: pointer; opacity: 0; }
-.chat-quick-pin { right: 40px; }
-.chat-quick-mute { right: 68px; }
-.chat-quick-archive { right: 96px; }
-.chat-row:hover .chat-quick, .chat-row:focus-within .chat-quick { opacity: 1; }
-.chat-row .chat-item { padding-right: 126px; }
-@media (hover: none) { .chat-quick { display: none; } .chat-row .chat-item { padding-right: 38px; } }
-.feature-chat-submenu { margin: 0 6px 4px 16px; padding-left: 6px; border-left: 2px solid var(--accent); }
+.chat-row .chat-item { width: 100%; padding-right: 16px; }
+.chat-row-menu {
+  position: absolute;
+  right: 12px;
+  top: 40px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted-strong);
+  opacity: 0;
+  pointer-events: none;
+}
+.chat-row-menu::before {
+  width: 16px;
+  height: 16px;
+  background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+  content: "";
+}
+.chat-row:hover .chat-row-menu, .chat-row:focus-within .chat-row-menu { opacity: 1; pointer-events: auto; }
+.chat-row-menu:hover { background: var(--surface-raised); }
+.chat-row-menu:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
+.chat-row:hover .chat-preview-row, .chat-row:focus-within .chat-preview-row { padding-right: 28px; }
+@media (hover: none) {
+  .chat-row-menu { opacity: 1; pointer-events: auto; }
+  .chat-preview-row { padding-right: 28px; }
+}
 
 .chat-item[aria-current="true"] {
   width: calc(100% - 16px);
@@ -539,6 +568,10 @@ h1, h2, p { margin: 0; }
 body[data-theme="light"] .avatar { background: #d8e0e3; color: #34464f; }
 
 .chat-details { min-width: 0; flex: 1; }
+.chat-preview-row { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.chat-preview-row > .chat-preview { flex: 1; min-width: 0; }
+.chat-metadata { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
+.chat-metadata:empty { display: none; }
 
 .chat-name-row {
   display: flex;
@@ -582,9 +615,10 @@ body[data-theme="light"] .avatar { background: #d8e0e3; color: #34464f; }
 .chat-preview .message-kind-icon { flex: 0 0 16px; width: 16px; height: 16px; }
 .chat-preview .message-kind-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.chat-item > .badge {
+.chat-metadata > .badge {
   display: grid;
   min-width: 20px;
+  padding: 0 5px;
   height: 20px;
   place-items: center;
   border-radius: 10px;
