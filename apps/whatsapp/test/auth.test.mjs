@@ -79,10 +79,7 @@ function absoluteRequest(port, path, headers = {}) {
 
 async function login(fixtureResult, returnTo = '/') {
   const { request, idp } = fixtureResult;
-  const root = await request('/');
-  assert.equal(root.status, 302);
-  assert.match(root.headers.get('location'), /^\/auth\/login\?/);
-  const login = await request(root.headers.get('location'));
+  const login = await request(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`);
   assert.equal(login.status, 302);
   const location = new URL(login.headers.get('location'));
   idp.nonce = location.searchParams.get('nonce');
@@ -106,7 +103,9 @@ test('OIDC protects UI/API, validates signed callback claims, and creates an Htt
   assert.equal(Buffer.from(await favicon.arrayBuffer()).subarray(0, 4).toString('hex'), '00000100');
   const manifest = await (await request('/manifest.webmanifest')).json();
   assert.equal(manifest.display, 'standalone');
-  assert.equal((await request('/')).status, 302);
+  const welcome = await request('/');
+  assert.equal(welcome.status, 200);
+  assert.match(await welcome.text(), /href="\/auth\/login"/);
   assert.equal((await request('/app.js')).status, 302);
   const unauthenticated = await request('/api/accounts');
   assert.equal(unauthenticated.status, 401);
@@ -127,6 +126,49 @@ test('OIDC protects UI/API, validates signed callback claims, and creates an Htt
   const nextAccounts = await request('/api/accounts', { headers: { cookie: `__Host-wa_session=${nextLogin.session}` } });
   assert.equal(nextAccounts.status, 200);
   assert.notEqual((await nextAccounts.json()).outboxScope, firstScope, 'a new login must not restore another session outbox');
+});
+
+test('public favicon discovery exposes only a static welcome page, icons and robots', async t => {
+  const f = await fixture(t);
+  for (const headers of [{}, {'user-agent':'Googlebot'}, {'user-agent':'Googlebot-Image'}, {cookie:'__Host-wa_session=invalid'}]) {
+    const response = await f.request('/', {headers});
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('location'), null);
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const html = await response.text();
+    assert.match(html, /<title>SocialMedia<\/title>/);
+    assert.match(html, /rel="icon" href="\/favicon.ico"/);
+    assert.match(html, /rel="icon" href="\/icon-512.png"/);
+    assert.match(html, /href="\/auth\/login"/);
+    assert.doesNotMatch(html, /<script|http-equiv="refresh"|id="chats"|id="messages"|owner-sub|test-secret|idp\.example/);
+  }
+  for (const path of ['/', '/index.html']) {
+    const head = await f.request(path, {method:'HEAD'});
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), '');
+    assert(Number(head.headers.get('content-length')) > 0);
+  }
+  const robots = await f.request('/robots.txt');
+  assert.equal(robots.status, 200);
+  assert.match(robots.headers.get('content-type'), /^text\/plain/);
+  const policy = await robots.text();
+  assert.match(policy, /^User-agent: \*\nDisallow: \/\nAllow: \/\$\n/);
+  assert.match(policy, /Allow: \/favicon\.ico\$/);
+  assert.match(policy, /Allow: \/icon-512\.png\$/);
+  assert.equal((await f.request('/welcome.css')).status, 200);
+  assert.equal((await f.request('/robots.txt', {method:'HEAD'})).status, 200);
+  for (const path of ['/api/accounts','/api/chats?account=personal','/api/messages?account=personal&chat=chat','/api/media/11111111-1111-1111-1111-111111111111?account=personal&chat=chat','/api/search?q=test']) {
+    assert.equal((await f.request(path)).status, 401, path);
+  }
+  assert.equal((await f.request('/', {method:'POST', body:'{}'})).status, 401);
+  const signedIn = await login(f);
+  const app = await f.request('/', {headers:{cookie:`__Host-wa_session=${signedIn.session}`}});
+  const html = await app.text();
+  assert.equal(app.status, 200);
+  assert.match(html, /id="chats"/);
+  assert.doesNotMatch(html, /class="login"/);
+  assert.equal(app.headers.get('cache-control'), 'no-store');
 });
 
 test('OIDC rejects callback state and nonce mismatches and unauthorized subjects', async t => {

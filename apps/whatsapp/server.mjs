@@ -1498,6 +1498,8 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
         '/icon-192.png': 'image/png',
         '/icon-512.png': 'image/png',
         '/apple-touch-icon.png': 'image/png',
+        '/welcome.css': 'text/css; charset=utf-8',
+        '/robots.txt': 'text/plain; charset=utf-8',
       };
       if (['GET', 'HEAD'].includes(req.method) && Object.hasOwn(installAssets, path)) {
         const bytes = await readFile(join(root, 'public', path.slice(1)));
@@ -1539,6 +1541,15 @@ export async function createApp({ env = process.env, db, fetchImpl = fetch, regi
       }
       const principal = auth.isAuthenticated(req);
       if (!principal) {
+        // Crawlers must discover this site's icon without following the IdP.
+        // Serve a separate static page; the authenticated app shell stays private.
+        if (auth.oidcEnabled && ['GET', 'HEAD'].includes(req.method) && ['/', '/index.html'].includes(path)) {
+          const bytes = await readFile(join(root, 'public', 'welcome.html'));
+          res.setHeader('content-type', 'text/html; charset=utf-8');
+          res.setHeader('content-length', bytes.length);
+          res.setHeader('vary', 'Cookie, Authorization');
+          res.end(req.method === 'HEAD' ? undefined : bytes); return;
+        }
         const apiRequest = path.startsWith('/api/');
         if (auth.oidcEnabled && req.method === 'GET' && !apiRequest) {
           const returnTo = `${path}${url.search}`;

@@ -1,0 +1,21 @@
+:root { color-scheme: light dark; font-family: Georgia, "Times New Roman", serif; color: #183c34; background: #eef5f0; }
+* { box-sizing: border-box; }
+body { min-height: 100svh; margin: 0; display: grid; place-items: center; padding: 32px 24px; background: radial-gradient(ellipse at 80% 10%, #b8e8cd66, transparent 60%), radial-gradient(ellipse at 10% 90%, #b9dbd766, transparent 65%); }
+main { width: min(100%, 460px); text-align: center; }
+img { display: block; margin: 0 auto 32px; border-radius: 19px; box-shadow: 0 12px 32px #034c431a; }
+.eyebrow, .login, .access { font-family: Verdana, sans-serif; }
+.eyebrow { margin: 0 0 16px; color: #386357; font-size: 10px; letter-spacing: .15em; line-height: 1.7; }
+h1 { margin: 0; font-size: clamp(40px, 10vw, 58px); font-weight: 400; letter-spacing: -.04em; }
+.description { margin: 20px 0 32px; font-size: 20px; line-height: 1.5; }
+.login { display: inline-flex; align-items: center; justify-content: space-between; gap: 32px; min-height: 48px; padding: 14px 24px; border-radius: 28px; background: #087f68; color: #fff; font-size: 14px; text-decoration: none; }
+.login:hover { background: #066452; }
+.login:focus-visible { outline: 3px solid #183c34; outline-offset: 5px; }
+.access { margin: 24px 0 0; color: #4b6c61; font-size: 11px; line-height: 1.7; }
+@media (prefers-color-scheme: dark) {
+  :root { background: #0c201b; color: #e9f5ee; }
+  body { background: radial-gradient(ellipse at 80% 10%, #145f4433, transparent 60%), radial-gradient(ellipse at 10% 90%, #23645a33, transparent 65%); }
+  .eyebrow, .access { color: #a7c7b7; }
+  .login { background: #8de5ba; color: #0c201b; }
+  .login:hover { background: #a9efcc; }
+  .login:focus-visible { outline-color: #a9efcc; }
+}
