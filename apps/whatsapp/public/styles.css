@@ -534,6 +534,7 @@ h1, h2, p { margin: 0; }
   .chat-row-menu { opacity: 1; pointer-events: auto; }
   .chat-preview-row { padding-right: 28px; }
 }
+.feature-chat-submenu { margin: 0 6px 4px 16px; padding-left: 6px; border-left: 2px solid var(--accent); }
 
 .chat-item[aria-current="true"] {
   width: calc(100% - 16px);
