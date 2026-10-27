@@ -6,7 +6,7 @@ import {servePublicAsset} from './browser-fixture.mjs';
 const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || '/app/node_modules/playwright/index.mjs');
 const artifacts = process.env.PLAYWRIGHT_ARTIFACT_DIR || '/home/staticduo/tmp/document-card-qa';
 await mkdir(artifacts, {recursive:true});
-const html='<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><main id="messages" class="messages"></main>';
+const html='<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/features-parity.css"><main id="messages" class="messages"></main>';
 const server = createServer((req,res)=>{
   if(req.url.startsWith('/api/media/')) {res.writeHead(200,{'content-type':'application/pdf','content-disposition':'attachment'});res.end('%PDF-1.4\nfixture');}
   else void servePublicAsset(req,res,{html});
@@ -20,12 +20,16 @@ try {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.evaluate(async ({name,theme}) => {
       document.body.dataset.theme=theme;
-      const {renderMessage,createAttachmentElement}=await import('/message-render.mjs');
+      const {renderMessage,createAttachmentElement,reconcileMessageList}=await import('/message-render.mjs');
       const host=document.querySelector('#messages');
       const policy={enabled:()=>false,autoMaxBytes:32*1024*1024};
+      const fixtureMessages=[];
       for(const fromMe of [false,true]) for(const pending of [false,true]) {
-        host.append(renderMessage({id:`${fromMe}-${pending}`,fromMe,type:'DOCUMENT',text:'Documento de prueba',isDeleted:fromMe,deletedAt:'2026-10-27T08:00:00Z',attachments:[{name,size:183000,mimeType:'application/pdf',...(pending?{pending:true}:{url:'/api/media/document?account=fixture'})}]},{mediaPolicy:policy}));
+        const item={id:`${fromMe}-${pending}`,fromMe,type:'DOCUMENT',text:'Documento de prueba',timestamp:'2026-10-27T07:11:00Z',isDeleted:fromMe,deletedAt:'2026-10-27T08:00:00Z',attachments:[{name,size:183000,mimeType:'application/pdf',...(pending?{pending:true}:{url:'/api/media/document?account=fixture'})}]};
+        fixtureMessages.push(item);
       }
+      for(let pass=0;pass<3;pass++)reconcileMessageList(host,fixtureMessages,{mediaPolicy:policy});
+      host.append(renderMessage({id:'quoted',fromMe:true,text:'Si',timestamp:'2026-10-27T07:11:00Z',replyToMessageId:'source',replyPreview:{available:true,type:'TEXT',senderName:'Javi',text:'Texto citado largo que debe mantenerse dentro de la burbuja sin deformarla.'}},{mediaPolicy:policy}));
       const media=document.createElement('article');media.className='message';media.id='retry-fixture';
       const failingPolicy={...policy,loadBytes:()=>new Promise((resolve,reject)=>{window.failMedia=()=>reject(new Error('Fixture unavailable'));})};
       media.append(createAttachmentElement({name:'Foto de prueba.png',mimeType:'image/png',size:183000,url:'/api/media/image?account=fixture'},{mediaPolicy:failingPolicy}));host.append(media);
@@ -43,6 +47,19 @@ try {
       assert.equal(row.icon.width,34);
       if(row.action){assert.equal(row.action.width,40);assert(row.details.right<=row.action.left);}
     }
+    for(const bubble of await page.locator('.message-document').all()) {
+      const dimensions=await bubble.evaluate(el=>{
+        const card=el.querySelector('.attachment-document').getBoundingClientRect();
+        const box=el.getBoundingClientRect();const meta=el.querySelector('.message-meta').getBoundingClientRect();
+        const marker=el.querySelector('.message-deleted');const date=el.querySelector('.message-deleted-time');
+        return {width:box.width,cardWidth:card.width,metaGap:box.right-meta.right,marker:marker?.getBoundingClientRect().toJSON(),date:date?.getBoundingClientRect().toJSON()};
+      });
+      assert(dimensions.width<=380,'document bubble must not expand to generic 530px limit');
+      assert(dimensions.width-dimensions.cardWidth<=24,'document card fills bubble instead of floating in blank space');
+      assert(dimensions.metaGap<=14,'sent time stays at the bubble edge');
+      if(dimensions.marker) assert(dimensions.marker.height<=34,'deletion metadata stays compact');
+    }
+    assert.equal(await page.locator('.message-document').count(),4);
     const load=page.locator('#retry-fixture .attachment-load');
     await load.click();
     assert.equal(await load.textContent(),'Descargando…');

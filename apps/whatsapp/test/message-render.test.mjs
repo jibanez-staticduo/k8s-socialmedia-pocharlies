@@ -725,6 +725,13 @@ test('documento sin caption no repite el nombre y muestra tamaño (UX #53)', () 
   assert.equal(bubble.querySelector('.message-text'), null);
   assert.equal(bubble.querySelector('.document-name').textContent, 'qa-doc.pdf');
   assert.equal(bubble.querySelector('.document-size').textContent, '13 KB');
+  assert.match(bubble.className, /\bmessage-document\b/);
+  const host = fakeDocument.createElement('section');
+  const message = {id:'stable-doc',type:'DOCUMENT',text:'el informe',attachments:[doc]};
+  for (let pass = 0; pass < 3; pass++) {
+    reconcileMessageList(host,[message],{document:fakeDocument});
+    assert.match(host.querySelector('[data-message-id]').className,/\bmessage-document\b/,'refresh must preserve compact document styling');
+  }
   const captioned = renderer.renderMessage({ id: 'e', type: 'DOCUMENT', text: 'el informe', attachments: [{ ...doc, caption: 'el informe' }] }, { document: fakeDocument });
   assert.equal(treeText(captioned.querySelector('.message-text')), 'el informe');
 });

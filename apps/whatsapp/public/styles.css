@@ -1161,12 +1161,32 @@ body[data-theme="light"] .sender-palette-7 { color: #a35a05; }
 .attachment-document {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 40px;
-  width: min(320px, 100%);
-  min-width: min(260px, 100%);
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   align-items: center;
   gap: 9px;
-  padding: 3px 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.message.message-document { width: 360px; min-width: 0; }
+.message-document > .message-text { margin: 2px 2px 8px; }
+.message-document > .attachment + .attachment { margin-top: 6px; }
+.message-document .attachment-caption { padding: 5px 2px 0; }
+.message .message-deleted {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  margin-bottom: 6px;
+}
+.message .message-deleted .message-deleted-time {
+  display: inline;
+  margin: 0;
+  text-align: left;
+  color: inherit;
 }
 
 .document-icon {
@@ -1175,8 +1195,8 @@ body[data-theme="light"] .sender-palette-7 { color: #a35a05; }
   height: 40px;
   place-items: center;
   border-radius: 5px;
-  background: rgba(33, 192, 99, .18);
-  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--muted-strong);
   font-size: 9px;
   font-weight: 700;
 }
@@ -1217,7 +1237,16 @@ body[data-theme="light"] .sender-palette-7 { color: #a35a05; }
   overflow-wrap: anywhere;
 }
 
-.document-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.document-name {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-weight: 500;
+  line-height: 19px;
+}
 
 .document-size { color: var(--muted); font-size: 11px; }
 

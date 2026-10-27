@@ -674,7 +674,9 @@ function createAudioPlayer(url, name, parent, documentRef) {
 
 function createDocumentCard(attachment, url, name, documentRef) {
   const card = makeElement(documentRef, 'div', 'attachment-document');
-  const icon = makeElement(documentRef, 'span', 'document-icon', 'DOC');
+  const extension = name.split('.').pop();
+  const badge = name.includes('.') && /^[a-z0-9]{1,5}$/i.test(extension) ? extension.toUpperCase() : 'DOC';
+  const icon = makeElement(documentRef, 'span', 'document-icon', badge);
   icon.setAttribute('aria-hidden', 'true');
   const details = makeElement(documentRef, 'span', 'document-details');
   details.append(makeElement(documentRef, 'strong', 'document-name', name));
@@ -1178,6 +1180,12 @@ function messageBubbleClass(message) {
   const classes = ['message', message?.fromMe === true ? 'from-me' : 'incoming'];
   if (message?.isFirstInGroup) classes.push('group-start');
   if (message?.isLastInGroup) classes.push('group-end');
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+  if (attachments.length && attachments.every(attachment => getAttachmentKind(attachment) === 'document')
+      && !['contact', 'poll', 'event'].includes(metadata.kind) && !message?.linkPreview) {
+    classes.push('message-document');
+  }
   return classes.join(' ');
 }
 
@@ -1197,12 +1205,11 @@ export function renderMessage(message, { document: documentRef = globalThis.docu
     const marker = makeElement(documentRef, 'div', 'message-preservation-marker message-deleted', 'Mensaje eliminado');
     const deletedAt = parseTimestamp(message?.deletedAt);
     if (deletedAt) {
-      marker.append(makeElement(documentRef, 'span', '', ' · '));
       const when = makeElement(documentRef, 'time', 'message-deleted-time', new Intl.DateTimeFormat('es-ES', { dateStyle: 'short', timeStyle: 'short' }).format(deletedAt));
       when.dateTime = deletedAt.toISOString();
       when.title = 'Fecha en que SocialMedia registró el borrado';
       marker.append(when);
-    } else marker.append(makeElement(documentRef, 'span', '', ' · Fecha no disponible'));
+    } else marker.append(makeElement(documentRef, 'span', '', 'Fecha no disponible'));
     bubble.append(marker);
   }
   if (metadata.kind === 'contact' && Array.isArray(metadata.contacts)) {
