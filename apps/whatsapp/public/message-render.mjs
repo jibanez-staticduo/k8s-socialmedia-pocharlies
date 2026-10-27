@@ -682,6 +682,10 @@ function createDocumentCard(attachment, url, name, documentRef) {
   const size = attachmentSizeBytes(attachment);
   if (size) details.append(makeElement(documentRef, 'span', 'document-size', formatMediaSize(size)));
   const link = makeDownloadLink(url, name, documentRef);
+  link.textContent = 'Descargar';
+  link.setAttribute('aria-label', `Descargar ${name}`);
+  link.title = `Descargar ${name}`;
+  details.title = name;
   card.append(icon, details, link);
   return card;
 }
