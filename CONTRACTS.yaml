@@ -114,6 +114,9 @@ contracts:
     page of 50 using a real observed cursor in milliseconds. Never sends a chat message or creates
     a fabricated cursor. Response {chatId,status:requested|recovered|no_anchor|cooldown,requested,
     placeholderRequests,recovered,retryAfterMs?}; counters report performed work, not provider delivery.
+    Optional messageIds selects 1-10 distinct observed unavailable message IDs instead, scoped to
+    the same account/chat. This mode never requests a history page, excludes edited/deleted/hidden
+    messages, and reports per-ID outcomes separately from DB-confirmed recovery with a 60s cooldown.
     Concurrent calls coalesce; per-chat requests are limited to once per minute. The app exposes
     only account, chat, status and counters, maintains account/chat isolation and offers retry.
     Existing captured content is retained after remote revoke with isDeleted; local deleted_for_me

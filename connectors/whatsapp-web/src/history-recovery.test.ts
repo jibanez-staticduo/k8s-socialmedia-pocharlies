@@ -399,6 +399,7 @@ test('capability delete-for-me remains hidden while keeping the saved message an
 test('history recovery HTTP requires authentication and a chat, and returns the actual result', async () => {
   const secret = 'history-controller-test-secret';
   const calls: string[] = [];
+  const targeted: unknown[] = [];
   const app = express();
   app.use(express.json());
   app.use(
@@ -416,6 +417,10 @@ test('history recovery HTTP requires authentication and a chat, and returns the 
             placeholderRequests: 0,
             recovered: 0,
           };
+        },
+        recoverUnavailableMessages: async (chatId: string, messageIds: string[]) => {
+          targeted.push({chatId,messageIds});
+          return {chatId,outcomes:messageIds.map(id=>({messageId:id,status:'requested'}))};
         },
       } as any,
       { getCurrentQR: () => null } as any,
@@ -449,6 +454,14 @@ test('history recovery HTTP requires authentication and a chat, and returns the 
     assert.equal(response.status, 200);
     assert.equal((await response.json()).status, 'no_anchor');
     assert.deepEqual(calls, ['123@lid']);
+    assert.equal((await request({chatId:'123@lid',messageIds:['missing']},false)).status,401);
+    for (const messageIds of [[],['duplicate','duplicate'],[null],[''],Array(11).fill('id')]) {
+      assert.equal((await request({chatId:'123@lid',messageIds},true)).status,400);
+    }
+    const selective = await request({chatId:'123@lid',messageIds:['missing']},true);
+    assert.equal(selective.status,200);
+    assert.deepEqual(targeted,[{chatId:'123@lid',messageIds:['missing']}]);
+    assert.deepEqual(calls,['123@lid'],'targeted recovery never calls the broad history scan');
   } finally {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

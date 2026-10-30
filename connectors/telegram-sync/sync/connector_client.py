@@ -43,6 +43,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# All GET routes on the account's shared client use the same gate, including
+# history, media recovery and avatars, so concurrent tasks cannot burst reads.
+READ_INTERVAL = 1.0
+
 
 def retry_after(response: httpx.Response) -> float:
     value = response.headers.get("Retry-After", "")
@@ -81,6 +85,8 @@ class ConnectorClient:
         self.account = account
         self.media_timeout = media_timeout
         self._cooldown_until = 0.0
+        self._next_read_at = 0.0
+        self._read_lock = asyncio.Lock()
         self._client = httpx.AsyncClient(timeout=timeout)
 
     @classmethod
@@ -108,15 +114,20 @@ class ConnectorClient:
 
     async def _get_v1(self, path: str, params: Optional[dict] = None,
                       timeout: float | None = None) -> httpx.Response:
-        while self._cooldown_until > time.monotonic():
-            await asyncio.sleep(self._cooldown_until - time.monotonic())
-        # Authed GET: connector sees an empty body -> sign "{}"
-        headers = self._sign({})
-        options = {"timeout": timeout} if timeout is not None else {}
-        response = await self._client.get(f"{self.base_url}/api/v1{path}", params=params,
-                                          headers=headers, **options)
-        if response.status_code == 429 or (response.status_code == 503 and "Retry-After" in response.headers):
-            self._cooldown_until = max(self._cooldown_until, time.monotonic() + retry_after(response))
+        async with self._read_lock:
+            delay = max(self._cooldown_until, self._next_read_at) - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            # Authed GET: connector sees an empty body -> sign "{}"
+            headers = self._sign({})
+            options = {"timeout": timeout} if timeout is not None else {}
+            try:
+                response = await self._client.get(f"{self.base_url}/api/v1{path}", params=params,
+                                                  headers=headers, **options)
+            finally:
+                self._next_read_at = time.monotonic() + READ_INTERVAL
+            if response.status_code == 429 or (response.status_code == 503 and "Retry-After" in response.headers):
+                self._cooldown_until = max(self._cooldown_until, time.monotonic() + retry_after(response))
         return response
 
     # --- Reads ---------------------------------------------------------------

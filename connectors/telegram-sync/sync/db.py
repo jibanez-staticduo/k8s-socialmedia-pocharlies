@@ -45,6 +45,23 @@ CREATE TABLE IF NOT EXISTS telegram_sync_state (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS telegram_history_state (
+    account TEXT NOT NULL,
+    chat_id BIGINT NOT NULL,
+    chat_title TEXT,
+    last_message_id BIGINT NOT NULL DEFAULT 0,
+    offset_id BIGINT,
+    upper_message_id BIGINT,
+    total_imported BIGINT NOT NULL DEFAULT 0,
+    completed BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (account, chat_id),
+    CHECK ((offset_id IS NULL) = (upper_message_id IS NULL))
+);
+
+-- Legacy state cannot prove account ownership or contiguous coverage. Preserve
+-- it without seeding history coverage; each account starts its own safe scan.
+
 CREATE INDEX IF NOT EXISTS idx_messages_tg_transcription
 ON messages ((metadata->>'transcription_status'))
 WHERE platform = 'telegram'
@@ -435,7 +452,57 @@ async def fail_transcription(pool: asyncpg.Pool, msg_id: MessageId, error: str, 
             )
 
 
-# --- Sync state (unchanged) --------------------------------------------------
+# --- Historical coverage (independent of realtime and legacy sync state) -----
+
+async def get_history_state(pool: asyncpg.Pool, chat_id: int) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM telegram_history_state WHERE account = $1 AND chat_id = $2",
+            ACCOUNT, chat_id,
+        )
+    return dict(row) if row else None
+
+
+async def checkpoint_history_page(
+    pool: asyncpg.Pool, chat_id: int, chat_title: str | None,
+    offset_id: int, upper_message_id: int, batch_count: int,
+) -> None:
+    """Called only after every message in the page has committed successfully."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO telegram_history_state "
+            "(account, chat_id, chat_title, offset_id, upper_message_id, total_imported) "
+            "VALUES ($1, $2, $3, $4, $5, $6) "
+            "ON CONFLICT (account, chat_id) DO UPDATE SET "
+            "chat_title = EXCLUDED.chat_title, offset_id = EXCLUDED.offset_id, "
+            "upper_message_id = EXCLUDED.upper_message_id, "
+            "total_imported = telegram_history_state.total_imported + EXCLUDED.total_imported, "
+            "completed = FALSE, updated_at = NOW()",
+            ACCOUNT, chat_id, chat_title, offset_id, upper_message_id, batch_count,
+        )
+
+
+async def complete_history(
+    pool: asyncpg.Pool, chat_id: int, chat_title: str | None,
+    upper_message_id: int, batch_count: int,
+) -> None:
+    """Advance coverage and clear the partial scan in one committed statement."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO telegram_history_state "
+            "(account, chat_id, chat_title, last_message_id, total_imported, completed) "
+            "VALUES ($1, $2, $3, $4, $5, TRUE) "
+            "ON CONFLICT (account, chat_id) DO UPDATE SET "
+            "chat_title = EXCLUDED.chat_title, "
+            "last_message_id = GREATEST(telegram_history_state.last_message_id, EXCLUDED.last_message_id), "
+            "offset_id = NULL, upper_message_id = NULL, completed = TRUE, "
+            "total_imported = telegram_history_state.total_imported + EXCLUDED.total_imported, "
+            "updated_at = NOW()",
+            ACCOUNT, chat_id, chat_title, upper_message_id, batch_count,
+        )
+
+
+# --- Legacy sync state ------------------------------------------------------
 
 async def get_sync_state(pool: asyncpg.Pool, chat_id: int) -> dict | None:
     async with pool.acquire() as conn:

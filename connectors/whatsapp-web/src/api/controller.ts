@@ -1887,7 +1887,16 @@ export function createRouter(
           res.status(400).json({ error: 'chatId required', failureClass: 'invalid_request' });
           return;
         }
-        res.json(await client.recoverChatHistory(chatId));
+        if (req.body.messageIds !== undefined) {
+          const ids = req.body.messageIds;
+          if (!Array.isArray(ids) || ids.length < 1 || ids.length > 10
+              || ids.some(id => typeof id !== 'string' || !id.trim() || id.length > 200)
+              || new Set(ids).size !== ids.length) {
+            res.status(400).json({ error: 'messageIds must contain 1 to 10 distinct message IDs', failureClass: 'invalid_request' });
+            return;
+          }
+          res.json(await client.recoverUnavailableMessages(chatId, ids));
+        } else res.json(await client.recoverChatHistory(chatId));
       } catch (error) {
         mutationErrorResponse(res, error, 'recover chat history');
       }

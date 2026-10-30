@@ -551,6 +551,18 @@ export interface ChatHistoryRecoveryResult {
   retryAfterMs?: number;
 }
 
+export interface UnavailableMessageRecoveryResult {
+  chatId: string;
+  status: 'requested' | 'recovered' | 'unresolved' | 'no_match' | 'cooldown';
+  requested: number;
+  recovered: number;
+  retryAfterMs?: number;
+  outcomes: Array<{
+    messageId: string;
+    outcome: 'not_eligible' | 'no_key' | 'unresolved' | 'requested' | 'already_pending' | 'received' | 'failed' | 'recovered';
+  }>;
+}
+
 export type WhatsAppSendFailureClass =
   | 'timeout'
   | 'missing_session'
@@ -1721,6 +1733,7 @@ export class BaileysClient extends EventEmitter {
   private historyBackfillRequestedUntil = 0;
   private readonly historyRecoveryAnchors = new Map<string, WAMessage>();
   private readonly historyRecoveryRequestedAt = new Map<string, number>();
+  private readonly unavailableRecoveryRequestedAt = new Map<string, number>();
   private readonly historyRecoveryInFlight = new Map<string, Promise<ChatHistoryRecoveryResult>>();
   private readonly receiptHistoryRecovery = new ReceiptHistoryRecovery({
     anchor: receiptRecoveryAnchor,
@@ -2370,6 +2383,8 @@ export class BaileysClient extends EventEmitter {
         metadata: {
           participants: participants.map(p => this.normalizeJid(typeof p === 'string' ? p : p.id)),
           action,
+          ...(evt.author === undefined ? {} : { author: evt.author }),
+          ...(evt.authorPn === undefined ? {} : { authorPn: evt.authorPn }),
         },
       });
       this.groupMetaCache.delete(id);
@@ -8581,6 +8596,123 @@ export class BaileysClient extends EventEmitter {
       const message = item?.message;
       if (message?.key) this.rememberHistoryRecoveryAnchor(message as WAMessage);
     }
+  }
+
+  /**
+   * Retry at most ten explicitly selected, still unavailable messages. Provider
+   * acknowledgements are reported separately from confirmed content recovery.
+   * This never requests a history page or changes the authentication state.
+   */
+  async recoverUnavailableMessages(
+    chatId: string,
+    messageIds: string[]
+  ): Promise<UnavailableMessageRecoveryResult> {
+    const bare = typeof chatId === 'string' ? stripAccountKey(chatId) : '';
+    if (!/^\d+(?:-\d+)?@(?:lid|c\.us|s\.whatsapp\.net|g\.us)$/.test(bare))
+      throw new MessageMutationError('Invalid chatId', 400, 'invalid_request');
+    if (
+      !Array.isArray(messageIds) || messageIds.length < 1 || messageIds.length > 10 ||
+      messageIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(id)) ||
+      new Set(messageIds).size !== messageIds.length
+    )
+      throw new MessageMutationError('Invalid messageIds', 400, 'invalid_request');
+    if (!this.ingest) throw new MessageMutationError('History ingest disabled', 403, 'forbidden');
+    if (!this.sock || !this.isConnected())
+      throw new MessageMutationError('WhatsApp not connected', 503, 'not_connected');
+    const account = connectorAccount();
+    const chat = await canonicalConversationId(this.normalizeJid(bare));
+    const ids = [...new Set([chat, bare, this.normalizeJid(bare), this.toRawJid(chat)])].map(accountKey);
+    const scopedIds = messageIds.map(accountKey);
+    const cooldownKeys = messageIds.map(id => `${account}:${chat}:${id}`);
+    const now = Date.now();
+    const retryAfterMs = Math.max(0, ...cooldownKeys.map(key =>
+      60000 - (now - (this.unavailableRecoveryRequestedAt.get(key) || 0))));
+    if (retryAfterMs > 0)
+      return { chatId: chat, status: 'cooldown', requested: 0, recovered: 0, retryAfterMs, outcomes: [] };
+    for (const key of cooldownKeys) this.unavailableRecoveryRequestedAt.set(key, now);
+    while (this.unavailableRecoveryRequestedAt.size > 10000)
+      this.unavailableRecoveryRequestedAt.delete(this.unavailableRecoveryRequestedAt.keys().next().value!);
+
+    await ensureHistoryTables();
+    const pool = getPool();
+    const rows = (await pool.query<{
+      wa_message_id: string;
+      conversation_id: string;
+      remote_jid: string | null;
+      from_me: boolean;
+      participant_jid: string | null;
+    }>(
+      `SELECT m.wa_message_id, m.conversation_id, k.remote_jid, k.from_me, k.participant_jid
+         FROM messages m
+         LEFT JOIN whatsapp_message_keys k ON k.wa_message_id = m.wa_message_id
+           AND k.conversation_id = m.conversation_id
+        WHERE m.account = $1 AND m.platform = 'whatsapp'
+          AND m.conversation_id = ANY($2::text[])
+          AND m.wa_message_id = ANY($3::text[])
+          AND m.message_type = ANY($4::text[])
+          AND NULLIF(m.content, '') IS NULL
+          AND NOT COALESCE(m.is_edited, false)
+          AND NOT COALESCE(m.is_deleted, false)
+          AND (m.metadata->>'deleted_for_me') IS DISTINCT FROM 'true'
+        LIMIT 10`,
+      [account, ids, scopedIds, UNAVAILABLE_MESSAGE_TYPES]
+    )).rows;
+    const result: UnavailableMessageRecoveryResult = {
+      chatId: chat, status: rows.length ? 'unresolved' : 'no_match', requested: 0, recovered: 0,
+      outcomes: messageIds.map(messageId => ({ messageId, outcome: 'not_eligible' })),
+    };
+    for (const row of rows) {
+      const messageId = stripAccountKey(row.wa_message_id);
+      const outcome = result.outcomes.find(item => item.messageId === messageId);
+      if (!outcome) continue;
+      outcome.outcome = 'unresolved';
+      try {
+        const message = await getRawWAMessage(messageId, stripAccountKey(row.conversation_id));
+        // Payload lookup is scoped too; the original provider chat must agree
+        // with an observed alias before the payload can be reprojected.
+        if (message && hasUserMessageContent(message.message) && message.key.remoteJid &&
+          ids.includes(accountKey(this.normalizeJid(message.key.remoteJid)))) {
+          await this.ingestMessage(message, {
+            source: 'baileys_history_sync', publishEvent: false, storeMedia: true,
+          });
+          continue;
+        }
+        if (!row.remote_jid || !this.sock?.requestPlaceholderResend) {
+          outcome.outcome = 'no_key';
+          continue;
+        }
+        const response = await this.sock.requestPlaceholderResend({
+          id: messageId, remoteJid: row.remote_jid, fromMe: !!row.from_me,
+          participant: row.participant_jid || undefined,
+        });
+        outcome.outcome = response === 'RESOLVED' ? 'received' : response ? 'requested' : 'already_pending';
+        if (outcome.outcome === 'requested') result.requested += 1;
+      } catch {
+        // Do not expose provider errors containing message content or contacts.
+        outcome.outcome = 'failed';
+      }
+    }
+    if (rows.length) {
+      const confirmed = (await pool.query<{ wa_message_id: string }>(
+        `SELECT m.wa_message_id FROM messages m
+          WHERE m.account = $1 AND m.platform = 'whatsapp'
+            AND m.conversation_id = ANY($2::text[])
+            AND m.wa_message_id = ANY($3::text[])
+            AND NOT (m.message_type = ANY($4::text[]))
+            AND (m.message_type <> 'TEXT' OR NULLIF(m.content, '') IS NOT NULL)
+            AND (m.metadata->>'contentUnavailable') IS DISTINCT FROM 'true'
+            AND NOT COALESCE(m.is_deleted, false)
+            AND (m.metadata->>'deleted_for_me') IS DISTINCT FROM 'true'`,
+        [account, ids, rows.map(row => row.wa_message_id), UNAVAILABLE_MESSAGE_TYPES]
+      )).rows;
+      for (const row of confirmed) {
+        const outcome = result.outcomes.find(item => item.messageId === stripAccountKey(row.wa_message_id));
+        if (outcome) outcome.outcome = 'recovered';
+      }
+      result.recovered = result.outcomes.filter(item => item.outcome === 'recovered').length;
+      result.status = result.requested ? 'requested' : result.recovered ? 'recovered' : 'unresolved';
+    }
+    return result;
   }
 
   /** Recover saved payloads first; phone requests require a real observed cursor. */

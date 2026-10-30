@@ -5,18 +5,21 @@ recovered here within one cycle.
 
 Session-less: enumerates chats via GET /api/v1/dialogs and pages each chat's
 history via GET /api/v1/messages/:chatId?limit&offsetId (newest-first,
-older-than cursor). Resume watermark per chat = telegram_sync_state.last_message_id.
+older-than cursor). Durable partial scans and complete coverage are separate
+fields in telegram_history_state, keyed by account and chat.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import random
+import time
 
 import asyncpg
 
 from sync import db, mapping, media_download, avatar_sync
-from sync.connector_client import ConnectorClient
+from sync.connector_client import ConnectorClient, is_throttled, retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -29,64 +32,86 @@ STARTUP_DELAY = 5               # let NATS realtime attach first
 # no-progress + empty-page + watermark checks are the real terminators; normal
 # catch-up finishes far under this. ~100k messages/chat/cycle.
 MAX_PAGES_PER_CHAT = 1000
+MAX_PAGE_RETRIES = 3
+PAGE_RETRY_BUDGET = 5 * 60       # defer longer flood waits to a later cycle
+RETRY_JITTER = 1.0              # always additive, never shorten Retry-After
 # Download historical media inline (parity with the old sync). Tunable because a
 # first full backfill of a media-heavy account is the heaviest load on the
 # connector's single session.
 HISTORY_MEDIA = os.environ.get("HISTORY_MEDIA", "true").lower() == "true"
 
 
+async def _get_page(connector: ConnectorClient, chat_id: str, offset_id: int | None) -> list[dict]:
+    """Retry the identical page within a bounded wait budget."""
+    deadline = time.monotonic() + PAGE_RETRY_BUDGET
+    for attempt in range(MAX_PAGE_RETRIES + 1):
+        try:
+            return await connector.get_messages(chat_id, limit=BATCH_SIZE, offset_id=offset_id)
+        except Exception as error:
+            if not is_throttled(error) or attempt == MAX_PAGE_RETRIES:
+                raise
+            delay = retry_after(error.response) + random.uniform(0, RETRY_JITTER)
+            if time.monotonic() + delay > deadline:
+                raise
+            await asyncio.sleep(delay)
+    raise RuntimeError("history retry budget exhausted")
+
+
 async def import_chat(connector: ConnectorClient, pool: asyncpg.Pool, dialog: dict) -> None:
-    """Import messages newer than the stored watermark for a single chat."""
+    """Resume a bounded newest-to-oldest scan without losing older coverage."""
     chat_id = str(dialog.get("id"))
     chat_title = dialog.get("name")
 
-    state = await db.get_sync_state(pool, int(chat_id))
+    state = await db.get_history_state(pool, int(chat_id))
     min_id = int(state["last_message_id"]) if state else 0
-
-    offset_id: int | None = None
+    offset_id = int(state["offset_id"]) if state and state["offset_id"] is not None else None
+    upper_id = int(state["upper_message_id"]) if state and state["upper_message_id"] is not None else None
     new_count = 0
-    highest_seen = min_id
-    stop = False        # reached the watermark / true start → range fully imported
-    aborted = False     # error or page cap → range incomplete, do NOT advance watermark
-    pages = 0
+    complete = False
 
-    while not stop:
-        if pages >= MAX_PAGES_PER_CHAT:
-            aborted = True
-            logger.warning("%s (%s): hit page cap (%s) — will resume next cycle",
-                           chat_title, chat_id, MAX_PAGES_PER_CHAT)
-            break
-        pages += 1
+    for _ in range(MAX_PAGES_PER_CHAT):
         try:
-            msgs = await connector.get_messages(chat_id, limit=BATCH_SIZE, offset_id=offset_id)
+            msgs = await _get_page(connector, chat_id, offset_id)
         except Exception as e:
             logger.warning("get_messages failed for %s (%s): %s", chat_title, chat_id, e)
-            aborted = True
             break
         if not msgs:
-            break  # paged to the true start of history → complete
+            await db.complete_history(pool, int(chat_id), chat_title, upper_id or min_id, 0)
+            complete = True
+            break
 
-        for m in msgs:  # newest-first (descending)
-            tg_id = mapping._int_or_none(m.get("telegramMessageId"))
-            if tg_id is None:
-                continue
+        ids = [mapping._int_or_none(m.get("telegramMessageId")) for m in msgs]
+        # A malformed or non-progressing page cannot establish contiguous coverage.
+        if any(tg_id is None or tg_id <= 0 for tg_id in ids):
+            logger.warning("Invalid history page for chat %s; preserving checkpoint", chat_id)
+            break
+        if ids != sorted(set(ids), reverse=True) or (offset_id is not None and ids[0] >= offset_id):
+            logger.warning("Non-progressing history page for chat %s; preserving checkpoint", chat_id)
+            break
+        page_upper = upper_id if upper_id is not None else ids[0]
+        page_new = 0
+        stop = False
+        failed = False
+        for m, tg_id in zip(msgs, ids):
             if tg_id <= min_id:
                 stop = True
                 break
-
             kwargs = mapping.to_insert_kwargs(m)
-            if kwargs is None:
-                continue
+            if kwargs is None or kwargs["chat_id"] != int(chat_id):
+                failed = True
+                break
             try:
                 message_id, is_new = await db.insert_message_ex(pool, **kwargs)
             except Exception as e:
                 logger.error("history insert failed (chat %s msg %s): %s", chat_id, tg_id, e)
-                continue
+                failed = True
+                break
             if message_id is None:
-                continue
-            highest_seen = max(highest_seen, tg_id)
+                failed = True
+                break
             if is_new:
                 new_count += 1
+                page_new += 1
             if (HISTORY_MEDIA
                     and kwargs["message_type"] in media_download.DOWNLOADABLE_TYPES):
                 try:
@@ -96,29 +121,22 @@ async def import_chat(connector: ConnectorClient, pool: asyncpg.Pool, dialog: di
                 except Exception as e:
                     logger.warning("history media error (msg %s): %s", message_id, e)
 
-        # Advance the cursor to the oldest id in this page and page OLDER. Do NOT
-        # stop on a short page: Telegram/connector can return < limit even when
-        # more history exists (server windowing + null-parsed drops). The
-        # no-progress guard (oldest not strictly older than the cursor) is the
-        # hard infinite-loop backstop.
-        oldest = mapping._int_or_none(msgs[-1].get("telegramMessageId"))
-        if oldest is None:
+        if failed:
+            # Earlier inserts may have committed; replaying the entire page is
+            # idempotent. Never skip the failed message by checkpointing past it.
             break
-        if offset_id is not None and oldest >= offset_id:
+        # insert_message_ex returns only after its transaction commits. A crash
+        # before this checkpoint causes harmless replay, never skipped offsets.
+        if stop:
+            await db.complete_history(pool, int(chat_id), chat_title, page_upper, page_new)
+            complete = True
             break
-        offset_id = oldest
+        await db.checkpoint_history_page(pool, int(chat_id), chat_title, ids[-1], page_upper, page_new)
+        offset_id, upper_id = ids[-1], page_upper
 
-    # Watermark = highest id imported, but ONLY advance it once the whole range
-    # down to the previous watermark is contiguously imported. We page newest→old,
-    # so on an aborted scan the OLDER portion is still missing; advancing then
-    # would skip it forever. Leave the watermark put and re-scan next cycle
-    # (idempotent via ON CONFLICT) when aborted.
-    if not aborted and highest_seen > min_id:
-        await db.update_sync_state(pool, int(chat_id), chat_title, highest_seen, new_count)
-        await db.mark_chat_completed(pool, int(chat_id))
     if new_count:
         logger.info("Backfilled %s: %s new messages%s", chat_title, new_count,
-                    " (partial — capped)" if aborted else "")
+                    " (partial; checkpoint retained)" if not complete else "")
 
 
 async def run(pool: asyncpg.Pool, connector: ConnectorClient) -> None:

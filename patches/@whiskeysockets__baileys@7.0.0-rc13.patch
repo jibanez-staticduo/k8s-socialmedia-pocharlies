@@ -157,7 +157,7 @@ index b8694266c6ad92dd96434425374dc04d3c70ff0e..1f38e03cc012869f8d335b711a31b7b9
          syncType: item.syncType,
          progress: item.progress
 diff --git a/lib/Utils/process-message.js b/lib/Utils/process-message.js
-index 37449dbf5ea239040b10828e8c76753ae0c0060c..7b5bd9be6b3cb1c2e577521378157298d4e3bc4a 100644
+index 37449dbf5ea239040b10828e8c76753ae0c0060c..8e231f8ef1c591c6d54e62de161c9d6483b28fbe 100644
 --- a/lib/Utils/process-message.js
 +++ b/lib/Utils/process-message.js
 @@ -267,6 +267,10 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
@@ -171,6 +171,42 @@ index 37449dbf5ea239040b10828e8c76753ae0c0060c..7b5bd9be6b3cb1c2e577521378157298
                      ev.emit('messaging-history.set', {
                          ...data,
                          isLatest: histNotification.syncType !== proto.HistorySync.HistorySyncType.ON_DEMAND ? isLatest : undefined,
+@@ -507,8 +511,33 @@ const processMessage = async (message, { shouldProcessHistoryMsg, placeholderRes
+         const participantsIncludesMe = () => participants.find(jid => areJidsSameUser(meId, jid.phoneNumber)); // ADD SUPPORT FOR LID
+         switch (message.messageStubType) {
+             case WAMessageStubType.GROUP_PARTICIPANT_CHANGE_NUMBER:
+-                participants = message.messageStubParameters.map((a) => JSON.parse(a)) || [];
+-                emitParticipantsUpdate('modify');
++                // Live modify notifications carry raw JIDs; history may carry JSON participants.
++                // Preserve the supplied order (old/new identities), without deriving missing IDs.
++                participants = (Array.isArray(message.messageStubParameters) ? message.messageStubParameters : []).flatMap(parameter => {
++                    if (typeof parameter !== 'string') {
++                        return [];
++                    }
++                    const isParticipantJid = id => typeof id === 'string' && /^\d+(?:_\d+)?(?::\d+)?@(s\.whatsapp\.net|c\.us|lid|hosted|hosted\.lid)$/.test(id);
++                    let participant;
++                    if (isParticipantJid(parameter)) {
++                        participant = { id: parameter };
++                    }
++                    else {
++                        try {
++                            participant = JSON.parse(parameter);
++                        }
++                        catch {
++                            return [];
++                        }
++                        if (typeof participant === 'string') {
++                            participant = { id: participant };
++                        }
++                    }
++                    return participant && !Array.isArray(participant) && isParticipantJid(participant.id) ? [participant] : [];
++                });
++                if (participants.length) {
++                    emitParticipantsUpdate('modify');
++                }
+                 break;
+             case WAMessageStubType.GROUP_PARTICIPANT_LEAVE:
+             case WAMessageStubType.GROUP_PARTICIPANT_REMOVE:
 diff --git a/lib/Utils/tc-token-utils.d.ts b/lib/Utils/tc-token-utils.d.ts
 index b6165b8c3a1c1f1b997ed6c13d3fbc24b4a881bb..3510f1c024a1bf031c44e4dd42d5a939e9628d58 100644
 --- a/lib/Utils/tc-token-utils.d.ts
